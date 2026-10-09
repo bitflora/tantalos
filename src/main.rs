@@ -1,15 +1,20 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use glados::evolve::{self, Candidate, Config};
 use glados::level::Level;
+use glados::metrics::{assess, Assessment, Metrics};
 use glados::p2c::Puzzle;
 use glados::regions::RegionGraph;
-use glados::solver::{Model, Problem, Verdict, DEFAULT_MAX_STATES};
+use glados::solver::{Model, Problem, DEFAULT_MAX_STATES};
 use glados::{fixtures, portals, render};
 
 const USAGE: &str = "usage:
   glados info <file.p2c>...     summary, region graph and ASCII map
-  glados solve <file.p2c>...    Tier-0 solver: verdict, shortest plan, portal face classes
+  glados solve <file.p2c>...    Tier-0 solver: verdict, shortest plan, metrics, face classes
+  glados evolve [--seed N] [--pop N] [--gens N] [--budget N] [--keep N] [--out DIR]
+                                search for interesting levels; writes the best + report.md
+                                (default out/evolve-<seed>)
   glados roundtrip <file.p2c>...  check parse -> write reproduces the file byte for byte
   glados fixtures [dir]         write the synthetic test chambers (default fixtures/synthetic)";
 
@@ -18,6 +23,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("info") if args.len() > 1 => args[1..].iter().try_for_each(|f| info(Path::new(f))),
         Some("solve") if args.len() > 1 => args[1..].iter().try_for_each(|f| solve(Path::new(f))),
+        Some("evolve") => run_evolve(&args[1..]),
         Some("roundtrip") if args.len() > 1 => {
             args[1..].iter().try_for_each(|f| roundtrip(Path::new(f)))
         }
@@ -128,22 +134,155 @@ fn solve(path: &Path) -> Result<()> {
             seen
         );
     }
+    let mut model = model;
     let start = std::time::Instant::now();
-    let outcome = model.solve(DEFAULT_MAX_STATES);
+    let assessment = assess(&mut model, DEFAULT_MAX_STATES, 0);
     let took = start.elapsed();
-    match &outcome.verdict {
-        Verdict::Solved(plan) => {
-            println!("  SOLVED in {} actions:", plan.len());
-            for (i, a) in plan.iter().enumerate() {
+    match &assessment {
+        Assessment::Solved(m) => {
+            println!("  SOLVED in {} actions:", m.min_len);
+            for (i, a) in m.plan.iter().enumerate() {
                 println!("    {}. {}", i + 1, model.describe(a));
             }
+            for line in metric_lines(m) {
+                println!("  {line}");
+            }
         }
-        Verdict::Unsolvable => println!("  UNSOLVABLE"),
-        Verdict::Unknown => println!("  UNKNOWN (state budget {DEFAULT_MAX_STATES} hit)"),
+        Assessment::Unsolvable => println!("  UNSOLVABLE"),
+        Assessment::Unknown => println!("  UNKNOWN (state budget {DEFAULT_MAX_STATES} hit)"),
     }
-    println!("  {} states explored in {:.1?}", outcome.states, took);
+    println!("  solved and measured in {took:.1?}");
     println!();
     Ok(())
+}
+
+fn metric_lines(m: &Metrics) -> Vec<String> {
+    vec![
+        format!("score {:.2}", m.score()),
+        format!(
+            "portal trips {}, shortest plans {}, random player wins {:.0}%",
+            m.portal_trips,
+            m.shortest_plans,
+            100.0 * m.random_success
+        ),
+        format!(
+            "{} states, {} dead ends; {} cubes ({} unnecessary); {} face classes ({} necessary)",
+            m.states,
+            m.dead_end_states,
+            m.cubes,
+            m.unnecessary_cubes,
+            m.classes,
+            m.necessary_classes
+        ),
+    ]
+}
+
+fn run_evolve(args: &[String]) -> Result<()> {
+    let mut cfg = Config::default();
+    let mut keep = 5;
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let value = it.next().ok_or(format!("{flag} needs a value"))?;
+        let num = || -> Result<usize> {
+            value
+                .parse()
+                .map_err(|_| format!("{flag}: not a number: {value}").into())
+        };
+        match flag.as_str() {
+            "--seed" => cfg.seed = num()? as u64,
+            "--pop" => cfg.population = num()?.max(2),
+            "--gens" => cfg.generations = num()?,
+            "--budget" => cfg.budget = num()?,
+            "--keep" => keep = num()?,
+            "--out" => out = Some(PathBuf::from(value)),
+            _ => {
+                return Err(format!(
+                    "unknown flag {flag}
+{USAGE}"
+                )
+                .into())
+            }
+        }
+    }
+    let out = out.unwrap_or_else(|| PathBuf::from(format!("out/evolve-{}", cfg.seed)));
+    println!(
+        "evolve: seed {}, population {}, {} generations, budget {}, {} threads",
+        cfg.seed, cfg.population, cfg.generations, cfg.budget, cfg.threads
+    );
+    let start = std::time::Instant::now();
+    let pop = evolve::evolve(&cfg, |s, _| {
+        println!(
+            "  gen {:>3}: {:>4} evaluated, {:>4} solved; best {:>6.2}, mean {:>6.2}",
+            s.generation, s.evaluated, s.solved, s.best, s.mean
+        );
+    });
+    println!("  took {:.1?}", start.elapsed());
+    if pop.is_empty() {
+        return Err("no solvable level found".into());
+    }
+    std::fs::create_dir_all(&out)?;
+    let mut report = format!(
+        "# glados evolve, seed {}
+
+population {}, {} generations, budget {}
+",
+        cfg.seed, cfg.population, cfg.generations, cfg.budget
+    );
+    for (i, c) in pop.iter().take(keep).enumerate() {
+        let name = format!("{:02}.p2c", i + 1);
+        std::fs::write(out.join(&name), c.puzzle.to_p2c())?;
+        report.push_str(&describe_candidate(i + 1, &name, c));
+    }
+    std::fs::write(out.join("report.md"), &report)?;
+    println!(
+        "wrote {} levels and report.md to {}",
+        keep.min(pop.len()),
+        out.display()
+    );
+    Ok(())
+}
+
+fn describe_candidate(rank: usize, file: &str, c: &Candidate) -> String {
+    let level = Level::from_puzzle(&c.puzzle);
+    let model = Model::new(&level).expect("candidates are valid");
+    let mut s = format!(
+        "
+## {rank}. `{file}`: score {:.2} (born in generation {})
+
+size {:?}, ",
+        c.score, c.born, level.size
+    );
+    s.push_str(&metric_lines(&c.metrics)[1..].join("; "));
+    s.push_str(
+        "
+
+Plan:
+",
+    );
+    for (i, a) in c.metrics.plan.iter().enumerate() {
+        s.push_str(&format!(
+            "{}. {}
+",
+            i + 1,
+            model.describe(a)
+        ));
+    }
+    s.push_str(&format!(
+        "
+Regions:
+```
+{}```
+
+```
+{}
+{}```
+",
+        render::describe_regions(&model.graph),
+        render::LEGEND,
+        render::render(&level, &model.graph)
+    ));
+    s
 }
 
 fn roundtrip(path: &Path) -> Result<()> {

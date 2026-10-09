@@ -1,0 +1,83 @@
+//! Random genomes, mutation and the evolutionary search.
+
+use glados::evolve::{evolve, Config};
+use glados::generator::Genome;
+use glados::level::Level;
+use glados::p2c::Puzzle;
+use glados::rng::Rng;
+
+#[test]
+fn rng_range_is_inclusive_and_seeded() {
+    let mut a = Rng::new(42);
+    let mut b = Rng::new(42);
+    let xs: Vec<i32> = (0..1000).map(|_| a.range(-2, 2)).collect();
+    assert!(xs.iter().all(|x| (-2..=2).contains(x)));
+    assert!((-2..=2).all(|v| xs.contains(&v)));
+    assert_eq!(xs, (0..1000).map(|_| b.range(-2, 2)).collect::<Vec<_>>());
+}
+
+#[test]
+fn built_genomes_are_well_formed() {
+    let mut rng = Rng::new(5);
+    let mut built = 0;
+    for _ in 0..300 {
+        let mut g = Genome::random(&mut rng);
+        for _ in 0..rng.range(0, 20) {
+            g.mutate(&mut rng);
+        }
+        let Some(p) = g.build() else { continue };
+        built += 1;
+        let text = p.to_p2c();
+        assert_eq!(Puzzle::parse(&text).unwrap(), p);
+        let level = Level::from_puzzle(&p);
+        assert_eq!(level.mount_problems(), Vec::<String>::new(), "{g:?}");
+        assert!(level.entry().is_some() && level.exit().is_some());
+    }
+    assert!(built > 100, "only {built} of 300 genomes built");
+}
+
+#[test]
+fn genomes_are_seeded() {
+    assert_eq!(
+        Genome::random(&mut Rng::new(9)),
+        Genome::random(&mut Rng::new(9))
+    );
+}
+
+fn small(threads: usize) -> Config {
+    Config {
+        seed: 11,
+        population: 8,
+        generations: 4,
+        budget: 50_000,
+        threads,
+    }
+}
+
+#[test]
+fn evolve_is_deterministic_across_thread_counts() {
+    let summary = |threads| {
+        evolve(&small(threads), |_, _| {})
+            .iter()
+            .map(|c| (c.puzzle.to_p2c(), c.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    let one = summary(1);
+    assert!(!one.is_empty());
+    assert_eq!(one, summary(3));
+}
+
+#[test]
+fn evolve_keeps_its_best() {
+    let mut best = Vec::new();
+    let pop = evolve(&small(2), |s, pop| {
+        assert!(pop.windows(2).all(|w| w[0].score >= w[1].score), "ranked");
+        best.push(s.best);
+    });
+    assert_eq!(best.len(), 5);
+    assert!(best.windows(2).all(|w| w[1] >= w[0]), "{best:?}");
+    assert!(pop.len() <= 8);
+    for c in &pop {
+        assert_eq!(c.score, c.metrics.score());
+    }
+}

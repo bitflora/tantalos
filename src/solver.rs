@@ -144,6 +144,20 @@ pub struct Model {
     exit_inverted: bool,
     /// Per region: where a cube dropped off each of its ledges ends up.
     tosses: Vec<Vec<CubeLoc>>,
+    /// Face classes the search may use. Metrics switch one off to test whether it's needed.
+    pub class_enabled: Vec<bool>,
+}
+
+/// Every state reachable from the start, in BFS order, for metrics.
+pub struct StateSpace {
+    pub states: Vec<State>,
+    /// BFS depth (actions from the start).
+    pub depth: Vec<usize>,
+    /// Successors of each state, one entry per action (indices into `states`).
+    pub next: Vec<Vec<usize>>,
+    pub goal: Vec<bool>,
+    /// False if the state budget ran out; the graph is then only the nearest part.
+    pub complete: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,6 +299,7 @@ impl Model {
         }
         let portals = Portals::build(level, &graph);
         Ok(Model {
+            class_enabled: vec![true; portals.classes.len()],
             exit_inverted: !exit_inputs.is_empty() && exit_door.start_open == Some(true),
             graph,
             portals,
@@ -363,7 +378,8 @@ impl Model {
             let other = s.portals[color.other() as usize];
             for class in &self.portals.classes {
                 let taken = other == Some(class.id) && class.faces.len() == 1;
-                if !held && class.visible_from[r] && s.portals[me] != Some(class.id) && !taken {
+                let usable = self.class_enabled[class.id] && class.visible_from[r];
+                if !held && usable && s.portals[me] != Some(class.id) && !taken {
                     let mut n = s.clone();
                     n.portals[me] = Some(class.id);
                     out.push((
@@ -466,6 +482,45 @@ impl Model {
             verdict: Verdict::Unsolvable,
             states: states.len(),
         }
+    }
+
+    /// Explores every reachable state (up to `max_states`), past goals too: metrics need the
+    /// whole graph to find dead ends.
+    pub fn explore(&self, max_states: usize) -> StateSpace {
+        let mut space = StateSpace {
+            states: vec![self.start.clone()],
+            depth: vec![0],
+            next: Vec::new(),
+            goal: Vec::new(),
+            complete: true,
+        };
+        let mut seen = HashMap::from([(self.start.clone(), 0)]);
+        let mut i = 0;
+        while i < space.states.len() {
+            let s = space.states[i].clone();
+            space.goal.push(self.is_goal(&s));
+            let mut next = Vec::new();
+            for (_, n) in self.successors(&s) {
+                let j = match seen.get(&n) {
+                    Some(&j) => j,
+                    None if space.states.len() >= max_states => {
+                        space.complete = false;
+                        continue;
+                    }
+                    None => {
+                        let j = space.states.len();
+                        seen.insert(n.clone(), j);
+                        space.states.push(n);
+                        space.depth.push(space.depth[i] + 1);
+                        j
+                    }
+                };
+                next.push(j);
+            }
+            space.next.push(next);
+            i += 1;
+        }
+        space
     }
 
     fn loc_name(&self, l: CubeLoc) -> String {

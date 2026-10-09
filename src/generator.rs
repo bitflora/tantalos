@@ -1,0 +1,368 @@
+//! Random Tier-0 chambers as a mutable genome: a heightmap room shaped by platforms and pits,
+//! white patches, cube droppers, floor buttons (all wired to the exit) and two doors on the
+//! outer walls. `Genome::build` turns it into a puzzle via `Builder`.
+//!
+//! Layout rules (keep generated files close to what the editor makes):
+//! - Floor is two voxels thick (`FLOOR`), so pits can be up to two deep.
+//! - Every column is open from its floor up to the ceiling: no overhangs yet.
+//! - Doors sit on the outer walls, droppers on the ceiling, so their backs are outside the
+//!   chamber where the editor puts corridors and dropper bodies.
+//! - Every floor keeps at least two open voxels above it.
+
+use crate::builder::Builder;
+use crate::geom::{Cell, Dir};
+use crate::p2c::Puzzle;
+use crate::rng::Rng;
+
+/// Height of the standing cell over an untouched floor.
+pub const FLOOR: i32 = 2;
+pub const TITLE: &str = "glados generated";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Feature {
+    /// Raise the columns in the box by `height`.
+    Platform {
+        min: [i32; 2],
+        max: [i32; 2],
+        height: i32,
+    },
+    /// Lower the columns in the box by `depth`; goo fills the bottom if `goo`.
+    Pit {
+        min: [i32; 2],
+        max: [i32; 2],
+        depth: i32,
+        goo: bool,
+    },
+    /// Make every face pointing `dir` from an open cell in the box white.
+    White { min: Cell, max: Cell, dir: Dir },
+    /// A ceiling cube dropper over this column.
+    Dropper { at: [i32; 2] },
+    /// A floor button in this column, wired to the exit.
+    Button { at: [i32; 2] },
+}
+
+/// A door on the outer wall `side`, `along` cells from that wall's low end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Door {
+    pub side: Dir,
+    pub along: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Genome {
+    pub size: [i32; 3],
+    pub entry: Door,
+    pub exit: Door,
+    pub features: Vec<Feature>,
+}
+
+fn clip(lo: i32, hi: i32, size: i32) -> Option<(i32, i32)> {
+    let (lo, hi) = (lo.min(hi).max(0), lo.max(hi).min(size - 1));
+    (lo <= hi).then_some((lo, hi))
+}
+
+impl Genome {
+    pub fn random(rng: &mut Rng) -> Genome {
+        let size = [rng.range(5, 10), rng.range(5, 10), FLOOR + rng.range(3, 5)];
+        let mut g = Genome {
+            size,
+            entry: random_door(rng, size),
+            exit: random_door(rng, size),
+            features: Vec::new(),
+        };
+        let counts = [
+            rng.range(0, 3),
+            rng.range(0, 2),
+            rng.range(1, 4),
+            rng.range(0, 2),
+            rng.range(0, 2),
+        ];
+        for (kind, &n) in counts.iter().enumerate() {
+            for _ in 0..n {
+                let f = g.random_feature(rng, kind);
+                g.features.push(f);
+            }
+        }
+        g
+    }
+
+    fn random_column(&self, rng: &mut Rng) -> [i32; 2] {
+        [
+            rng.range(0, self.size[0] - 1),
+            rng.range(0, self.size[1] - 1),
+        ]
+    }
+
+    fn random_rect(&self, rng: &mut Rng) -> ([i32; 2], [i32; 2]) {
+        let a = self.random_column(rng);
+        let w = [rng.range(0, 3), rng.range(0, 3)];
+        (a, [a[0] + w[0], a[1] + w[1]])
+    }
+
+    /// `kind`: 0 platform, 1 pit, 2 white, 3 dropper, 4 button.
+    fn random_feature(&self, rng: &mut Rng, kind: usize) -> Feature {
+        match kind {
+            0 => {
+                let (min, max) = self.random_rect(rng);
+                Feature::Platform {
+                    min,
+                    max,
+                    height: rng.range(1, 3),
+                }
+            }
+            1 => {
+                let (min, max) = self.random_rect(rng);
+                Feature::Pit {
+                    min,
+                    max,
+                    depth: rng.range(1, 2),
+                    goo: rng.chance(0.5),
+                }
+            }
+            2 => {
+                let dir = *rng.pick(&Dir::ALL);
+                let mut min = [0; 3];
+                let mut max = [0; 3];
+                for a in 0..3 {
+                    let s = self.size[a];
+                    let (lo, hi) = (rng.range(0, s - 1), rng.range(0, s - 1));
+                    min[a] = lo.min(hi);
+                    max[a] = lo.max(hi);
+                }
+                // Mostly reach the outer surface the patch faces, so it paints something.
+                if rng.chance(0.6) {
+                    let a = dir.axis();
+                    if dir.is_positive() {
+                        max[a] = self.size[a] - 1;
+                    } else {
+                        min[a] = 0;
+                    }
+                }
+                Feature::White { min, max, dir }
+            }
+            3 => Feature::Dropper {
+                at: self.random_column(rng),
+            },
+            _ => Feature::Button {
+                at: self.random_column(rng),
+            },
+        }
+    }
+
+    pub fn mutate(&mut self, rng: &mut Rng) {
+        match rng.below(20) {
+            0..=5 => {
+                let kind = rng.below(5);
+                let f = self.random_feature(rng, kind);
+                self.features.push(f);
+            }
+            6..=8 if !self.features.is_empty() => {
+                let i = rng.below(self.features.len());
+                self.features.remove(i);
+            }
+            9 => self.entry = random_door(rng, self.size),
+            10 => self.exit = random_door(rng, self.size),
+            11 => {
+                let a = rng.below(2);
+                self.size[a] = (self.size[a] + if rng.chance(0.5) { 1 } else { -1 }).clamp(4, 12);
+            }
+            _ if !self.features.is_empty() => {
+                let i = rng.below(self.features.len());
+                tweak(&mut self.features[i], rng);
+            }
+            _ => {}
+        }
+    }
+
+    /// Floor height of each column (standing z) and whether it's goo, `[x][y]`.
+    fn heightmap(&self) -> (Vec<Vec<i32>>, Vec<Vec<bool>>) {
+        let [sx, sy, sz] = self.size;
+        let top = sz - 1;
+        let mut h = vec![vec![FLOOR; sy as usize]; sx as usize];
+        let mut goo = vec![vec![false; sy as usize]; sx as usize];
+        for f in &self.features {
+            let (min, max, delta, wet) = match *f {
+                Feature::Platform { min, max, height } => (min, max, height, false),
+                Feature::Pit {
+                    min,
+                    max,
+                    depth,
+                    goo,
+                } => (min, max, -depth, goo),
+                _ => continue,
+            };
+            let (Some((x0, x1)), Some((y0, y1))) =
+                (clip(min[0], max[0], sx), clip(min[1], max[1], sy))
+            else {
+                continue;
+            };
+            for x in x0..=x1 {
+                for y in y0..=y1 {
+                    let (x, y) = (x as usize, y as usize);
+                    h[x][y] = (h[x][y] + delta).clamp(0, top - 1);
+                    goo[x][y] = wet;
+                }
+            }
+        }
+        (h, goo)
+    }
+
+    /// The open cell in front of a door, or `None` if it would stand in goo.
+    fn door_cell(&self, d: Door, h: &[Vec<i32>], goo: &[Vec<bool>]) -> Option<Cell> {
+        let [sx, sy, _] = self.size;
+        let along = |n: i32| d.along.rem_euclid(n);
+        let (x, y) = match d.side {
+            Dir::NegX => (0, along(sy)),
+            Dir::PosX => (sx - 1, along(sy)),
+            Dir::NegY => (along(sx), 0),
+            _ => (along(sx), sy - 1),
+        };
+        let (ux, uy) = (x as usize, y as usize);
+        (!goo[ux][uy]).then_some([x, y, h[ux][uy]])
+    }
+
+    /// The puzzle, or `None` if items would collide or stand in goo.
+    pub fn build(&self) -> Option<Puzzle> {
+        let [sx, sy, sz] = self.size;
+        let top = sz - 1;
+        let (h, goo) = self.heightmap();
+        let mut b = Builder::new(TITLE, self.size);
+        for x in 0..sx {
+            for y in 0..sy {
+                b.carve([x, y, h[x as usize][y as usize]], [x, y, top]);
+            }
+        }
+        for f in &self.features {
+            if let Feature::White { min, max, dir } = *f {
+                let axes: Option<Vec<(i32, i32)>> =
+                    (0..3).map(|a| clip(min[a], max[a], self.size[a])).collect();
+                if let Some(axes) = axes {
+                    let lo = [axes[0].0, axes[1].0, axes[2].0];
+                    let hi = [axes[0].1, axes[1].1, axes[2].1];
+                    b.paint(lo, hi, dir, true);
+                }
+            }
+        }
+
+        let mut used: Vec<Cell> = Vec::new();
+        let mut claim = |c: Cell| {
+            let free = !used.contains(&c);
+            used.push(c);
+            free
+        };
+        let entry = self.door_cell(self.entry, &h, &goo)?;
+        let exit = self.door_cell(self.exit, &h, &goo)?;
+        if !claim(entry) || !claim(exit) {
+            return None;
+        }
+        b.entry(entry, self.entry.side.opposite());
+        let exit = b.exit(exit, self.exit.side.opposite());
+
+        let column = |at: [i32; 2]| {
+            let (x, y) = (at[0].clamp(0, sx - 1), at[1].clamp(0, sy - 1));
+            let (ux, uy) = (x as usize, y as usize);
+            (!goo[ux][uy]).then_some([x, y, h[ux][uy]])
+        };
+        for f in &self.features {
+            match *f {
+                Feature::Dropper { at } => {
+                    let floor = column(at)?;
+                    let dropper = [floor[0], floor[1], top];
+                    if floor[2] + 2 > top || !claim(floor) || !claim(dropper) {
+                        return None;
+                    }
+                    b.cube_dropper(dropper);
+                }
+                Feature::Button { at } => {
+                    let cell = column(at)?;
+                    if !claim(cell) {
+                        return None;
+                    }
+                    let button = b.floor_button(cell);
+                    b.connect(button, exit);
+                }
+                _ => {}
+            }
+        }
+        // Goo: one item per goo column, so the result doesn't hinge on how far goo floods.
+        for x in 0..sx {
+            for y in 0..sy {
+                if goo[x as usize][y as usize] {
+                    b.goo([x, y, h[x as usize][y as usize]]);
+                }
+            }
+        }
+        Some(b.build())
+    }
+}
+
+fn random_door(rng: &mut Rng, size: [i32; 3]) -> Door {
+    Door {
+        side: *rng.pick(&Dir::HORIZONTAL),
+        along: rng.range(0, size[0].max(size[1]) - 1),
+    }
+}
+
+fn nudge(rng: &mut Rng) -> i32 {
+    if rng.chance(0.5) {
+        1
+    } else {
+        -1
+    }
+}
+
+fn tweak(f: &mut Feature, rng: &mut Rng) {
+    match f {
+        Feature::Platform { min, max, height } => match rng.below(3) {
+            0 => *height = (*height + nudge(rng)).clamp(1, 4),
+            1 => {
+                let (a, d) = (rng.below(2), nudge(rng));
+                min[a] += d;
+                max[a] += d;
+            }
+            _ => {
+                let a = rng.below(2);
+                if rng.chance(0.5) {
+                    min[a] += nudge(rng);
+                } else {
+                    max[a] += nudge(rng);
+                }
+            }
+        },
+        Feature::Pit {
+            min,
+            max,
+            depth,
+            goo,
+        } => match rng.below(4) {
+            0 => *depth = (*depth + nudge(rng)).clamp(1, 2),
+            1 => *goo = !*goo,
+            2 => {
+                let (a, d) = (rng.below(2), nudge(rng));
+                min[a] += d;
+                max[a] += d;
+            }
+            _ => {
+                let a = rng.below(2);
+                if rng.chance(0.5) {
+                    min[a] += nudge(rng);
+                } else {
+                    max[a] += nudge(rng);
+                }
+            }
+        },
+        Feature::White { min, max, dir } => {
+            if rng.chance(0.15) {
+                *dir = *rng.pick(&Dir::ALL);
+            } else {
+                let a = rng.below(3);
+                if rng.chance(0.5) {
+                    min[a] += nudge(rng);
+                } else {
+                    max[a] += nudge(rng);
+                }
+            }
+        }
+        Feature::Dropper { at } | Feature::Button { at } => at[rng.below(2)] += nudge(rng),
+    }
+}

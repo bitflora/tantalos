@@ -5,11 +5,14 @@ Tooling for generating and solving Portal 2 Puzzle Maker levels. See [plan.md](p
 **Slice 1:** `.p2c` read/write, level model, walkable regions, ASCII maps.
 **Slice 2:** Tier-0 solver: portal line of sight, face classes, cubes/floor buttons/exit logic,
 BFS for the shortest plan.
+**Slice 3:** level metrics, random chamber genomes, and an evolutionary search that writes the
+best levels it finds.
 
 ```bash
 cargo test
 cargo run -- info fixtures/synthetic/worked_example.p2c
 cargo run -- solve fixtures/synthetic/*.p2c
+cargo run --release -- evolve --seed 1 --gens 40   # best levels + report.md in out/evolve-1
 cargo run -- roundtrip fixtures/real/*.p2c
 cargo run -- fixtures            # regenerate fixtures/synthetic from src/fixtures.rs
 ```
@@ -48,6 +51,27 @@ open ends the plan (the plan's worked example is 5, not 6, because walking out i
 | pillar_button | 4: throw the cube through a portal onto the button |
 | worked_example | 5: carry the cube through a portal to the button |
 | goo_pit, step_ledge, worked_example_black | unsolvable |
+
+## Metrics and score
+`solve` also prints, and `evolve` optimises, metrics from the full state space and ablations:
+plan length and portal trips, number of shortest plans, dead-end (softlock) states, cubes that
+aren't needed, face classes that are (painting one black makes the level unsolvable), and the
+share of random players that stumble out. `Metrics::score` folds them into one number:
+log of weighted effort (portal shots 1, trips 2, other actions 0.5) + random players failing +
+necessary classes − unnecessary cubes − softlock share. The first version rewarded plan length
+linearly and bred 30-action staircase slogs; weights are still a guess pending playtests.
+
+## Generator and search
+`generator::Genome`: room size, two doors on the outer walls, and a list of features (platforms
+and pits on a heightmap, goo, white patches, ceiling cube droppers, floor buttons wired to the
+exit). `evolve` keeps an elitist population of solved levels, breeds children by mutation, and
+drops behavioural duplicates (same size and metrics) so it doesn't fill with clones. Results
+depend only on the seed. 30–70 generations of 48 took 10 s–2 min on 12 threads (later
+generations are slower as levels grow).
+
+What it finds today: portal-hopping mazes with many necessary surfaces, 10–25 actions. Solvable
+under the model and not trivial, but mazy rather than elegant. That's the plan's "hard ≠ fun"
+risk; next steps are a style prior from real levels and in-game checks of the winners.
 
 ## Assumptions to verify in-game
 - Goo floods every open cell reachable sideways or downward from a goo item.
