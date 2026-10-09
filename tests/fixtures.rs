@@ -72,12 +72,14 @@ fn step_ledge_needs_a_cube_up_and_drops_down() {
             Edge {
                 from: a,
                 to: b,
-                kind: Move::Step
+                kind: Move::Step,
+                hazards: 0
             },
             Edge {
                 from: b,
                 to: a,
-                kind: Move::Drop { height: 1 }
+                kind: Move::Drop { height: 1 },
+                hazards: 0
             },
         ]
     );
@@ -96,7 +98,8 @@ fn worked_example_ledge_is_unreachable_on_foot() {
         vec![Edge {
             from: b,
             to: a,
-            kind: Move::Drop { height: 2 }
+            kind: Move::Drop { height: 2 },
+            hazards: 0
         }]
     );
     assert!(!graph.reachable_on_foot(a)[b]);

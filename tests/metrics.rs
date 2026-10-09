@@ -4,10 +4,10 @@ use glados::fixtures;
 use glados::level::Level;
 use glados::metrics::{assess, Assessment, Metrics};
 use glados::p2c::Puzzle;
-use glados::solver::{Model, DEFAULT_MAX_STATES};
+use glados::solver::{Mode, Model, DEFAULT_MAX_STATES};
 
 fn measure(p: &Puzzle) -> Metrics {
-    let mut model = Model::new(&Level::from_puzzle(p)).unwrap();
+    let mut model = Model::new(&Level::from_puzzle(p), Mode::Conservative).unwrap();
     match assess(&mut model, DEFAULT_MAX_STATES, 7) {
         Assessment::Solved(m) => m,
         other => panic!("{}: {other:?}", p.title()),
@@ -62,7 +62,7 @@ fn a_spare_cube_makes_both_cubes_unnecessary() {
 
 #[test]
 fn portal_puzzles_outscore_walking() {
-    let walk = measure(&fixtures::step_ledge_cube()).score();
+    let walk = measure(&fixtures::pit_button()).score();
     for p in [fixtures::goo_crossing(), fixtures::worked_example()] {
         assert!(measure(&p).score() > walk, "{}", p.title());
     }
@@ -72,7 +72,7 @@ fn portal_puzzles_outscore_walking() {
 fn random_players_are_seeded() {
     let p = fixtures::worked_example();
     let run = |seed| {
-        let mut model = Model::new(&Level::from_puzzle(&p)).unwrap();
+        let mut model = Model::new(&Level::from_puzzle(&p), Mode::Conservative).unwrap();
         match assess(&mut model, DEFAULT_MAX_STATES, seed) {
             Assessment::Solved(m) => m.random_success,
             _ => unreachable!(),

@@ -11,7 +11,7 @@ use crate::level::Level;
 use crate::metrics::{assess, Assessment, Metrics};
 use crate::p2c::Puzzle;
 use crate::rng::Rng;
-use crate::solver::Model;
+use crate::solver::{Mode, Model};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -62,7 +62,7 @@ pub fn evaluate(genome: &Genome, budget: usize, seed: u64, born: usize) -> Optio
     if !level.mount_problems().is_empty() {
         return None;
     }
-    let mut model = Model::new(&level).ok()?;
+    let mut model = Model::new(&level, Mode::Conservative).ok()?;
     match assess(&mut model, budget, seed) {
         Assessment::Solved(metrics) => Some(Candidate {
             genome: genome.clone(),

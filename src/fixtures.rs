@@ -124,6 +124,80 @@ fn worked(white: bool) -> Puzzle {
     b.build()
 }
 
+/// A see-through wall splits the room; white walls on both sides. Glass stops portal shots
+/// (unsolvable); grating lets them through (fire, fire, enter).
+pub fn window(grating: bool) -> Puzzle {
+    let title = if grating {
+        "Grating window"
+    } else {
+        "Glass window"
+    };
+    let mut b = Builder::new(title, [8, 6, 4]);
+    b.carve([0, 0, 1], [7, 5, 3]);
+    // Panel on the +X faces of x=3, floor to ceiling, anchored on the floor.
+    b.glass([3, 0, 1], Dir::PosX, Dir::PosZ, 5, 0, 2, grating);
+    b.paint([0, 0, 1], [0, 5, 1], Dir::NegX, true);
+    b.paint([7, 0, 1], [7, 5, 3], Dir::PosX, true);
+    b.entry([1, 0, 1], Dir::PosY);
+    b.exit([6, 5, 1], Dir::NegY);
+    b.build()
+}
+
+/// A goo trench bridged by a glass floor: walk across.
+pub fn glass_bridge() -> Puzzle {
+    let mut b = Builder::new("Glass bridge", [8, 6, 4]);
+    b.carve([0, 0, 1], [7, 5, 3]);
+    b.carve([3, 0, 0], [4, 5, 0]);
+    b.goo([3, 2, 0]);
+    b.glass([4, 0, 0], Dir::PosZ, Dir::PosY, 0, 1, 5, false);
+    b.entry([1, 0, 1], Dir::PosY);
+    b.exit([6, 5, 1], Dir::NegY);
+    b.build()
+}
+
+/// A fizzler splits the room; the cube is on the entry side, its button by the exit. Carrying
+/// the cube through destroys it. A latching pedestal turns the fizzler off.
+pub fn fizzler_cube() -> Puzzle {
+    let mut b = Builder::new("Fizzler cube", [8, 6, 4]);
+    b.carve([0, 0, 1], [7, 5, 3]);
+    // Mounted on the y=-1 wall, three cells tall; field runs along +Y on x=3's +X faces.
+    let fizzler = b.fizzler([3, 0, 1], Dir::PosY, Dir::PosZ, 3, false, true);
+    b.entry([1, 0, 1], Dir::PosY);
+    let exit = b.exit([6, 5, 1], Dir::NegY);
+    let button = b.floor_button([5, 2, 1]);
+    b.connect(button, exit);
+    b.cube_dropper([1, 3, 3]);
+    let pedestal = b.pedestal([2, 4, 1], None);
+    b.connect(pedestal, fizzler);
+    b.build()
+}
+
+/// A laser field splits a long room. A timed pedestal turns it off; run 5 voxels before it
+/// comes back. With `seconds` = 6 that's fine (140 u/s); 4 only at 190 u/s; 3 never.
+pub fn timed_field(seconds: u32) -> Puzzle {
+    let mut b = Builder::new("Timed laser field", [10, 4, 4]);
+    b.carve([0, 0, 1], [9, 3, 3]);
+    let field = b.fizzler([5, 0, 1], Dir::PosY, Dir::PosZ, 3, true, true);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([9, 2, 1], Dir::NegX);
+    let pedestal = b.pedestal([1, 2, 1], Some(seconds));
+    b.connect(pedestal, field);
+    b.build()
+}
+
+/// Sphere button by the exit; a standard cube and a sphere to choose from.
+pub fn sphere_button() -> Puzzle {
+    let mut b = Builder::new("Sphere button", [6, 6, 4]);
+    b.carve([0, 0, 1], [5, 5, 3]);
+    b.entry([1, 0, 1], Dir::PosY);
+    let exit = b.exit([3, 5, 1], Dir::NegY);
+    let button = b.floor_button_of([3, 3, 1], 2);
+    b.connect(button, exit);
+    b.cube_dropper_of([1, 2, 3], 0);
+    b.cube_dropper_of([4, 1, 3], 3);
+    b.build()
+}
+
 pub fn all() -> Vec<(&'static str, Puzzle)> {
     vec![
         ("flat_room", flat_room()),
@@ -135,5 +209,11 @@ pub fn all() -> Vec<(&'static str, Puzzle)> {
         ("pillar_button", pillar_button()),
         ("worked_example", worked_example()),
         ("worked_example_black", worked_example_black()),
+        ("glass_window", window(false)),
+        ("grating_window", window(true)),
+        ("glass_bridge", glass_bridge()),
+        ("fizzler_cube", fizzler_cube()),
+        ("timed_field", timed_field(6)),
+        ("sphere_button", sphere_button()),
     ]
 }

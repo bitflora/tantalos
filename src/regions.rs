@@ -1,17 +1,19 @@
 //! Walkable regions: sets of standable cells mutually reachable on foot, plus the
 //! one-way moves between them. This is the position abstraction the solver searches over.
 //!
-//! Tier-0 movement rules (ASSUMPTIONS until measured in-game):
-//! - Walking connects 4-neighbour standable cells at the same height.
+//! Movement rules (ASSUMPTIONS until measured in-game):
+//! - Walking connects 4-neighbour standable cells at the same height, unless glass or grating
+//!   is on the face between them. A fizzler or laser field there makes it a `Walk` edge that
+//!   carries the field, so the solver can apply it (laser fields only when on).
 //! - Stepping off a ledge falls straight down; landing in goo is death (no edge).
-//!   Long-fall boots mean any drop height is survivable.
+//!   Long-fall boots mean any drop height is survivable. Glass and grating floors stop a fall.
 //! - A one-voxel (128u) ledge can't be jumped; it is a `Step` edge that needs a cube.
 //!   Two or more voxels can't be climbed at all.
 
 use std::collections::BTreeSet;
 
 use crate::geom::{step, Cell, Dir};
-use crate::level::Level;
+use crate::level::{FaceInfo, Level};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
@@ -22,6 +24,8 @@ pub struct Region {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Move {
+    /// Walk through a fizzler or laser field to a neighbouring cell at the same height.
+    Walk,
     /// Fall `height` voxels.
     Drop { height: i32 },
     /// Climb a one-voxel ledge; needs something to stand on (a cube).
@@ -33,6 +37,8 @@ pub struct Edge {
     pub from: usize,
     pub to: usize,
     pub kind: Move,
+    /// Hazard fields crossed on the way (bits index `Level::hazards`).
+    pub hazards: u64,
 }
 
 pub struct RegionGraph {
@@ -66,7 +72,11 @@ impl RegionGraph {
                 let i = g.idx(c).unwrap();
                 g.cell_region[i] = Some(id);
                 cells.push(c);
-                stack.extend(Dir::HORIZONTAL.map(|d| step(c, d)));
+                for d in Dir::HORIZONTAL {
+                    if level.face(c, d) == FaceInfo::default() {
+                        stack.push(step(c, d));
+                    }
+                }
             }
             cells.sort_by_key(|c| (c[2], c[1], c[0]));
             g.regions.push(Region { id, z: c[2], cells });
@@ -77,28 +87,39 @@ impl RegionGraph {
             for &c in &r.cells {
                 for d in Dir::HORIZONTAL {
                     let n = step(c, d);
+                    let face = level.face(c, d);
+                    let mut edge = |to, kind, hazards| {
+                        edges.insert(Edge {
+                            from: r.id,
+                            to,
+                            kind,
+                            hazards,
+                        });
+                    };
                     if level.solid(n) {
-                        let top = step(n, Dir::PosZ);
+                        let (head, top) = (step(c, Dir::PosZ), step(n, Dir::PosZ));
+                        let over = level.face(head, d);
                         if level.in_interior(n)
                             && level.standable(top)
-                            && !level.solid(step(c, Dir::PosZ))
+                            && !level.solid(head)
+                            && over.barrier.is_none()
                         {
-                            edges.insert(Edge {
-                                from: r.id,
-                                to: g.region_of(top).unwrap(),
-                                kind: Move::Step,
-                            });
+                            edge(g.region_of(top).unwrap(), Move::Step, over.hazards);
                         }
-                    } else if !level.standable(n) {
-                        if let Some(f) = level.fall(n) {
-                            edges.insert(Edge {
-                                from: r.id,
-                                to: g.region_of(f).unwrap(),
-                                kind: Move::Drop {
-                                    height: n[2] - f[2],
-                                },
-                            });
+                    } else if face.barrier.is_some() {
+                        // Glass or grating: no way through.
+                    } else if level.standable(n) {
+                        if face.hazards != 0 {
+                            edge(g.region_of(n).unwrap(), Move::Walk, face.hazards);
                         }
+                    } else if let Some((f, fallen)) = level.fall_path(n) {
+                        edge(
+                            g.region_of(f).unwrap(),
+                            Move::Drop {
+                                height: n[2] - f[2],
+                            },
+                            face.hazards | fallen,
+                        );
                     }
                 }
             }

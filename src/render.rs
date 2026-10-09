@@ -59,9 +59,11 @@ pub fn describe_regions(graph: &RegionGraph) -> String {
             .edges_from(r.id)
             .map(|e| {
                 let to = RegionGraph::label(e.to);
+                let via = if e.hazards != 0 { " via field" } else { "" };
                 match e.kind {
-                    Move::Drop { height } => format!("drop {height} -> {to}"),
-                    Move::Step => format!("step (needs cube) -> {to}"),
+                    Move::Walk => format!("walk{via} -> {to}"),
+                    Move::Drop { height } => format!("drop {height}{via} -> {to}"),
+                    Move::Step => format!("step (needs cube){via} -> {to}"),
                 }
             })
             .collect();

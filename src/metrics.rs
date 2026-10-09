@@ -40,21 +40,25 @@ pub enum Assessment {
 impl Metrics {
     /// Higher is more interesting. The weights are a first guess, to be tuned on playtests.
     ///
-    /// - Effort, with diminishing returns: portal shots count 1, trips through a portal 2,
-    ///   other actions (walking, cube chores) 0.5. A linear length reward bred 30-action
-    ///   staircase slogs.
+    /// - Effort, with diminishing returns: portal shots and timed dashes count 1, trips through
+    ///   a portal 2, latching pedestal presses 0, other actions (walking, cube chores) 0.5.
+    ///   A linear length reward bred 30-action staircase slogs; counting presses bred rooms
+    ///   full of pedestals wired to the exit.
     /// - Random players failing: the level needs a plan, not just wandering.
     /// - Necessary face classes: specific white surfaces matter.
     /// - Penalties: unnecessary cubes (red herrings or cheese), and the share of states that
     ///   are softlocks.
     pub fn score(&self) -> f64 {
-        let fires = self
+        let effort: f64 = self
             .plan
             .iter()
-            .filter(|a| matches!(a, Action::Fire { .. }))
-            .count();
-        let rest = self.min_len - fires - self.portal_trips;
-        let effort = fires as f64 + 2.0 * self.portal_trips as f64 + 0.5 * rest as f64;
+            .map(|a| match a {
+                Action::Fire { .. } | Action::Dash { .. } => 1.0,
+                Action::Enter { .. } | Action::Throw { .. } => 2.0,
+                Action::Press { .. } => 0.0,
+                _ => 0.5,
+            })
+            .sum();
         8.0 * (1.0 + effort).ln()
             + 4.0 * (1.0 - self.random_success)
             + 2.0 * self.necessary_classes as f64

@@ -81,3 +81,26 @@ fn evolve_keeps_its_best() {
         assert_eq!(c.score, c.metrics.score());
     }
 }
+
+#[test]
+fn genomes_produce_tier1_items() {
+    use glados::level::ItemKind;
+    let mut rng = Rng::new(21);
+    let (mut barriers, mut hazards, mut pedestals) = (0, 0, 0);
+    for _ in 0..300 {
+        let mut g = Genome::random(&mut rng);
+        for _ in 0..10 {
+            g.mutate(&mut rng);
+        }
+        let Some(p) = g.build() else { continue };
+        let level = Level::from_puzzle(&p);
+        assert_eq!(level.decode_problems, Vec::<String>::new());
+        barriers += level.barriers.len();
+        hazards += level.hazards.len();
+        pedestals += level.of_kind(&ItemKind::PedestalButton).count();
+    }
+    assert!(
+        barriers > 20 && hazards > 20 && pedestals > 20,
+        "{barriers} {hazards} {pedestals}"
+    );
+}

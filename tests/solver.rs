@@ -6,19 +6,29 @@ use glados::level::{ItemKind, Level};
 use glados::p2c::Puzzle;
 use glados::portals::{line_of_sight, Landing};
 use glados::regions::Move;
-use glados::solver::{Action, CubeLoc, Model, Problem, Verdict, DEFAULT_MAX_STATES};
+use glados::solver::{
+    judge, Action, CubeLoc, Judgement, Mode, Model, Problem, Verdict, DEFAULT_MAX_STATES,
+};
 
 fn model(p: &Puzzle) -> Model {
-    Model::new(&Level::from_puzzle(p)).unwrap()
+    model_in(p, Mode::Conservative)
+}
+
+fn model_in(p: &Puzzle, mode: Mode) -> Model {
+    Model::new(&Level::from_puzzle(p), mode).unwrap()
 }
 
 fn solve(p: &Puzzle) -> Verdict {
     model(p).solve(DEFAULT_MAX_STATES).verdict
 }
 
-/// Solves, checks the plan replays through `successors` to a goal state, returns it.
+/// Solves (conservative), checks the plan replays through `successors` to a goal state.
 fn plan(p: &Puzzle) -> Vec<Action> {
-    let m = model(p);
+    plan_in(p, Mode::Conservative)
+}
+
+fn plan_in(p: &Puzzle, mode: Mode) -> Vec<Action> {
+    let m = model_in(p, mode);
     let Verdict::Solved(plan) = m.solve(DEFAULT_MAX_STATES).verdict else {
         panic!("{} not solved", p.title());
     };
@@ -40,7 +50,6 @@ fn shortest_plan_lengths() {
     let cases = [
         (fixtures::flat_room(), 0),
         (fixtures::goo_crossing(), 3),
-        (fixtures::step_ledge_cube(), 1),
         (fixtures::pit_button(), 2),
         (fixtures::pillar_button(), 4),
         (fixtures::worked_example(), 5),
@@ -89,6 +98,7 @@ fn worked_example_face_classes() {
         Some(Landing {
             region,
             button: None,
+            hazards: 0,
         })
     };
     let mut got: Vec<_> = m
@@ -168,8 +178,11 @@ fn pit_button_tosses_the_cube_in() {
 }
 
 #[test]
-fn step_ledge_cube_climbs() {
-    let p = plan(&fixtures::step_ledge_cube());
+fn step_ledge_cube_climbs_only_with_liberal_rules() {
+    let level = Level::from_puzzle(&fixtures::step_ledge_cube());
+    let judged = judge(&level, DEFAULT_MAX_STATES).unwrap();
+    assert!(matches!(judged.judgement, Judgement::Uncertain(Some(_))));
+    let p = plan_in(&fixtures::step_ledge_cube(), Mode::Liberal);
     assert!(matches!(
         p.as_slice(),
         [Action::Move {
@@ -219,11 +232,13 @@ fn state_budget_gives_unknown() {
 fn real_files_are_rejected_with_reasons() {
     let load = |path| {
         let p = Puzzle::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
-        Model::new(&Level::from_puzzle(&p)).err().unwrap()
+        Model::new(&Level::from_puzzle(&p), Mode::Conservative)
+            .err()
+            .unwrap()
     };
     let style = load("fixtures/real/1500854111.p2c");
     assert!(style.contains(&Problem::Unsupported(
-        "ITEM_BUTTON_PEDESTAL (item 67)".into()
+        "ITEM_TURRET (item 16, 61, 99)".into()
     )));
     assert!(style.iter().all(|p| matches!(p, Problem::Unsupported(_))));
     let skybox = load("fixtures/real/1501698868.p2c");
@@ -235,8 +250,9 @@ fn cubes_start_where_they_fall() {
     let m = model(&fixtures::worked_example());
     let level = Level::from_puzzle(&fixtures::worked_example());
     let cube = level.first(&ItemKind::Cube).unwrap();
+    let locs: Vec<CubeLoc> = m.start.cubes.iter().map(|c| c.loc).collect();
     assert_eq!(
-        m.start.cubes,
+        locs,
         vec![CubeLoc::Loose(m.graph.region_of(cube.cell).unwrap())]
     );
 }

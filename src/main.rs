@@ -6,12 +6,12 @@ use glados::level::Level;
 use glados::metrics::{assess, Assessment, Metrics};
 use glados::p2c::Puzzle;
 use glados::regions::RegionGraph;
-use glados::solver::{Model, Problem, DEFAULT_MAX_STATES};
+use glados::solver::{judge, Judged, Judgement, Mode, Model, Problem, DEFAULT_MAX_STATES};
 use glados::{fixtures, portals, render};
 
 const USAGE: &str = "usage:
   glados info <file.p2c>...     summary, region graph and ASCII map
-  glados solve <file.p2c>...    Tier-0 solver: verdict, shortest plan, metrics, face classes
+  glados solve <file.p2c>...    solvable / unsolvable / uncertain, shortest plan, metrics
   glados evolve [--seed N] [--pop N] [--gens N] [--budget N] [--keep N] [--out DIR]
                                 search for interesting levels; writes the best + report.md
                                 (default out/evolve-<seed>)
@@ -83,6 +83,23 @@ fn info(path: &Path) -> Result<()> {
         }
     }
     println!("  portalable surfaces: {}", level.portal_surfaces().len());
+    for b in &level.barriers {
+        println!(
+            "  {:?} panel (item {}): {} faces",
+            b.kind,
+            b.item,
+            b.faces.len()
+        );
+    }
+    for h in &level.hazards {
+        let state = if h.start_enabled { "on" } else { "off" };
+        println!(
+            "  {:?} (item {}, starts {state}): {} faces",
+            h.kind,
+            h.item,
+            h.faces.len()
+        );
+    }
     for p in level.mount_problems() {
         println!("  WARNING: {p}");
     }
@@ -98,8 +115,9 @@ fn solve(path: &Path) -> Result<()> {
     let (_, puzzle) = load(path)?;
     let level = Level::from_puzzle(&puzzle);
     println!("{} — \"{}\"", path.display(), puzzle.title());
-    let model = match Model::new(&level) {
-        Ok(m) => m,
+    let start = std::time::Instant::now();
+    let judged = match judge(&level, DEFAULT_MAX_STATES) {
+        Ok(j) => j,
         Err(problems) => {
             for p in problems {
                 match p {
@@ -111,9 +129,15 @@ fn solve(path: &Path) -> Result<()> {
             return Ok(());
         }
     };
+    let Judged {
+        judgement,
+        conservative: mut model,
+        liberal,
+    } = judged;
     println!(
-        "  {} regions, {} portal face classes:",
+        "  {} regions, {} fizzlers/laser fields, {} portal face classes (conservative):",
         model.graph.regions.len(),
+        model.hazards.len(),
         model.portals.classes.len()
     );
     for c in &model.portals.classes {
@@ -134,24 +158,34 @@ fn solve(path: &Path) -> Result<()> {
             seen
         );
     }
-    let mut model = model;
-    let start = std::time::Instant::now();
-    let assessment = assess(&mut model, DEFAULT_MAX_STATES, 0);
-    let took = start.elapsed();
-    match &assessment {
-        Assessment::Solved(m) => {
-            println!("  SOLVED in {} actions:", m.min_len);
-            for (i, a) in m.plan.iter().enumerate() {
-                println!("    {}. {}", i + 1, model.describe(a));
+    match &judgement {
+        Judgement::Solvable(_) => match assess(&mut model, DEFAULT_MAX_STATES, 0) {
+            Assessment::Solved(m) => {
+                println!("  SOLVABLE (conservative rules) in {} actions:", m.min_len);
+                for (i, a) in m.plan.iter().enumerate() {
+                    println!("    {}. {}", i + 1, model.describe(a));
+                }
+                for line in metric_lines(&m) {
+                    println!("  {line}");
+                }
             }
-            for line in metric_lines(m) {
-                println!("  {line}");
+            _ => println!("  SOLVABLE, but metrics ran out of state budget"),
+        },
+        Judgement::Unsolvable => println!("  UNSOLVABLE (even with liberal rules)"),
+        Judgement::Uncertain(None) => {
+            println!("  UNCERTAIN (state budget {DEFAULT_MAX_STATES} hit)")
+        }
+        Judgement::Uncertain(Some(plan)) => {
+            println!(
+                "  UNCERTAIN: only liberal rules solve it, in {} actions:",
+                plan.len()
+            );
+            for (i, a) in plan.iter().enumerate() {
+                println!("    {}. {}", i + 1, liberal.describe(a));
             }
         }
-        Assessment::Unsolvable => println!("  UNSOLVABLE"),
-        Assessment::Unknown => println!("  UNKNOWN (state budget {DEFAULT_MAX_STATES} hit)"),
     }
-    println!("  solved and measured in {took:.1?}");
+    println!("  judged and measured in {:.1?}", start.elapsed());
     println!();
     Ok(())
 }
@@ -245,7 +279,7 @@ population {}, {} generations, budget {}
 
 fn describe_candidate(rank: usize, file: &str, c: &Candidate) -> String {
     let level = Level::from_puzzle(&c.puzzle);
-    let model = Model::new(&level).expect("candidates are valid");
+    let model = Model::new(&level, Mode::Conservative).expect("candidates are valid");
     let mut s = format!(
         "
 ## {rank}. `{file}`: score {:.2} (born in generation {})

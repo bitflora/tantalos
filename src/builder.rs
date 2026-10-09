@@ -1,7 +1,7 @@
 //! Build puzzles in code. Item property lists copy what the retail editor writes
 //! (taken from real v14 files), so the output should open in the Puzzle Maker.
 
-use crate::geom::{angles_for_up, step, Cell, Dir};
+use crate::geom::{angles_for_up, angles_mapping, step, Cell, Dir};
 use crate::p2c::{Connection, Item, Props, Puzzle, Section, Voxels};
 
 pub struct Builder {
@@ -70,14 +70,29 @@ impl Builder {
         extra: &[(&str, String)],
         tail: &[(&str, String)],
     ) -> i32 {
+        let angles = angles_for_up(normal);
+        self.add_raw(kind, cell, angles, "0 0 0", true, extra, tail)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_raw(
+        &mut self,
+        kind: &str,
+        cell: Cell,
+        angles: [i32; 3],
+        local_pos: &str,
+        deletable: bool,
+        extra: &[(&str, String)],
+        tail: &[(&str, String)],
+    ) -> i32 {
         let index = self.items.len() as i32;
         let mut p = props(&[
             ("Index", index.to_string()),
             ("Type", kind.to_string()),
-            ("Deletable", "1".into()),
+            ("Deletable", if deletable { "1" } else { "0" }.into()),
             ("VoxelPos", vec3(cell)),
-            ("LocalPos", "0 0 0".into()),
-            ("Angles", vec3(angles_for_up(normal))),
+            ("LocalPos", local_pos.into()),
+            ("Angles", vec3(angles)),
         ]);
         p.0.extend(props(extra).0);
         p.0.extend(
@@ -90,6 +105,134 @@ impl Builder {
         p.0.extend(props(tail).0);
         self.items.push(p);
         index
+    }
+
+    /// A corner marker of a glass panel or hazard field: local +x along `forward`, +z `up`.
+    fn extent(&mut self, kind: &str, anchor: i32, cell: Cell, forward: Dir, up: Dir) {
+        let angles = angles_mapping([1, 0, 0], forward, [0, 0, 1], up);
+        let e = self.add_raw(kind, cell, angles, "0 0 0", false, &[], &[]);
+        self.link(anchor, e, "CONNECTION_BARRIER_ANCHOR_TO_EXTENT");
+    }
+
+    /// Glass (or grating) on the `normal` face of a rectangle of cells. The panel is anchored
+    /// to the surface behind `anchor` (against `grow`) and reaches `out` more cells along
+    /// `grow`; sideways it covers `left` cells one way and `right` the other along
+    /// `grow × -normal`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn glass(
+        &mut self,
+        anchor: Cell,
+        normal: Dir,
+        grow: Dir,
+        left: i32,
+        right: i32,
+        out: i32,
+        grating: bool,
+    ) -> i32 {
+        let side = grow
+            .cross(normal.opposite())
+            .expect("grow must lie in the panel");
+        let angles = angles_mapping([1, 0, 0], normal.opposite(), [0, 1, 0], side);
+        let extra = [
+            ("ITEM_PROPERTY_CONNECTION_COUNT", "0".to_string()),
+            ("ITEM_PROPERTY_START_REVERSED", "0".into()),
+            (
+                "ITEM_PROPERTY_BARRIER_TYPE",
+                if grating { "1" } else { "0" }.into(),
+            ),
+        ];
+        let g = self.add_raw("ITEM_BARRIER", anchor, angles, "0 0 0", true, &extra, &[]);
+        let at = |d: Dir, k: i32| {
+            let v = d.vector();
+            [
+                anchor[0] + v[0] * k,
+                anchor[1] + v[1] * k,
+                anchor[2] + v[2] * k,
+            ]
+        };
+        let up = normal.opposite();
+        let kind = "ITEM_BARRIER_EXTENT";
+        self.extent(kind, g, at(side.opposite(), left), side.opposite(), up);
+        self.extent(kind, g, at(grow, out), grow, up);
+        self.extent(kind, g, at(side, right), side, up);
+        g
+    }
+
+    /// A fizzler (or laser field) mounted on the wall behind `anchor` (against `normal`),
+    /// covering `anchor` and `len - 1` more cells along `along`. In game the field runs out
+    /// along `normal` to the opposite wall. Offset 0.375 voxel toward `normal × along`, as the
+    /// editor does by default.
+    pub fn fizzler(
+        &mut self,
+        anchor: Cell,
+        normal: Dir,
+        along: Dir,
+        len: i32,
+        laser: bool,
+        start_enabled: bool,
+    ) -> i32 {
+        let angles = angles_mapping([0, 0, 1], normal, [0, 1, 0], along);
+        let f = normal
+            .cross(along)
+            .expect("along must lie in the wall")
+            .vector();
+        let local = format!(
+            "{} {} {}",
+            0.375 * f[0] as f64,
+            0.375 * f[1] as f64,
+            0.375 * f[2] as f64
+        );
+        let extra = [
+            ("ITEM_PROPERTY_CONNECTION_COUNT", "0".to_string()),
+            (
+                "ITEM_PROPERTY_BARRIER_HAZARD_TYPE",
+                if laser { "1" } else { "0" }.into(),
+            ),
+            (
+                "ITEM_PROPERTY_START_ENABLED",
+                if start_enabled { "1" } else { "0" }.into(),
+            ),
+        ];
+        let h = self.add_raw(
+            "ITEM_BARRIER_HAZARD",
+            anchor,
+            angles,
+            &local,
+            true,
+            &extra,
+            &[],
+        );
+        let v = along.vector();
+        let far = [
+            anchor[0] + v[0] * (len - 1),
+            anchor[1] + v[1] * (len - 1),
+            anchor[2] + v[2] * (len - 1),
+        ];
+        let (lo, hi) = if along.is_positive() {
+            (anchor, far)
+        } else {
+            (far, anchor)
+        };
+        let axis = Dir::from_axis(along.axis(), true);
+        let up = normal.cross(axis).expect("perpendicular");
+        let kind = "ITEM_BARRIER_HAZARD_EXTENT";
+        self.extent(kind, h, lo, axis.opposite(), up);
+        self.extent(kind, h, hi, axis, up);
+        h
+    }
+
+    /// A pedestal button on the floor of `cell`; `timer` in seconds (3..=30), `None` = infinite.
+    pub fn pedestal(&mut self, cell: Cell, timer: Option<u32>) -> i32 {
+        self.add(
+            "ITEM_BUTTON_PEDESTAL",
+            cell,
+            Dir::PosZ,
+            &[
+                ("ITEM_PROPERTY_TIMER_DELAY", timer.unwrap_or(0).to_string()),
+                ("ITEM_PROPERTY_TIMER_SOUND", "0".into()),
+            ],
+            &[],
+        )
     }
 
     fn link(&mut self, sender: i32, receiver: i32, kind: &str) {
@@ -152,13 +295,18 @@ impl Builder {
     /// Ceiling cube dropper in open `cell`; its cube sits on the first floor below.
     /// Returns (cube, dropper).
     pub fn cube_dropper(&mut self, cell: Cell) -> (i32, i32) {
+        self.cube_dropper_of(cell, 0)
+    }
+
+    /// `cube_type`: 0 standard, 1 companion, 2 reflection, 3 sphere, 4 franken.
+    pub fn cube_dropper_of(&mut self, cell: Cell, cube_type: i32) -> (i32, i32) {
         let mut floor = cell;
         while !self.voxels.solid(step(floor, Dir::NegZ)).unwrap_or(true) {
             floor = step(floor, Dir::NegZ);
         }
         let shared = |delay: &str| {
             vec![
-                ("ITEM_PROPERTY_CUBE_TYPE", "0".to_string()),
+                ("ITEM_PROPERTY_CUBE_TYPE", cube_type.to_string()),
                 ("ITEM_PROPERTY_DROPPER_ENABLED", "1".into()),
                 ("ITEM_PROPERTY_AUTO_DROP_CUBE", "1".into()),
                 ("ITEM_PROPERTY_AUTO_RESPAWN_CUBE", "1".into()),
@@ -175,11 +323,16 @@ impl Builder {
     }
 
     pub fn floor_button(&mut self, cell: Cell) -> i32 {
+        self.floor_button_of(cell, 0)
+    }
+
+    /// `button_type`: 0 weighted, 1 cube, 2 sphere.
+    pub fn floor_button_of(&mut self, cell: Cell, button_type: i32) -> i32 {
         self.add(
             "ITEM_BUTTON_FLOOR",
             cell,
             Dir::PosZ,
-            &[("ITEM_PROPERTY_BUTTON_TYPE", "0".into())],
+            &[("ITEM_PROPERTY_BUTTON_TYPE", button_type.to_string())],
             &[],
         )
     }
