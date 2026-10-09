@@ -1,2 +1,6 @@
 /target
 /out
+/data
+/runs
+/.venv
+__pycache__/

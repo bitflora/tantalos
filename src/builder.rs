@@ -54,6 +54,17 @@ impl Builder {
         self
     }
 
+    /// Whether `c` is solid so far; anything off the voxel lattice is.
+    pub fn solid(&self, c: Cell) -> bool {
+        self.voxels.solid(c).unwrap_or(true)
+    }
+
+    /// Sets a property of an item added earlier.
+    pub fn set_prop(&mut self, item: i32, key: &str, value: &str) -> &mut Self {
+        self.items[item as usize].set(key, value);
+        self
+    }
+
     /// Sets portalability of the `d` face of every cell in the box.
     pub fn paint(&mut self, min: Cell, max: Cell, d: Dir, white: bool) -> &mut Self {
         cells_in(min, max).for_each(|c| self.voxels.set_face_portalable(c, d, white));

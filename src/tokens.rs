@@ -1,0 +1,747 @@
+//! Levels as flat token sequences, for training sequence models (plan.md, "Representation").
+//!
+//! Tokens are whitespace-free words; a level is written with single spaces between them.
+//! Coordinates and counts are the words `0`..`32`. Directions are `+x -x +y -y +z -z`.
+//!
+//! ```text
+//! size X Y Z
+//! <row>*               one per y: columns (x = 0, 1, ...) then `/`. A column is its runs
+//!                      bottom-up then `|`, or `=` (same as the column before it, also across
+//!                      rows). Runs: `s<n>` solid, `o<n>` open, `g<n>` goo; they add up to Z.
+//!                      Columns left out at the end of a row repeat its last one; a row that
+//!                      is just `/` repeats the row before, and rows left out at the end
+//!                      repeat the last one. So only changes cost tokens, and the model
+//!                      never has to count columns or rows exactly.
+//! white D x0 y0 z0 x1 y1 z1        the D faces of open cells in the box are white surfaces
+//! entry x y z D                    D = the door's normal (into the room)
+//! exit x y z D [inv]               inv = starts open, closes when its inputs are on
+//! glass|grating x0 y0 z0 x1 y1 z1 N G
+//!                                  panel on the N faces of the cells in the box, hung from
+//!                                  the surface behind it against G
+//! fizzler|laserfield x y z N A L on|off
+//!                                  mounted on the wall against N, L cells from (x, y, z)
+//!                                  along A; the field is on the N × A side of each cell
+//! dropper x y z K                  ceiling cube dropper, its cube on the floor below.
+//!                                  K: standard companion reflection sphere franken
+//! button x y z K [> T]*            floor button. K: weighted cube sphere
+//! pedestal x y z S|inf [> T]*      pedestal button with an S-second timer, or latching
+//! ```
+//! Targets `T`: `exit`, or `field N` (the N-th fizzler/laser field in the sequence).
+//!
+//! `encode` writes items in a fixed order (white, doors, panels, fields, droppers, buttons,
+//! pedestals; each sorted), so `encode(decode(encode(p))) == encode(p)`. The encoding keeps
+//! what play depends on (the `Level` view), not the file's bytes: decorative items, property
+//! order and face bits that aren't on a surface are dropped. `decode` accepts items in any
+//! order and rejects anything malformed with an error instead of panicking, so it can read
+//! model output.
+
+use std::collections::{BTreeSet, HashSet};
+
+use crate::builder::Builder;
+use crate::generator::TITLE;
+use crate::geom::{rotate, step, Cell, Dir};
+use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, PlacedItem};
+use crate::p2c::Puzzle;
+use crate::solver::DECORATIVE;
+
+/// Largest coordinate, size or count a token can hold.
+pub const MAX_NUM: i32 = 32;
+
+const CUBE_KINDS: [&str; 5] = ["standard", "companion", "reflection", "sphere", "franken"];
+const BUTTON_KINDS: [&str; 3] = ["weighted", "cube", "sphere"];
+const DIRS: [(Dir, &str); 6] = [
+    (Dir::PosX, "+x"),
+    (Dir::NegX, "-x"),
+    (Dir::PosY, "+y"),
+    (Dir::NegY, "-y"),
+    (Dir::PosZ, "+z"),
+    (Dir::NegZ, "-z"),
+];
+const KEYWORDS: [&str; 20] = [
+    "size",
+    "|",
+    "/",
+    "=",
+    "white",
+    "entry",
+    "exit",
+    "inv",
+    "glass",
+    "grating",
+    "fizzler",
+    "laserfield",
+    "on",
+    "off",
+    "dropper",
+    "button",
+    "pedestal",
+    "inf",
+    ">",
+    "field",
+];
+
+/// Every token `encode` can write, in a fixed order.
+pub fn vocab() -> Vec<String> {
+    let mut v: Vec<String> = KEYWORDS.iter().map(|s| s.to_string()).collect();
+    v.extend((0..=MAX_NUM).map(|n| n.to_string()));
+    for run in ["s", "o", "g"] {
+        v.extend((1..=MAX_NUM).map(|n| format!("{run}{n}")));
+    }
+    v.extend(DIRS.iter().map(|(_, s)| s.to_string()));
+    for k in CUBE_KINDS.iter().chain(&BUTTON_KINDS) {
+        if !v.iter().any(|t| t == k) {
+            v.push(k.to_string());
+        }
+    }
+    v
+}
+
+fn dir_token(d: Dir) -> &'static str {
+    DIRS.iter().find(|(x, _)| *x == d).unwrap().1
+}
+
+fn num(n: i32) -> String {
+    n.to_string()
+}
+
+fn cell_tokens(c: Cell) -> [String; 3] {
+    c.map(num)
+}
+
+/// The level as tokens, or why it can't be written (items the format doesn't cover, or
+/// layouts it can't express).
+pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
+    let level = Level::from_puzzle(p);
+    if let Some(problem) = level.decode_problems.first() {
+        return Err(problem.clone());
+    }
+    let [sx, sy, sz] = level.size;
+    if level.size.iter().any(|&s| s > MAX_NUM) {
+        return Err(format!("chamber {:?} is bigger than {MAX_NUM}", level.size));
+    }
+    for it in &level.items {
+        if let ItemKind::Other(t) = &it.kind {
+            if !DECORATIVE.contains(&t.as_str()) {
+                return Err(format!("unsupported item {t} (item {})", it.index));
+            }
+        }
+    }
+    let mut out: Vec<String> = vec!["size".into()];
+    out.extend(cell_tokens(level.size));
+
+    let column = |x, y| -> Vec<String> {
+        let mut runs: Vec<(char, i32)> = Vec::new();
+        for z in 0..sz {
+            let c = [x, y, z];
+            let k = if level.solid(c) {
+                's'
+            } else if level.goo(c) {
+                'g'
+            } else {
+                'o'
+            };
+            match runs.last_mut() {
+                Some((last, n)) if *last == k => *n += 1,
+                _ => runs.push((k, 1)),
+            }
+        }
+        runs.iter().map(|(k, n)| format!("{k}{n}")).collect()
+    };
+    let rows: Vec<Vec<Vec<String>>> = (0..sy)
+        .map(|y| (0..sx).map(|x| column(x, y)).collect())
+        .collect();
+    // Rows after the last change repeat it; the decoder fills them in.
+    let last_change = (1..rows.len())
+        .rev()
+        .find(|&y| rows[y] != rows[y - 1])
+        .unwrap_or(0);
+    let mut prev_col: Option<Vec<String>> = None;
+    let mut prev_row: Option<&Vec<Vec<String>>> = None;
+    for row in &rows[..=last_change] {
+        if prev_row != Some(row) {
+            // Columns after the last change repeat it; `/` fills them in.
+            let keep = (1..row.len())
+                .rev()
+                .find(|&x| row[x] != row[x - 1])
+                .map_or(1, |x| x + 1);
+            for col in &row[..keep] {
+                if prev_col.as_ref() == Some(col) {
+                    out.push("=".into());
+                } else {
+                    out.extend(col.iter().cloned());
+                    out.push("|".into());
+                }
+                prev_col = Some(col.clone());
+            }
+        }
+        out.push("/".into());
+        prev_col = row.last().cloned();
+        prev_row = Some(row);
+    }
+
+    for (d, lo, hi) in white_rects(&level) {
+        out.push("white".into());
+        out.push(dir_token(d).into());
+        out.extend(cell_tokens(lo));
+        out.extend(cell_tokens(hi));
+    }
+
+    let single = |kind: ItemKind, name: &str| -> Result<Option<&PlacedItem>, String> {
+        let mut doors = level.items.iter().filter(|i| i.kind == kind);
+        let door = doors.next();
+        if doors.next().is_some() {
+            return Err(format!("more than one {name} door"));
+        }
+        Ok(door)
+    };
+    let normal = |it: &PlacedItem| {
+        it.normal
+            .ok_or_else(|| format!("item {} {:?}: angles not axis-aligned", it.index, it.kind))
+    };
+    let exit = single(ItemKind::ExitDoor, "exit")?;
+    if let Some(e) = single(ItemKind::EntryDoor, "entry")? {
+        out.push("entry".into());
+        out.extend(cell_tokens(e.cell));
+        out.push(dir_token(normal(e)?).into());
+    }
+    if let Some(e) = exit {
+        out.push("exit".into());
+        out.extend(cell_tokens(e.cell));
+        out.push(dir_token(normal(e)?).into());
+        if e.start_open == Some(true) && level.inputs(e.index).next().is_some() {
+            out.push("inv".into());
+        }
+    }
+
+    let axis = |it: &PlacedItem, v: [i32; 3]| {
+        it.angles
+            .and_then(|a| rotate(a, v))
+            .ok_or_else(|| format!("item {} {:?}: angles not axis-aligned", it.index, it.kind))
+    };
+    let mut panels = Vec::new();
+    for b in &level.barriers {
+        let it = level.item(b.item).expect("barriers come from items");
+        let (lo, hi) = extent_box(p, &level, it);
+        let kind = if it.kind == ItemKind::Glass {
+            "glass"
+        } else {
+            "grating"
+        };
+        let mut t = vec![kind.to_string()];
+        t.extend(cell_tokens(lo));
+        t.extend(cell_tokens(hi));
+        t.push(dir_token(axis(it, [-1, 0, 0])?).into());
+        t.push(dir_token(axis(it, [0, 0, 1])?).into());
+        panels.push(((lo, hi), t));
+    }
+    panels.sort();
+    out.extend(panels.into_iter().flat_map(|(_, t)| t));
+
+    // Fields, sorted; buttons refer to them by position.
+    let mut fields = Vec::new();
+    for h in &level.hazards {
+        let it = level.item(h.item).expect("hazards come from items");
+        let (n, along) = (axis(it, [0, 0, 1])?, axis(it, [0, 1, 0])?);
+        let (lo, hi) = extent_box(p, &level, it);
+        let anchor = if along.is_positive() { lo } else { hi };
+        let len = hi[along.axis()] - lo[along.axis()] + 1;
+        let kind = match h.kind {
+            HazardKind::Fizzler => "fizzler",
+            HazardKind::LaserField => "laserfield",
+        };
+        let mut t = vec![kind.to_string()];
+        t.extend(cell_tokens(anchor));
+        t.push(dir_token(n).into());
+        t.push(dir_token(along).into());
+        t.push(num(len));
+        t.push(if h.start_enabled { "on" } else { "off" }.into());
+        fields.push(((anchor, n, along, len), t, h.item));
+    }
+    fields.sort();
+    let field_items: Vec<i32> = fields.iter().map(|f| f.2).collect();
+    out.extend(fields.into_iter().flat_map(|(_, t, _)| t));
+
+    // Droppers carry their cube; every cube must sit under one.
+    let mut droppers = Vec::new();
+    for d in level.of_kind(&ItemKind::CubeDropper) {
+        if normal(d)? != Dir::NegZ {
+            return Err(format!("dropper {} isn't on a ceiling", d.index));
+        }
+        droppers.push(d);
+    }
+    let mut dropped = Vec::new();
+    for cube in level.of_kind(&ItemKind::Cube) {
+        let dropper = p
+            .connections
+            .iter()
+            .filter(|c| c.get("Type") == Some("CONNECTION_BOX_DROPPER"))
+            .filter(|c| c.get_i32("Sender") == Some(cube.index))
+            .find_map(|c| {
+                droppers
+                    .iter()
+                    .find(|d| Some(d.index) == c.get_i32("Receiver"))
+            })
+            .ok_or_else(|| format!("cube {} has no dropper", cube.index))?;
+        let mut floor = dropper.cell;
+        while !level.solid(step(floor, Dir::NegZ)) {
+            floor = step(floor, Dir::NegZ);
+        }
+        if cube.cell != floor {
+            return Err(format!(
+                "cube {} isn't on the floor under its dropper",
+                cube.index
+            ));
+        }
+        dropped.push((dropper.cell, cube.cube_kind(), dropper.index));
+    }
+    if dropped.len() != droppers.len() {
+        return Err("a dropper has no cube, or two".into());
+    }
+    dropped.sort();
+    for (cell, kind, _) in dropped {
+        out.push("dropper".into());
+        out.extend(cell_tokens(cell));
+        out.push(CUBE_KINDS[cube_index(kind)].into());
+    }
+
+    // Every wire must run from a button to the exit or a field.
+    let senders: HashSet<i32> = level
+        .items
+        .iter()
+        .filter(|i| matches!(i.kind, ItemKind::FloorButton | ItemKind::PedestalButton))
+        .map(|i| i.index)
+        .collect();
+    for l in &level.links {
+        let to = level.item(l.receiver).map(|i| &i.kind);
+        let to_ok = matches!(to, Some(ItemKind::ExitDoor)) || field_items.contains(&l.receiver);
+        if !senders.contains(&l.sender) || !to_ok {
+            return Err(format!(
+                "wire {} -> {} isn't button -> exit/field",
+                l.sender, l.receiver
+            ));
+        }
+    }
+    let targets = |sender: i32| -> Vec<String> {
+        let mut ts: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for l in level.links.iter().filter(|l| l.sender == sender) {
+            match field_items.iter().position(|&f| f == l.receiver) {
+                Some(i) => ts.insert((1, i)),
+                None => ts.insert((0, 0)),
+            };
+        }
+        ts.into_iter()
+            .flat_map(|(kind, i)| match kind {
+                0 => vec![">".to_string(), "exit".into()],
+                _ => vec![">".to_string(), "field".into(), num(i as i32)],
+            })
+            .collect()
+    };
+
+    let mut buttons = Vec::new();
+    for b in level.of_kind(&ItemKind::FloorButton) {
+        if normal(b)? != Dir::PosZ {
+            return Err(format!("button {} isn't on a floor", b.index));
+        }
+        let kind = match b.button_kind() {
+            ButtonKind::Weighted => 0,
+            ButtonKind::Cube => 1,
+            ButtonKind::Sphere => 2,
+        };
+        let mut t = vec!["button".to_string()];
+        t.extend(cell_tokens(b.cell));
+        t.push(BUTTON_KINDS[kind].into());
+        t.extend(targets(b.index));
+        buttons.push((b.cell, t));
+    }
+    buttons.sort();
+    out.extend(buttons.into_iter().flat_map(|(_, t)| t));
+
+    let mut pedestals = Vec::new();
+    for ped in level.of_kind(&ItemKind::PedestalButton) {
+        if normal(ped)? != Dir::PosZ {
+            return Err(format!("pedestal {} isn't on a floor", ped.index));
+        }
+        let timer = match ped.timer() {
+            None => "inf".to_string(),
+            Some(s) if s.round() <= 30.0 => num(s.round() as i32),
+            Some(s) => return Err(format!("pedestal {}: timer {s} too long", ped.index)),
+        };
+        let mut t = vec!["pedestal".to_string()];
+        t.extend(cell_tokens(ped.cell));
+        t.push(timer);
+        t.extend(targets(ped.index));
+        pedestals.push((ped.cell, t));
+    }
+    pedestals.sort();
+    out.extend(pedestals.into_iter().flat_map(|(_, t)| t));
+    Ok(out)
+}
+
+fn cube_index(k: CubeKind) -> usize {
+    match k {
+        CubeKind::Standard => 0,
+        CubeKind::Companion => 1,
+        CubeKind::Reflection => 2,
+        CubeKind::Sphere => 3,
+        CubeKind::Franken => 4,
+    }
+}
+
+/// The box spanned by an anchor item and its extents.
+fn extent_box(p: &Puzzle, level: &Level, it: &PlacedItem) -> (Cell, Cell) {
+    let mut corners = vec![it.cell];
+    for c in &p.connections {
+        if c.get("Type") == Some("CONNECTION_BARRIER_ANCHOR_TO_EXTENT")
+            && c.get_i32("Sender") == Some(it.index)
+        {
+            if let Some(e) = c.get_i32("Receiver").and_then(|r| level.item(r)) {
+                corners.push(e.cell);
+            }
+        }
+    }
+    let lo = std::array::from_fn(|a| corners.iter().map(|c| c[a]).min().unwrap());
+    let hi = std::array::from_fn(|a| corners.iter().map(|c| c[a]).max().unwrap());
+    (lo, hi)
+}
+
+/// White surfaces as boxes: greedy rectangles in each plane, per direction.
+fn white_rects(level: &Level) -> Vec<(Dir, Cell, Cell)> {
+    let mut out = Vec::new();
+    for (d, _) in DIRS {
+        let white: HashSet<Cell> = level
+            .cells()
+            .filter(|&c| !level.solid(c) && level.portal_surface(c, d))
+            .collect();
+        let (u, v) = match d.axis() {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let mut used: HashSet<Cell> = HashSet::new();
+        let free = |c: Cell, used: &HashSet<Cell>| white.contains(&c) && !used.contains(&c);
+        let at = |c: Cell, a: usize, k: i32| {
+            let mut c = c;
+            c[a] += k;
+            c
+        };
+        for c in level.cells() {
+            if !free(c, &used) {
+                continue;
+            }
+            let mut du = 1;
+            while free(at(c, u, du), &used) {
+                du += 1;
+            }
+            let mut dv = 1;
+            while (0..du).all(|i| free(at(at(c, u, i), v, dv), &used)) {
+                dv += 1;
+            }
+            for i in 0..du {
+                for j in 0..dv {
+                    used.insert(at(at(c, u, i), v, j));
+                }
+            }
+            out.push((d, c, at(at(c, u, du - 1), v, dv - 1)));
+        }
+    }
+    out
+}
+
+struct Reader<'a> {
+    toks: Vec<&'a str>,
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn peek(&self) -> Option<&'a str> {
+        self.toks.get(self.pos).copied()
+    }
+
+    fn next(&mut self, what: &str) -> Result<&'a str, String> {
+        let t = self
+            .peek()
+            .ok_or_else(|| format!("ran out of tokens, expected {what}"))?;
+        self.pos += 1;
+        Ok(t)
+    }
+
+    fn fail<T>(&self, msg: impl std::fmt::Display) -> Result<T, String> {
+        Err(format!("token {}: {msg}", self.pos.saturating_sub(1)))
+    }
+
+    fn expect(&mut self, word: &str) -> Result<(), String> {
+        match self.next(word)? {
+            t if t == word => Ok(()),
+            t => self.fail(format!("expected {word:?}, found {t:?}")),
+        }
+    }
+
+    fn num(&mut self, lo: i32, hi: i32) -> Result<i32, String> {
+        let t = self.next("a number")?;
+        match t.parse::<i32>() {
+            Ok(n) if n.to_string() == t && (lo..=hi).contains(&n) => Ok(n),
+            _ => self.fail(format!("expected a number in {lo}..={hi}, found {t:?}")),
+        }
+    }
+
+    fn cell(&mut self, size: [i32; 3]) -> Result<Cell, String> {
+        Ok([
+            self.num(0, size[0] - 1)?,
+            self.num(0, size[1] - 1)?,
+            self.num(0, size[2] - 1)?,
+        ])
+    }
+
+    fn dir(&mut self) -> Result<Dir, String> {
+        let t = self.next("a direction")?;
+        match DIRS.iter().find(|(_, s)| *s == t) {
+            Some((d, _)) => Ok(*d),
+            None => self.fail(format!("expected a direction, found {t:?}")),
+        }
+    }
+
+    fn word(&mut self, words: &[&str]) -> Result<usize, String> {
+        let t = self.next("a keyword")?;
+        match words.iter().position(|w| *w == t) {
+            Some(i) => Ok(i),
+            None => self.fail(format!("expected one of {words:?}, found {t:?}")),
+        }
+    }
+}
+
+enum Target {
+    Exit,
+    Field(i32),
+}
+
+/// Builds the puzzle a token sequence describes. Errors name the offending token.
+pub fn decode(text: &str) -> Result<Puzzle, String> {
+    let mut r = Reader {
+        toks: text.split_whitespace().collect(),
+        pos: 0,
+    };
+    r.expect("size")?;
+    let size = [r.num(1, MAX_NUM)?, r.num(1, MAX_NUM)?, r.num(1, MAX_NUM)?];
+    let [sx, sy, sz] = size;
+    let mut b = Builder::new(TITLE, size);
+    let mut goo_tops = Vec::new();
+    let mut prev_col: Option<Vec<(char, i32)>> = None;
+    let mut rows: Vec<Vec<Vec<(char, i32)>>> = Vec::new();
+    let is_geometry = |t: Option<&str>| {
+        t.is_some_and(|t| {
+            matches!(t, "/" | "=" | "|")
+                || (t.len() > 1
+                    && t.starts_with(['s', 'o', 'g'])
+                    && t[1..].bytes().all(|c| c.is_ascii_digit()))
+        })
+    };
+    for y in 0..sy {
+        if y > 0 && !is_geometry(r.peek()) {
+            break; // The rest repeat the last row.
+        }
+        let mut row: Vec<Vec<(char, i32)>> = Vec::new();
+        loop {
+            match r.peek() {
+                Some("/") => {
+                    r.pos += 1;
+                    break;
+                }
+                Some("=") => {
+                    r.pos += 1;
+                    match &prev_col {
+                        Some(p) => row.push(p.clone()),
+                        None => return r.fail("`=` before any column"),
+                    }
+                }
+                _ => {
+                    let mut runs = Vec::new();
+                    let mut total = 0;
+                    loop {
+                        let t = r.next("a run or `|`")?;
+                        if t == "|" {
+                            break;
+                        }
+                        let mut chars = t.chars();
+                        let kind = chars.next().unwrap();
+                        let n = chars.as_str().parse::<i32>().ok();
+                        match (kind, n) {
+                            ('s' | 'o' | 'g', Some(n))
+                                if n >= 1 && n.to_string() == chars.as_str() =>
+                            {
+                                total += n;
+                                runs.push((kind, n));
+                            }
+                            _ => return r.fail(format!("expected a run or `|`, found {t:?}")),
+                        }
+                    }
+                    if total != sz {
+                        return r.fail(format!("column in row {y} is {total} tall, not {sz}"));
+                    }
+                    row.push(runs);
+                }
+            }
+            if row.len() > sx as usize {
+                return r.fail(format!("row {y} has more than {sx} columns"));
+            }
+            prev_col = row.last().cloned();
+        }
+        if row.is_empty() {
+            match rows.last() {
+                Some(p) => row = p.clone(),
+                None => return r.fail("the first row is empty"),
+            }
+        }
+        while row.len() < sx as usize {
+            row.push(row.last().unwrap().clone());
+        }
+        prev_col = row.last().cloned();
+        rows.push(row);
+    }
+    for y in 0..sy {
+        let row = rows
+            .get(y as usize)
+            .or(rows.last())
+            .expect("row 0 was read");
+        for (x, runs) in row.iter().enumerate() {
+            let x = x as i32;
+            let mut z = 0;
+            for &(kind, n) in runs {
+                if kind != 's' {
+                    b.carve([x, y, z], [x, y, z + n - 1]);
+                }
+                if kind == 'g' {
+                    goo_tops.push([x, y, z + n - 1]);
+                }
+                z += n;
+            }
+        }
+    }
+
+    let (mut entry, mut exit, mut inverted) = (None, None, false);
+    let mut fields: Vec<i32> = Vec::new();
+    let mut wires: Vec<(i32, Target)> = Vec::new();
+    while let Some(t) = r.peek() {
+        r.pos += 1;
+        match t {
+            "white" => {
+                let d = r.dir()?;
+                let (lo, hi) = (r.cell(size)?, r.cell(size)?);
+                if (0..3).any(|a| lo[a] > hi[a]) {
+                    return r.fail("white box corners are out of order");
+                }
+                b.paint(lo, hi, d, true);
+            }
+            "entry" | "exit" => {
+                let (cell, d) = (r.cell(size)?, r.dir()?);
+                if t == "entry" {
+                    if entry.is_some() {
+                        return r.fail("second entry door");
+                    }
+                    entry = Some(b.entry(cell, d));
+                } else {
+                    if exit.is_some() {
+                        return r.fail("second exit door");
+                    }
+                    exit = Some(b.exit(cell, d));
+                    if r.peek() == Some("inv") {
+                        r.pos += 1;
+                        inverted = true;
+                    }
+                }
+            }
+            "glass" | "grating" => {
+                let (lo, hi) = (r.cell(size)?, r.cell(size)?);
+                let (n, grow) = (r.dir()?, r.dir()?);
+                if (0..3).any(|a| lo[a] > hi[a]) {
+                    return r.fail("panel corners are out of order");
+                }
+                if lo[n.axis()] != hi[n.axis()] || grow.axis() == n.axis() {
+                    return r.fail("panel isn't flat across its normal, or grows along it");
+                }
+                // Anchor on the edge it hangs from: the first cell there with something
+                // solid behind it, so panels over pits stay mounted.
+                let side = grow.cross(n.opposite()).expect("perpendicular");
+                let (g, s) = (grow.axis(), side.axis());
+                let mut edge = lo;
+                if !grow.is_positive() {
+                    edge[g] = hi[g];
+                }
+                let anchor = (lo[s]..=hi[s])
+                    .map(|k| {
+                        let mut c = edge;
+                        c[s] = k;
+                        c
+                    })
+                    .find(|&c| b.solid(step(c, grow.opposite())))
+                    .unwrap_or(edge);
+                let (below, above) = (anchor[s] - lo[s], hi[s] - anchor[s]);
+                let (left, right) = if side.is_positive() {
+                    (below, above)
+                } else {
+                    (above, below)
+                };
+                b.glass(anchor, n, grow, left, right, hi[g] - lo[g], t == "grating");
+            }
+            "fizzler" | "laserfield" => {
+                let anchor = r.cell(size)?;
+                let (n, along) = (r.dir()?, r.dir()?);
+                let len = r.num(1, MAX_NUM)?;
+                let on = r.word(&["on", "off"])? == 0;
+                if n.axis() == along.axis() {
+                    return r.fail("field runs along its own normal");
+                }
+                let v = along.vector();
+                let far: Cell = std::array::from_fn(|a| anchor[a] + v[a] * (len - 1));
+                if (0..3).any(|a| far[a] < 0 || far[a] >= size[a]) {
+                    return r.fail("field leaves the chamber");
+                }
+                fields.push(b.fizzler(anchor, n, along, len, t == "laserfield", on));
+            }
+            "dropper" => {
+                let cell = r.cell(size)?;
+                let kind = r.word(&CUBE_KINDS)?;
+                b.cube_dropper_of(cell, kind as i32);
+            }
+            "button" | "pedestal" => {
+                let cell = r.cell(size)?;
+                let sender = if t == "button" {
+                    let kind = r.word(&BUTTON_KINDS)?;
+                    b.floor_button_of(cell, kind as i32)
+                } else {
+                    let timer = if r.peek() == Some("inf") {
+                        r.pos += 1;
+                        None
+                    } else {
+                        Some(r.num(3, 30)? as u32)
+                    };
+                    b.pedestal(cell, timer)
+                };
+                while r.peek() == Some(">") {
+                    r.pos += 1;
+                    let target = match r.word(&["exit", "field"])? {
+                        0 => Target::Exit,
+                        _ => Target::Field(r.num(0, MAX_NUM)?),
+                    };
+                    wires.push((sender, target));
+                }
+            }
+            other => return r.fail(format!("unexpected {other:?}")),
+        }
+    }
+    for top in goo_tops {
+        b.goo(top);
+    }
+    for (sender, target) in wires {
+        let receiver = match target {
+            Target::Exit => exit.ok_or("a button is wired to the exit, but there is none")?,
+            Target::Field(i) => *fields.get(i as usize).ok_or(format!(
+                "a button is wired to field {i}, which doesn't exist"
+            ))?,
+        };
+        b.connect(sender, receiver);
+    }
+    if let (Some(e), true) = (exit, inverted) {
+        b.set_prop(e, "ITEM_PROPERTY_START_OPEN", "1");
+    }
+    Ok(b.build())
+}

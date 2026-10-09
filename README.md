@@ -9,6 +9,8 @@ BFS for the shortest plan.
 best levels it finds.
 **Slice 4:** Tier 1 (glass, grating, fizzlers, laser fields, pedestal buttons with timers, cube
 and button types) and two solver modes that bracket the truth.
+**Slice 5:** levels as token sequences, a labelled dataset, scoring of model output, and a
+small GPT trained from scratch on them (`train/`).
 
 ```bash
 cargo test
@@ -17,7 +19,46 @@ cargo run -- solve fixtures/synthetic/*.p2c
 cargo run --release -- evolve --seed 1 --gens 40   # best levels + report.md in out/evolve-1
 cargo run -- roundtrip fixtures/real/*.p2c
 cargo run -- fixtures            # regenerate fixtures/synthetic from src/fixtures.rs
+cargo run -- tokens fixtures/synthetic/worked_example.p2c
 ```
+
+## Training a level model
+```bash
+cargo build --release
+./target/release/glados dataset --seed 1 --count 200000 --out data/levels.jsonl
+python -m venv .venv
+.venv/Scripts/pip install torch --index-url https://download.pytorch.org/whl/cu130
+.venv/Scripts/pip install -r train/requirements.txt
+.venv/Scripts/python train/train.py --data data/levels.jsonl --out runs/first
+.venv/Scripts/python train/sample.py runs/first/best.pt --n 64 --verdict solvable --len 5-7 --p2c
+```
+- **Tokens** (`src/tokens.rs`): size, then rows of columns as solid/open/goo runs, then white
+  surfaces as boxes, doors, panels, fields, droppers, buttons and pedestals with their wires.
+  Repeats are free: `=` repeats the previous column. Columns left out of a row, and rows left
+  out at the end, repeat the last one, so the model never has to count to the room's width or
+  depth. That was the main way early samples failed to parse. The worked example is 56 tokens;
+  generated rooms average about 105 and stay under about 310. Round trip: `encode(decode(encode(p))) == encode(p)` and the
+  solver's verdict is unchanged (tests on every fixture and hundreds of genomes). It keeps what
+  play depends on, not the file's bytes. Lasers, bridges, funnels, gel and the like are refused.
+- **Dataset** (`glados dataset`): JSONL, one level per line with its tokens, verdict, plan length
+  and metrics, plus `vocab.txt` beside it. Jobs are 30% fresh random genomes, 70% mutations of a
+  pool of solvable ones that drifts toward higher `Metrics::score`. Over a 20k run the share of
+  solvable levels needing 0 actions falls from 34% to 10%, and portal use rises from 5% to 33%.
+  About 250 levels/s on 12 threads. Seed-determined, independent of thread count.
+- **Scoring** (`glados score`): one token line in, one JSON line out (`unparsed`, `invalid`,
+  `unsupported`, `unsolvable`, `uncertain`, `solvable` + metrics; `canonical` if the line is
+  exactly what `encode` would write). `--p2c DIR` writes the solvable ones for playtesting.
+- **Model** (`train/`): GPT-2-style decoder, 6 layers × 384 wide (~11M parameters), block 512,
+  trained from scratch. A sequence is `<bos> conditions <sep> level <eos>`. Conditions: verdict,
+  plan-length bucket, portal trips, cubes, and yes/no for fizzler, laser field, glass, grating,
+  pedestal and goo. Each is hidden 25% of the time, so sampling can fix any subset. Every eval
+  samples levels conditioned on `<verdict:solvable>` and scores them with `glados score`.
+- **First result** (RTX 3050 Laptop, 4 GB): about 50k tokens/s, so roughly 10 steps/s at batch
+  32. On a 20k-level set, 3,000 steps (about 8 minutes) brought validation loss to 0.56 (0.89 at step 500).
+  Of 256 samples asked for a solvable level, 46% parsed and 19% were solvable (mean plan 2
+  actions). Most remaining failures are miscounted positions (too many columns, numbers out of
+  range). Next: the 200k set and longer runs, then step 5 (evaluation: novelty, conditioning
+  accuracy).
 
 ## Fixtures
 - `fixtures/real/`: two BEE2 style/skybox preview maps from

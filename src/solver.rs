@@ -35,7 +35,7 @@ use crate::portals::{self, Landing, Portals, Sight};
 use crate::regions::{Move, RegionGraph};
 
 /// Items that don't affect play.
-const DECORATIVE: &[&str] = &[
+pub const DECORATIVE: &[&str] = &[
     "ITEM_COOP_ENTRY_DOOR",
     "ITEM_COOP_EXIT_DOOR",
     "ITEM_LIGHT_PANEL",

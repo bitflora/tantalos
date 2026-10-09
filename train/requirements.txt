@@ -1,0 +1,7 @@
+# CUDA build of PyTorch. Install torch from PyTorch's index only: with PyPI as an extra index,
+# pip picks PyPI's newer CPU-only build.
+#   python -m venv .venv
+#   .venv/Scripts/pip install torch --index-url https://download.pytorch.org/whl/cu130
+#   .venv/Scripts/pip install -r train/requirements.txt
+torch>=2.4
+numpy

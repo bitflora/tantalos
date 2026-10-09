@@ -7,7 +7,7 @@ use glados::metrics::{assess, Assessment, Metrics};
 use glados::p2c::Puzzle;
 use glados::regions::RegionGraph;
 use glados::solver::{judge, Judged, Judgement, Mode, Model, Problem, DEFAULT_MAX_STATES};
-use glados::{fixtures, portals, render};
+use glados::{dataset, fixtures, portals, render, tokens};
 
 const USAGE: &str = "usage:
   glados info <file.p2c>...     summary, region graph and ASCII map
@@ -16,7 +16,15 @@ const USAGE: &str = "usage:
                                 search for interesting levels; writes the best + report.md
                                 (default out/evolve-<seed>)
   glados roundtrip <file.p2c>...  check parse -> write reproduces the file byte for byte
-  glados fixtures [dir]         write the synthetic test chambers (default fixtures/synthetic)";
+  glados fixtures [dir]         write the synthetic test chambers (default fixtures/synthetic)
+  glados tokens <file.p2c>...   the level as a token sequence (format: src/tokens.rs)
+  glados vocab                  every token the format uses, one per line
+  glados dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
+                                labelled token sequences as JSONL, and vocab.txt beside it
+                                (default data/levels-<seed>.jsonl)
+  glados score [--budget N] [--p2c DIR] [FILE]
+                                decode and solve one token sequence per line of FILE (or
+                                stdin); JSONL to stdout. --p2c writes the solvable ones";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -24,6 +32,15 @@ fn main() -> ExitCode {
         Some("info") if args.len() > 1 => args[1..].iter().try_for_each(|f| info(Path::new(f))),
         Some("solve") if args.len() > 1 => args[1..].iter().try_for_each(|f| solve(Path::new(f))),
         Some("evolve") => run_evolve(&args[1..]),
+        Some("tokens") if args.len() > 1 => args[1..]
+            .iter()
+            .try_for_each(|f| print_tokens(Path::new(f))),
+        Some("vocab") => {
+            println!("{}", tokens::vocab().join("\n"));
+            Ok(())
+        }
+        Some("dataset") => run_dataset(&args[1..]),
+        Some("score") => run_score(&args[1..]),
         Some("roundtrip") if args.len() > 1 => {
             args[1..].iter().try_for_each(|f| roundtrip(Path::new(f)))
         }
@@ -337,6 +354,162 @@ fn roundtrip(path: &Path) -> Result<()> {
         line + 1
     )
     .into())
+}
+
+fn print_tokens(path: &Path) -> Result<()> {
+    let (_, puzzle) = load(path)?;
+    match tokens::encode(&puzzle) {
+        Ok(t) => println!("{}: {} tokens\n{}\n", path.display(), t.len(), t.join(" ")),
+        Err(e) => println!("{}: can't encode: {e}\n", path.display()),
+    }
+    Ok(())
+}
+
+/// `--flag value` pairs; `positional` collects anything else.
+fn flags<'a>(args: &'a [String], positional: &mut Vec<&'a str>) -> Result<Vec<(&'a str, &'a str)>> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a.starts_with("--") {
+            let value = it.next().ok_or(format!("{a} needs a value"))?;
+            out.push((a.as_str(), value.as_str()));
+        } else {
+            positional.push(a);
+        }
+    }
+    Ok(out)
+}
+
+fn parse<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag}: bad value {value}").into())
+}
+
+fn run_dataset(args: &[String]) -> Result<()> {
+    use std::io::Write;
+    let mut cfg = dataset::Config::default();
+    let mut out = None;
+    let mut rest = Vec::new();
+    for (flag, value) in flags(args, &mut rest)? {
+        match flag {
+            "--seed" => cfg.seed = parse(flag, value)?,
+            "--count" => cfg.count = parse(flag, value)?,
+            "--budget" => cfg.budget = parse(flag, value)?,
+            "--fresh" => cfg.fresh = parse(flag, value)?,
+            "--out" => out = Some(PathBuf::from(value)),
+            _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
+        }
+    }
+    if !rest.is_empty() {
+        return Err(format!("unexpected {rest:?}\n{USAGE}").into());
+    }
+    let out = out.unwrap_or_else(|| PathBuf::from(format!("data/levels-{}.jsonl", cfg.seed)));
+    let dir = out.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("vocab.txt"), tokens::vocab().join("\n") + "\n")?;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&out)?);
+    println!(
+        "dataset: seed {}, {} levels, budget {}, {:.0}% fresh, {} threads -> {}",
+        cfg.seed,
+        cfg.count,
+        cfg.budget,
+        100.0 * cfg.fresh,
+        cfg.threads,
+        out.display()
+    );
+    let start = std::time::Instant::now();
+    let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+    let (mut n, mut tokens_total, mut tokens_max) = (0, 0, 0);
+    let mut io_error = None;
+    dataset::generate(&cfg, |s| {
+        if io_error.is_none() {
+            io_error = writeln!(file, "{}", s.json()).err();
+        }
+        *counts.entry(s.label.verdict()).or_default() += 1;
+        n += 1;
+        tokens_total += s.tokens.len();
+        tokens_max = tokens_max.max(s.tokens.len());
+        if n % 1000 == 0 || n == cfg.count {
+            println!(
+                "  {n:>7} levels in {:>6.1?}: {counts:?}; tokens mean {}, max {tokens_max}",
+                start.elapsed(),
+                tokens_total / n
+            );
+        }
+    });
+    if let Some(e) = io_error {
+        return Err(e.into());
+    }
+    file.flush()?;
+    Ok(())
+}
+
+fn run_score(args: &[String]) -> Result<()> {
+    use std::io::{Read, Write};
+    let mut budget = 50_000;
+    let mut p2c_dir = None;
+    let mut rest = Vec::new();
+    for (flag, value) in flags(args, &mut rest)? {
+        match flag {
+            "--budget" => budget = parse(flag, value)?,
+            "--p2c" => p2c_dir = Some(PathBuf::from(value)),
+            _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
+        }
+    }
+    let input = match rest.as_slice() {
+        [] | ["-"] => {
+            let mut s = String::new();
+            std::io::stdin().read_to_string(&mut s)?;
+            s
+        }
+        [file] => std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?,
+        _ => return Err(format!("score takes one input file\n{USAGE}").into()),
+    };
+    let lines: Vec<(usize, &str)> = input
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l.trim()))
+        .filter(|(_, l)| !l.is_empty())
+        .collect();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let scored = dataset::par_map(&lines, threads, |&(i, line)| {
+        let n = line.split_whitespace().count();
+        match tokens::decode(line) {
+            Err(e) => (
+                format!(
+                    "{{\"line\":{i},\"n_tokens\":{n},\"verdict\":\"unparsed\",\"problem\":{}}}",
+                    dataset::json_str(&e)
+                ),
+                None,
+            ),
+            Ok(p) => {
+                let normal: Vec<&str> = line.split_whitespace().collect();
+                let canonical = tokens::encode(&p).is_ok_and(|t| t == normal);
+                let label = dataset::label(&p, budget, i as u64);
+                let keep = matches!(label, dataset::Label::Solvable { .. }).then_some(p);
+                (
+                    format!(
+                        "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{}}}",
+                        label.json_fields()
+                    ),
+                    keep,
+                )
+            }
+        }
+    });
+    if let Some(dir) = &p2c_dir {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for ((i, _), (json, puzzle)) in lines.iter().zip(scored) {
+        writeln!(out, "{json}")?;
+        if let (Some(dir), Some(p)) = (&p2c_dir, puzzle) {
+            std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
+        }
+    }
+    out.flush()?;
+    Ok(())
 }
 
 fn write_fixtures(dir: &Path) -> Result<()> {
