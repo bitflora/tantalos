@@ -46,6 +46,15 @@ pub struct PlacedItem {
     pub cell: Cell,
     /// Surface normal (the item's up), if its angles are axis-aligned.
     pub normal: Option<Dir>,
+    /// `ITEM_PROPERTY_START_OPEN`, for items that have it (the exit door).
+    pub start_open: Option<bool>,
+}
+
+/// A `CONNECTION_STANDARD` wire: `sender` drives `receiver` (item indices).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub sender: i32,
+    pub receiver: i32,
 }
 
 pub struct Level {
@@ -53,6 +62,7 @@ pub struct Level {
     voxels: Voxels,
     goo: Vec<bool>,
     pub items: Vec<PlacedItem>,
+    pub links: Vec<Link>,
 }
 
 impl Level {
@@ -66,6 +76,18 @@ impl Level {
                     kind: ItemKind::from_type(it.kind()),
                     cell: it.voxel_pos()?,
                     normal: it.angles().and_then(up_from_angles),
+                    start_open: it.get_i32("ITEM_PROPERTY_START_OPEN").map(|v| v != 0),
+                })
+            })
+            .collect();
+        let links = p
+            .connections
+            .iter()
+            .filter(|c| c.get("Type") == Some("CONNECTION_STANDARD"))
+            .filter_map(|c| {
+                Some(Link {
+                    sender: c.get_i32("Sender")?,
+                    receiver: c.get_i32("Receiver")?,
                 })
             })
             .collect();
@@ -76,6 +98,7 @@ impl Level {
             voxels: p.voxels.clone(),
             goo: vec![false; n],
             items,
+            links,
         };
         level.flood_goo();
         level
@@ -109,6 +132,19 @@ impl Level {
         self.solid(c) != self.solid(step(c, d)) && self.voxels.face_portalable(c, d)
     }
 
+    /// Where something falling from open cell `c` comes to rest: the first cell down with a
+    /// floor under it. `None` if it ends in goo or `c` is solid.
+    pub fn fall(&self, c: Cell) -> Option<Cell> {
+        if self.solid(c) {
+            return None;
+        }
+        let mut f = c;
+        while !self.goo(f) && !self.solid(step(f, Dir::NegZ)) {
+            f = step(f, Dir::NegZ);
+        }
+        (!self.goo(f)).then_some(f)
+    }
+
     /// Every portalable surface, as (open cell, direction to the solid side).
     pub fn portal_surfaces(&self) -> Vec<(Cell, Dir)> {
         let mut out = Vec::new();
@@ -137,6 +173,18 @@ impl Level {
 
     pub fn of_kind<'a>(&'a self, kind: &'a ItemKind) -> impl Iterator<Item = &'a PlacedItem> + 'a {
         self.items.iter().filter(move |i| &i.kind == kind)
+    }
+
+    pub fn item(&self, index: i32) -> Option<&PlacedItem> {
+        self.items.iter().find(|i| i.index == index)
+    }
+
+    /// Senders wired into item `receiver`.
+    pub fn inputs(&self, receiver: i32) -> impl Iterator<Item = i32> + '_ {
+        self.links
+            .iter()
+            .filter(move |l| l.receiver == receiver)
+            .map(|l| l.sender)
     }
 
     pub fn entry(&self) -> Option<&PlacedItem> {

@@ -90,15 +90,10 @@ impl RegionGraph {
                             });
                         }
                     } else if !level.standable(n) {
-                        let mut f = n;
-                        while !level.goo(f) && !level.solid(step(f, Dir::NegZ)) {
-                            f = step(f, Dir::NegZ);
-                        }
-                        if !level.goo(f) {
-                            let to = g.region_of(f).unwrap();
+                        if let Some(f) = level.fall(n) {
                             edges.insert(Edge {
                                 from: r.id,
-                                to,
+                                to: g.region_of(f).unwrap(),
                                 kind: Move::Drop {
                                     height: n[2] - f[2],
                                 },
