@@ -1,0 +1,8 @@
+[package]
+name = "glados"
+version = "0.1.0"
+edition = "2021"
+description = "Portal 2 Puzzle Maker level tooling: .p2c I/O, level model, walkable regions"
+publish = false
+
+[dependencies]
