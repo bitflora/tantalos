@@ -184,4 +184,13 @@ risk; next steps are a style prior from real levels and in-game checks of the wi
   only walking and dropping while the clock runs.
 - Fizzlers clear portals and send a held or falling cube back to where it started; laser fields
   stop the player only. Glass stops shots; grating, laser fields don't.
-- Barrier and field layouts (see format facts) rest on one real file; confirm in the editor.
+- Barrier and field layouts (see format facts) rest on one real file. **Panels confirmed
+  (2026-10-10):** glass and grating 1×1, tall, wide, 3×2, a full wall, and a floor bridge all
+  built in the editor. **Fields:** a fizzler or laser field fills every cell it sweeps, from
+  its mounting wall to the far wall. The editor marks any other item there as misplaced and
+  won't build. The same goes for a door on the mounting wall in the cell beside the emitters
+  (seen in-game: a pedestal and the entry door in the sweep, and the exit door beside the
+  emitters). A door beside the far end built fine. `mount_problems` rejects all of these,
+  plus panels or fields crossing a sweep, as a precaution. The generator slides a field back
+  to the wall behind it and leaves out a field, button, pedestal or dropper that would collide.
+  About 13% of the solvable levels in the first datasets had such collisions.

@@ -300,3 +300,49 @@ fn held_cube_is_tracked_by_kind() {
         .iter()
         .all(|c| matches!(c.loc, CubeLoc::Loose(_))));
 }
+
+/// Problems the editor reports for a level written as tokens.
+fn field_problems(tokens: &str) -> Vec<String> {
+    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    level.mount_problems()
+}
+
+#[test]
+fn nothing_may_sit_in_a_fields_sweep() {
+    // Seen in the editor (2026-10-10): the pedestal and the entry door in the fizzler's sweep,
+    // and the exit door beside its emitters on the mounting wall, were marked misplaced and the
+    // level wouldn't build. Panels shaped like these built fine on their own.
+    const ROOM: &str = "size 6 6 4 s1 o3 | / entry 2 0 1 +y exit 3 5 1 -y";
+    let p = field_problems(&format!(
+        "{ROOM} fizzler 2 5 1 -y +z 3 on pedestal 2 5 1 inf"
+    ));
+    assert_eq!(p.len(), 3, "{p:?}");
+    assert!(p
+        .iter()
+        .any(|m| m.contains("EntryDoor") && m.contains("sweep")));
+    assert!(p
+        .iter()
+        .any(|m| m.contains("PedestalButton") && m.contains("sweep")));
+    assert!(p
+        .iter()
+        .any(|m| m.contains("ExitDoor") && m.contains("beside the emitters")));
+    // A grating panel across the sweep (playtest level that wouldn't build).
+    const OPEN: &str = "size 6 6 4 s1 o3 | / entry 0 0 1 +y exit 5 5 1 -y";
+    let p = field_problems(&format!(
+        "{OPEN} fizzler 2 5 1 -y +z 3 on grating 1 2 1 3 2 1 +y +z"
+    ));
+    assert!(p.len() == 1 && p[0].contains("Grating"), "{p:?}");
+    // The same panel off to the side, and a door beside the far end of the field, are fine
+    // (the latter built in the playtested fizzler-cube level).
+    assert!(field_problems(&format!(
+        "{OPEN} fizzler 2 5 1 -y +z 3 on grating 3 2 1 4 2 1 +y +z"
+    ))
+    .is_empty());
+    assert!(field_problems(
+        "size 6 6 4 s1 o3 | / entry 1 0 1 +y exit 5 5 1 -y fizzler 2 5 1 -y +z 3 on"
+    )
+    .is_empty());
+    for (name, p) in fixtures::all() {
+        assert!(Level::from_puzzle(&p).mount_problems().is_empty(), "{name}");
+    }
+}

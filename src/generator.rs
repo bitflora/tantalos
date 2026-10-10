@@ -12,6 +12,7 @@
 
 use crate::builder::Builder;
 use crate::geom::{step, Cell, Dir};
+use crate::level::Level;
 use crate::p2c::Puzzle;
 use crate::rng::Rng;
 
@@ -307,17 +308,12 @@ impl Genome {
             }
         }
 
-        let mut used: Vec<Cell> = Vec::new();
-        let mut claim = |c: Cell| {
-            let free = !used.contains(&c);
-            used.push(c);
-            free
-        };
         let entry = self.door_cell(self.entry, &h, &goo)?;
         let exit = self.door_cell(self.exit, &h, &goo)?;
-        if !claim(entry) || !claim(exit) {
+        if entry == exit {
             return None;
         }
+        let mut used: Vec<Cell> = vec![entry, exit];
         b.entry(entry, self.entry.side.opposite());
         let exit = b.exit(exit, self.exit.side.opposite());
 
@@ -332,51 +328,99 @@ impl Genome {
                 && c[2] >= h[c[0] as usize][c[1] as usize]
         };
 
-        // Panels and fields first: buttons need the fields' item indices. One that doesn't fit
-        // is left out rather than spoiling the whole genome.
-        let mut fields = Vec::new();
+        // Panels, then fields, before everything else: buttons need the fields' item indices.
+        // One that doesn't fit is left out rather than spoiling the whole genome. A field fills
+        // every cell it sweeps and the editor won't build anything else there, so a field whose
+        // sweep meets a door, panel or other field is left out too, as is a later dropper, button
+        // or pedestal that would stand in a sweep.
+        let mut panels: Vec<Cell> = Vec::new();
         for f in &self.features {
-            match *f {
-                Feature::Glass {
-                    at,
-                    side,
-                    len,
-                    height,
-                    grating,
-                } => {
-                    let Some(anchor) = column(at) else { continue };
-                    let (len, height) = (len.max(1), height.max(1));
-                    let along = Dir::PosZ.cross(side.opposite()).unwrap().vector();
-                    let fits = (0..len).all(|i| {
-                        (0..height).all(|j| {
-                            open([
+            if let Feature::Glass {
+                at,
+                side,
+                len,
+                height,
+                grating,
+            } = *f
+            {
+                let Some(anchor) = column(at) else { continue };
+                let (len, height) = (len.max(1), height.max(1));
+                let along = Dir::PosZ.cross(side.opposite()).unwrap().vector();
+                let fits = (0..len).all(|i| {
+                    (0..height).all(|j| {
+                        open([
+                            anchor[0] + along[0] * i,
+                            anchor[1] + along[1] * i,
+                            anchor[2] + j,
+                        ])
+                    })
+                });
+                if fits {
+                    b.glass(anchor, side, Dir::PosZ, 0, len - 1, height - 1, grating);
+                    for i in 0..len {
+                        for j in 0..height {
+                            panels.push([
                                 anchor[0] + along[0] * i,
                                 anchor[1] + along[1] * i,
                                 anchor[2] + j,
-                            ])
-                        })
-                    });
-                    if fits {
-                        b.glass(anchor, side, Dir::PosZ, 0, len - 1, height - 1, grating);
+                            ]);
+                        }
                     }
                 }
-                Feature::Field {
-                    at,
-                    normal,
-                    height,
-                    laser,
-                    start_on,
-                } => {
-                    let Some(anchor) = column(at) else { continue };
-                    if open(step(anchor, normal.opposite())) {
-                        continue; // Needs a wall behind it.
-                    }
-                    let height = height.clamp(1, top - anchor[2] + 1);
-                    fields.push(b.fizzler(anchor, normal, Dir::PosZ, height, laser, start_on));
-                }
-                _ => {}
             }
         }
+        let mut fields = Vec::new();
+        let mut swept: Vec<Cell> = Vec::new();
+        for f in &self.features {
+            if let Feature::Field {
+                at,
+                normal,
+                height,
+                laser,
+                start_on,
+            } = *f
+            {
+                let Some(mut anchor) = column(at) else {
+                    continue;
+                };
+                // Mounted on a wall: slide back along level floor until there is one.
+                loop {
+                    let back = step(anchor, normal.opposite());
+                    if !open(back) {
+                        break;
+                    }
+                    if column([back[0], back[1]]) != Some(back) {
+                        break;
+                    }
+                    anchor = back;
+                }
+                if open(step(anchor, normal.opposite())) {
+                    continue; // The floor drops or rises before the wall.
+                }
+                let height = height.clamp(1, top - anchor[2] + 1);
+                let mut sweep = Vec::new();
+                for j in 0..height {
+                    let mut c = [anchor[0], anchor[1], anchor[2] + j];
+                    while open(c) {
+                        sweep.push(c);
+                        c = step(c, normal);
+                    }
+                }
+                if sweep
+                    .iter()
+                    .any(|c| used.contains(c) || panels.contains(c) || swept.contains(c))
+                {
+                    continue;
+                }
+                swept.extend(sweep);
+                fields.push(b.fizzler(anchor, normal, Dir::PosZ, height, laser, start_on));
+            }
+        }
+        let mut claim = |c: Cell| {
+            let free = !used.contains(&c);
+            used.push(c);
+            free
+        };
         let target = |t: Target| match t {
             Target::Field(n) if !fields.is_empty() => fields[n % fields.len()],
             _ => exit,
@@ -387,6 +431,9 @@ impl Genome {
                 Feature::Dropper { at, cube } => {
                     let floor = column(at)?;
                     let dropper = [floor[0], floor[1], top];
+                    if swept.contains(&floor) || swept.contains(&dropper) {
+                        continue;
+                    }
                     if floor[2] + 2 > top || !claim(floor) || !claim(dropper) {
                         return None;
                     }
@@ -398,6 +445,9 @@ impl Genome {
                     target: t,
                 } => {
                     let cell = column(at)?;
+                    if swept.contains(&cell) {
+                        continue;
+                    }
                     if !claim(cell) {
                         return None;
                     }
@@ -410,6 +460,9 @@ impl Genome {
                     target: t,
                 } => {
                     let cell = column(at)?;
+                    if swept.contains(&cell) {
+                        continue;
+                    }
                     if !claim(cell) {
                         return None;
                     }
@@ -427,7 +480,13 @@ impl Genome {
                 }
             }
         }
-        Some(b.build())
+        // Features are placed independently, so a field can sweep through a door, button or
+        // panel; the editor won't build those.
+        let puzzle = b.build();
+        Level::from_puzzle(&puzzle)
+            .mount_problems()
+            .is_empty()
+            .then_some(puzzle)
     }
 }
 
