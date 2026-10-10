@@ -22,7 +22,7 @@ OUT=$1
 UNTIL=$2
 shift 2
 DATA=${DATA:-data/v2}
-PY=.venv/Scripts/python
+PY=${PY:-.venv/Scripts/python}
 GLADOS=target/release/glados.exe
 log() { echo "[$(date +%T)] $*"; }
 

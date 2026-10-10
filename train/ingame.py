@@ -79,6 +79,7 @@ def summarize(rows, source):
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")  # the report has "×"; Windows consoles default to cp1252
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("dir", nargs="?", help="evaluation directory holding samples.jsonl")
     ap.add_argument("--samples", help="scored JSONL (default <dir>/samples.jsonl)")
