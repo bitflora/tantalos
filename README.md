@@ -32,7 +32,12 @@ python -m venv .venv
 .venv/Scripts/python train/train.py --data data/levels.jsonl --out runs/first
 .venv/Scripts/python train/sample.py runs/first/best.pt --n 64 --verdict solvable --len 5-7 --p2c
 .venv/Scripts/python train/evaluate.py runs/first/best.pt --data data/levels.jsonl   # runs/first/eval/report.md
+bash train/night.sh 22:45 07:40   # generate until 22:45, train until 07:40, then evaluate
 ```
+`train.py --until 07:40` trains to a clock time, with the learning-rate schedule spread over the
+time left, and `--init CKPT` starts from another run's weights. While training it asks Windows
+not to sleep; a closed lid still sleeps. On this laptop the GPU throttles at about 87 °C, and
+running the generator at the same time slows both, so `night.sh` runs them in turn.
 - **Tokens** (`src/tokens.rs`): size, then rows of columns as solid/open/goo runs, then white
   surfaces as boxes, doors, panels, fields, droppers, buttons and pedestals with their wires.
   Repeats are free: `=` repeats the previous column. Columns left out of a row, and rows left

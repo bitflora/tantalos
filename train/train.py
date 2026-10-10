@@ -3,12 +3,14 @@
     cargo run --release -- dataset --count 200000 --out data/levels.jsonl
     python train/train.py --data data/levels.jsonl --out runs/first
 
-Every --eval-every steps: validation loss, then --score-n sampled levels run through
+--until 07:45 trains until a clock time instead of for --iters steps; --init starts from another
+run's weights. Every --eval-every steps: validation loss, then --score-n sampled levels run through
 `glados score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
 (lowest validation loss). Log: <out>/log.jsonl.
 """
 
 import argparse
+import datetime
 import json
 import math
 import random
@@ -41,6 +43,12 @@ def main():
     ap.add_argument("--min-lr", type=float, default=1e-4)
     ap.add_argument("--warmup", type=int, default=300)
     ap.add_argument("--iters", type=int, default=20_000)
+    ap.add_argument(
+        "--until",
+        default=None,
+        help="stop at this local time ('07:45' or '2026-10-10 07:45') instead of after --iters; "
+        "the learning-rate schedule then runs over the time left",
+    )
     ap.add_argument("--weight-decay", type=float, default=0.1)
     ap.add_argument(
         "--cond-drop",
@@ -53,10 +61,16 @@ def main():
     ap.add_argument("--score-n", type=int, default=32, help="levels sampled and scored per eval (0: off)")
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
     ap.add_argument("--resume", action="store_true", help="continue from <out>/last.pt")
+    ap.add_argument("--init", default=None, help="start from this checkpoint's weights (new optimizer and schedule)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
 
+    start = time.time()
+    deadline = until(args.until) if args.until else None
+    if deadline:
+        print(f"training until {datetime.datetime.fromtimestamp(deadline):%Y-%m-%d %H:%M}")
+    keep_awake()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     random.seed(args.seed)
@@ -81,9 +95,20 @@ def main():
     )
 
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout)
+    init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
+    if init:
+        # The model's shape comes from the checkpoint; --block/--layers/--heads/--embd are ignored.
+        if init["vocab"] != vocab.itos:
+            sys.exit(f"{args.init} was trained with a different vocabulary")
+        if init["model_config"]["block_size"] != args.block:
+            sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block to match")
+        cfg = Config(**init["model_config"])
     model = GPT(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)
     step, best = 0, float("inf")
+    if init:
+        model.load_state_dict(init["model"])
+        print(f"weights from {args.init}")
     if args.resume and (out / "last.pt").exists():
         ck = torch.load(out / "last.pt", map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])
@@ -95,7 +120,10 @@ def main():
     def lr_at(s):
         if s < args.warmup:
             return args.lr * (s + 1) / args.warmup
-        frac = min(1.0, (s - args.warmup) / max(1, args.iters - args.warmup))
+        if deadline:
+            frac = min(1.0, (time.time() - start) / (deadline - start))
+        else:
+            frac = min(1.0, (s - args.warmup) / max(1, args.iters - args.warmup))
         return args.min_lr + 0.5 * (args.lr - args.min_lr) * (1 + math.cos(math.pi * frac))
 
     def batch(levels, drop):
@@ -131,7 +159,10 @@ def main():
     log = open(out / "log.jsonl", "a")
     model.train()
     t0, tokens = time.time(), 0
-    while step < args.iters:
+    def finished():
+        return time.time() >= deadline if deadline else step >= args.iters
+
+    while not finished():
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         for _ in range(args.accum):
@@ -152,7 +183,8 @@ def main():
             print(f"step {step:>6}  loss {loss.item():.4f}  lr {lr_at(step):.2e}  {tokens / dt:,.0f} tok/s")
             t0, tokens = time.time(), 0
 
-        if step % args.eval_every == 0 or step == args.iters:
+        done = finished()
+        if step % args.eval_every == 0 or done:
             val_loss = evaluate()
             entry = {"step": step, "train_loss": loss.item(), "val_loss": val_loss}
             if args.score_n:
@@ -176,6 +208,31 @@ def main():
             )
             print(f"== step {step}: val {val_loss:.4f}{' (best)' if improved else ''}{extra}")
             t0, tokens = time.time(), 0
+        if done:
+            break
+
+
+def until(text):
+    """Unix time of a local 'HH:MM' (the next one) or 'YYYY-MM-DD HH:MM'."""
+    now = datetime.datetime.now()
+    if len(text) <= 5:
+        t = datetime.datetime.combine(now.date(), datetime.time.fromisoformat(text))
+        if t <= now:
+            t += datetime.timedelta(days=1)
+    else:
+        t = datetime.datetime.fromisoformat(text)
+    if t <= now:
+        sys.exit(f"--until {text} is in the past")
+    return t.timestamp()
+
+
+def keep_awake():
+    """Ask Windows not to sleep while this process runs (released when it exits)."""
+    if sys.platform == "win32":
+        import ctypes
+
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
 
 
 if __name__ == "__main__":
