@@ -322,7 +322,8 @@ def main():
         sys.exit("glados score didn't report canonical tokens: rebuild it (cargo build --release)")
     with open(out / "samples.jsonl", "w", encoding="utf-8") as f:
         for name, line, r in zip(owner, lines, results):
-            f.write(json.dumps({"setting": name, "line": line, **r}) + "\n")
+            # `sample` is the model's raw line; `line` is glados score's line number.
+            f.write(json.dumps({**r, "setting": name, "sample": line}) + "\n")
 
     by_setting = defaultdict(list)
     for name, r in zip(owner, results):

@@ -33,6 +33,7 @@ python -m venv .venv
 .venv/Scripts/python train/sample.py runs/first/best.pt --n 64 --verdict solvable --len 5-7 --p2c
 .venv/Scripts/python train/evaluate.py runs/first/best.pt --data data/levels.jsonl   # runs/first/eval/report.md
 bash train/night.sh 22:45 07:40   # generate until 22:45, train until 07:40, then evaluate
+RELABEL=1 bash train/retrain.sh runs/v2 "+3 hours"   # re-score data/v2 with the current solver, train, evaluate
 ```
 `train.py --until 07:40` trains to a clock time, with the learning-rate schedule spread over the
 time left, and `--init CKPT` starts from another run's weights. While training it asks Windows
