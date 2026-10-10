@@ -22,9 +22,12 @@ const USAGE: &str = "usage:
   glados dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
                                 labelled token sequences as JSONL, and vocab.txt beside it
                                 (default data/levels-<seed>.jsonl)
-  glados score [--budget N] [--p2c DIR] [FILE]
+  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [FILE]
                                 decode and solve one token sequence per line of FILE (or
-                                stdin); JSONL to stdout. --p2c writes the solvable ones";
+                                stdin); JSONL to stdout. --p2c writes the solvable ones,
+                                --p2c-all every one that parsed
+  glados editor <file.p2c|dir>...
+                                items the Puzzle Maker would mark invalid, one JSON line per file";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
         }
         Some("dataset") => run_dataset(&args[1..]),
         Some("score") => run_score(&args[1..]),
+        Some("editor") if args.len() > 1 => editor_check(&args[1..]),
         Some("roundtrip") if args.len() > 1 => {
             args[1..].iter().try_for_each(|f| roundtrip(Path::new(f)))
         }
@@ -449,11 +453,16 @@ fn run_score(args: &[String]) -> Result<()> {
     use std::io::{Read, Write};
     let mut budget = 50_000;
     let mut p2c_dir = None;
+    let mut all = false;
     let mut rest = Vec::new();
     for (flag, value) in flags(args, &mut rest)? {
         match flag {
             "--budget" => budget = parse(flag, value)?,
             "--p2c" => p2c_dir = Some(PathBuf::from(value)),
+            "--p2c-all" => {
+                p2c_dir = Some(PathBuf::from(value));
+                all = true;
+            }
             _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
         }
     }
@@ -491,7 +500,7 @@ fn run_score(args: &[String]) -> Result<()> {
                     format!("\"tokens\":{},", dataset::json_str(&t))
                 });
                 let label = dataset::label(&p, budget, i as u64);
-                let keep = matches!(label, dataset::Label::Solvable { .. }).then_some(p);
+                let keep = (all || matches!(label, dataset::Label::Solvable { .. })).then_some(p);
                 (
                     format!(
                         "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}}}",
@@ -513,6 +522,46 @@ fn run_score(args: &[String]) -> Result<()> {
         }
     }
     out.flush()?;
+    Ok(())
+}
+
+fn editor_check(args: &[String]) -> Result<()> {
+    let mut files = Vec::new();
+    for a in args {
+        let p = PathBuf::from(a);
+        if p.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(&p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|f| f.extension().is_some_and(|x| x == "p2c"))
+                .collect();
+            found.sort();
+            files.extend(found);
+        } else {
+            files.push(p);
+        }
+    }
+    for f in files {
+        let (_, puzzle) = load(&f)?;
+        let flags = glados::editor::editor_flags(&Level::from_puzzle(&puzzle));
+        let items: Vec<String> = flags
+            .iter()
+            .map(|fl| {
+                format!(
+                    "{{\"name\":\"{}\",\"pos\":[{},{},{}],\"rules\":[{}]}}",
+                    fl.name,
+                    fl.pos[0],
+                    fl.pos[1],
+                    fl.pos[2],
+                    fl.rules.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(",")
+                )
+            })
+            .collect();
+        println!(
+            "{{\"file\":{},\"flags\":[{}]}}",
+            dataset::json_str(&f.display().to_string()),
+            items.join(",")
+        );
+    }
     Ok(())
 }
 

@@ -515,6 +515,50 @@ enum Target {
 }
 
 /// Builds the puzzle a token sequence describes. Errors name the offending token.
+/// The fewest goo items whose flood (sideways and down, see `Level`) covers exactly
+/// `goo` (cells as (z, y, x)): one per group of goo cells joined sideways at one height that
+/// goo from above doesn't already flow into, on the group's first cell with a floor under it
+/// (the editor only takes goo on a floor) and, if it can, no item in it (`taken`). Items the
+/// flood reaches, like a door or button, then aren't standing in a goo item.
+fn goo_sources(
+    goo: &BTreeSet<(i32, i32, i32)>,
+    solid: &HashSet<Cell>,
+    taken: &HashSet<Cell>,
+) -> Vec<Cell> {
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut out = Vec::new();
+    for &start in goo {
+        if !seen.insert(start) {
+            continue;
+        }
+        let mut group = vec![start];
+        let mut i = 0;
+        while i < group.len() {
+            let (z, y, x) = group[i];
+            for (dy, dx) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
+                let n = (z, y + dy, x + dx);
+                if goo.contains(&n) && seen.insert(n) {
+                    group.push(n);
+                }
+            }
+            i += 1;
+        }
+        if group.iter().any(|&(z, y, x)| goo.contains(&(z + 1, y, x))) {
+            continue;
+        }
+        group.sort();
+        let floored = |&&(z, y, x): &&(i32, i32, i32)| z == 0 || solid.contains(&[x, y, z - 1]);
+        let free = |c: &&(i32, i32, i32)| !taken.contains(&[c.2, c.1, c.0]);
+        let (z, y, x) = *group
+            .iter()
+            .find(|c| floored(c) && free(c))
+            .or_else(|| group.iter().find(floored))
+            .unwrap_or(&group[0]);
+        out.push([x, y, z]);
+    }
+    out
+}
+
 pub fn decode(text: &str) -> Result<Puzzle, String> {
     let mut r = Reader {
         toks: text.split_whitespace().collect(),
@@ -524,7 +568,8 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
     let size = [r.num(1, MAX_NUM)?, r.num(1, MAX_NUM)?, r.num(1, MAX_NUM)?];
     let [sx, sy, sz] = size;
     let mut b = Builder::new(TITLE, size);
-    let mut goo_tops = Vec::new();
+    let mut goo_cells: BTreeSet<(i32, i32, i32)> = BTreeSet::new(); // (z, y, x)
+    let mut solid_cells: HashSet<Cell> = HashSet::new();
     let mut prev_col: Option<Vec<(char, i32)>> = None;
     let mut rows: Vec<Vec<Vec<(char, i32)>>> = Vec::new();
     let is_geometry = |t: Option<&str>| {
@@ -609,8 +654,16 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
                 if kind != 's' {
                     b.carve([x, y, z], [x, y, z + n - 1]);
                 }
-                if kind == 'g' {
-                    goo_tops.push([x, y, z + n - 1]);
+                for zz in z..z + n {
+                    match kind {
+                        'g' => {
+                            goo_cells.insert((zz, y, x));
+                        }
+                        's' => {
+                            solid_cells.insert([x, y, zz]);
+                        }
+                        _ => {}
+                    }
                 }
                 z += n;
             }
@@ -728,8 +781,15 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
             other => return r.fail(format!("unexpected {other:?}")),
         }
     }
-    for top in goo_tops {
-        b.goo(top);
+    // Cells other items stand in, which the editor won't let goo share.
+    let taken: HashSet<Cell> = Level::from_puzzle(&b.build())
+        .items
+        .iter()
+        .filter(|i| i.kind.is_mounted())
+        .map(|i| i.cell)
+        .collect();
+    for cell in goo_sources(&goo_cells, &solid_cells, &taken) {
+        b.goo(cell);
     }
     for (sender, target) in wires {
         let receiver = match target {

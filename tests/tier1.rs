@@ -374,22 +374,18 @@ fn nothing_may_sit_in_a_fields_sweep() {
     let p = field_problems(&format!(
         "{ROOM} fizzler 2 5 1 -y +z 3 on pedestal 2 5 1 inf"
     ));
-    assert_eq!(p.len(), 3, "{p:?}");
-    assert!(p
-        .iter()
-        .any(|m| m.contains("EntryDoor") && m.contains("sweep")));
-    assert!(p
-        .iter()
-        .any(|m| m.contains("PedestalButton") && m.contains("sweep")));
-    assert!(p
-        .iter()
-        .any(|m| m.contains("ExitDoor") && m.contains("beside the emitters")));
-    // A grating panel across the sweep (playtest level that wouldn't build).
+    assert!(p.iter().any(|m| m.contains("doorentry") && m.contains("in-field")), "{p:?}");
+    assert!(p.iter().any(|m| m.contains("button") && m.contains("in-field")), "{p:?}");
+    // Not caught: a door beside a field's emitters, and a grating panel across a field's
+    // path (another playtest level that wouldn't build). Over 2,403 levels checked in the
+    // game, a door there was flagged 19-33% of the time and a grating across a fizzler's path
+    // 29-54%, depending on geometry the editor module doesn't model; the in-game check
+    // (train/ingame.py) catches them.
     const OPEN: &str = "size 6 6 4 s1 o3 | / entry 0 0 1 +y exit 5 5 1 -y";
-    let p = field_problems(&format!(
+    assert!(field_problems(&format!(
         "{OPEN} fizzler 2 5 1 -y +z 3 on grating 1 2 1 3 2 1 +y +z"
-    ));
-    assert!(p.len() == 1 && p[0].contains("Grating"), "{p:?}");
+    ))
+    .is_empty());
     // The same panel off to the side, and a door beside the far end of the field, are fine
     // (the latter built in the playtested fizzler-cube level).
     assert!(field_problems(&format!(
@@ -400,6 +396,11 @@ fn nothing_may_sit_in_a_fields_sweep() {
         "size 6 6 4 s1 o3 | / entry 1 0 1 +y exit 5 5 1 -y fizzler 2 5 1 -y +z 3 on"
     )
     .is_empty());
+    // Glass across the path always conflicts (211 of 211 in the game).
+    let p = field_problems(&format!(
+        "{OPEN} fizzler 2 5 1 -y +z 3 on glass 1 2 1 3 2 1 +y +z"
+    ));
+    assert!(p.iter().any(|m| m.contains("glass-across-field")), "{p:?}");
     for (name, p) in fixtures::all() {
         assert!(Level::from_puzzle(&p).mount_problems().is_empty(), "{name}");
     }

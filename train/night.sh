@@ -46,3 +46,7 @@ log "evaluating runs/night/best.pt"
 $PY -u train/evaluate.py runs/night/best.pt --data data/levels.jsonl data/night/part.jsonl \
     > runs/night/evaluate.log 2>&1
 log "evaluation written to runs/night/eval/report.md"
+
+log "checking samples in Portal 2's editor"
+$PY -u train/ingame.py runs/night/eval > runs/night/ingame.log 2>&1 \
+    || log "in-game check failed; see runs/night/ingame.log"

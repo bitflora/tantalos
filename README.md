@@ -34,6 +34,7 @@ python -m venv .venv
 .venv/Scripts/python train/evaluate.py runs/first/best.pt --data data/levels.jsonl   # runs/first/eval/report.md
 bash train/night.sh 22:45 07:40   # generate until 22:45, train until 07:40, then evaluate
 RELABEL=1 bash train/retrain.sh runs/v2 "+3 hours"   # re-score data/v2 with the current solver, train, evaluate
+.venv/Scripts/python train/ingame.py runs/v2/eval      # check samples in Portal 2's editor (also run by retrain.sh)
 ```
 `train.py --until 07:40` trains to a clock time, with the learning-rate schedule spread over the
 time left, and `--init CKPT` starts from another run's weights. While training it asks Windows
@@ -168,7 +169,8 @@ under the model and not trivial, but mazy rather than elegant. That's the plan's
 risk; next steps are a style prior from real levels and in-game checks of the winners.
 
 ## Assumptions to verify in-game
-- Goo floods every open cell reachable sideways or downward from a goo item.
+- Goo floods every open cell reachable sideways or downward from a goo item. (The editor itself
+  only takes a goo item on a floor; whether the game floods beyond the items is unchecked.)
 - A 1-voxel ledge needs a cube to climb; 2+ voxels can't be climbed; any drop is survivable.
 - Generated files open in the editor and compile. **Confirmed for one level (2026-10-09):** a
   model sample (fizzler, cube, button, 2 portal trips, 8-action plan) opened in the Puzzle
@@ -187,11 +189,49 @@ risk; next steps are a style prior from real levels and in-game checks of the wi
   stop the player only. Glass stops shots; grating, laser fields don't.
 - Barrier and field layouts (see format facts) rest on one real file. **Panels confirmed
   (2026-10-10):** glass and grating 1×1, tall, wide, 3×2, a full wall, and a floor bridge all
-  built in the editor. **Fields:** a fizzler or laser field fills every cell it sweeps, from
-  its mounting wall to the far wall. The editor marks any other item there as misplaced and
-  won't build. The same goes for a door on the mounting wall in the cell beside the emitters
-  (seen in-game: a pedestal and the entry door in the sweep, and the exit door beside the
-  emitters). A door beside the far end built fine. `mount_problems` rejects all of these,
-  plus panels or fields crossing a sweep, as a precaution. The generator slides a field back
-  to the wall behind it and leaves out a field, button, pedestal or dropper that would collide.
-  About 13% of the solvable levels in the first datasets had such collisions.
+  built in the editor. Which placements the editor refuses is now measured in the game (next
+  section). The generator slides a field back to the wall behind it and leaves out a field,
+  button, pedestal or dropper that would sit in its sweep.
+
+## Editor placement rules (checked in the game)
+The Puzzle Maker marks misplaced items red and won't build. `src/editor.rs` predicts which items
+it flags, by the names and positions the game logs, and `mount_problems` (so `score`,
+`dataset` and relabelling) calls such levels invalid. `glados editor FILE|DIR` prints them.
+
+Fitted on 2,403 generated levels checked in Portal 2 (2026-10-10): the new rules agree with the
+game on 98.0% of levels (6 flagged that the game accepts, 43 missed), against 79.3% for the
+sweep rules they replace. Each rule matched the game on every item it flagged, except where noted:
+- Doors are sunk 3×3 cells wide and 4 deep into their wall (`EmbeddedVoxels` in
+  `portal2_dlc2/scripts/editoritems.txt`), and a dropper into its ceiling cell; two footprints
+  may not overlap. Two doors on one wall need 3 cells between them both ways.
+- Goo must have solid under it, and only cubes may share a cell with it (or anchor on a panel).
+- Glass/grating on a door's wall face, on any face of a dropper's cell, or on the face a
+  pedestal's column stands against (its local −x side) clashes with both.
+- A field collides with what is in the cells it sweeps (not the cells just across its plane):
+  floor buttons and droppers always, doors unless the field runs across their front, pedestals
+  when it is on their column side. Cubes never.
+- Glass across a field's path clashes, whatever the field. Parallel fields through the same cells,
+  and a fizzler crossing a laser field, clash (76% of items flagged).
+- Left to the in-game check (the game decides by finer geometry; flagged 20–55% of the time):
+  grating across a field, a panel on the field's own face, other crossing fields, fields side by
+  side, a door beside a field's emitters, a field beside a pedestal.
+
+The token decoder places one goo item per group of goo cells joined sideways at one height,
+on a floor and not in another item's cell; it used to put goo at the top of every goo run,
+which the editor rejects (all goo flags in the sample, and v2-4's).
+
+**In-game check** (`train/portal2.py`, `train/ingame.py`): starts Portal 2 with `-insecure`
+(VAC off for that session), opens the editor from the console, and patches one byte in
+`client.dll` in memory so `puzzlemaker_load_dev <path>` calls the loader the My Chambers list
+uses (the retail command is a stub), plus the editor's active flag that
+`puzzlemaker_export` checks. Export then logs `INVALID ITEM:  <name> ( x , y , z )` for every
+misplaced item and refuses, or writes a VMF. About 0.5–1 s per level; the game slows as it
+runs, so it restarts every 500 levels, and after a crash (the level is recorded as `crash`).
+It refuses to touch a game that is already running or wasn't started with `-insecure`, refuses
+a `client.dll` other than the Jan 2025 build, and puts back the editor autosaves it overwrites.
+`retrain.sh` runs `train/ingame.py` after evaluating: it checks every sample our checker passes
+and a fifth of the ones it rejects, appends `ingame/report.md` to the report, adds
+disagreements to `data/ingame/disagreements.jsonl` (for fitting rules with
+`tools/ingame/rules.py`) and game-invalid levels to `data/ingame/invalid.jsonl`, which later
+runs train on as invalid without relabelling. If the game can't be used it logs that and the
+run carries on.

@@ -491,8 +491,8 @@ impl Level {
         self.first(&ItemKind::ExitDoor)
     }
 
-    /// Mounted items whose cell isn't open or that have nothing solid behind them, plus
-    /// barriers that couldn't be decoded.
+    /// Mounted items whose cell isn't open or that have nothing solid behind them, items the
+    /// editor would mark misplaced (`editor`), and barriers that couldn't be decoded.
     pub fn mount_problems(&self) -> Vec<String> {
         let mut out: Vec<String> = self
             .items
@@ -523,80 +523,9 @@ impl Level {
                 }
             })
             .collect();
-        out.extend(self.field_problems());
+        // What the Puzzle Maker itself would refuse (misplaced items it shows in red).
+        out.extend(crate::editor::editor_problems(self));
         out.extend(self.decode_problems.iter().cloned());
-        out
-    }
-
-    /// A fizzler or laser field fills every cell it sweeps, and the editor marks any other
-    /// item there as misplaced and won't build (seen in-game: a pedestal button and both doors
-    /// in a fizzler's sweep). Panels and other fields count too, to be safe.
-    fn field_problems(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for (i, h) in self.hazards.iter().enumerate() {
-            let swept: std::collections::HashSet<Cell> = h.faces.iter().map(|&(c, _)| c).collect();
-            let what = format!("{:?} {}", h.kind, h.item);
-            for it in &self.items {
-                let blocks = matches!(
-                    it.kind,
-                    ItemKind::EntryDoor
-                        | ItemKind::ExitDoor
-                        | ItemKind::Cube
-                        | ItemKind::CubeDropper
-                        | ItemKind::FloorButton
-                        | ItemKind::PedestalButton
-                );
-                if blocks && swept.contains(&it.cell) {
-                    out.push(format!(
-                        "item {} {:?} at {:?} is in the sweep of {what}",
-                        it.index, it.kind, it.cell
-                    ));
-                }
-            }
-            // The emitters sit on the mounting wall and are wider than the field: an item on the
-            // same wall in the cell either side of them doesn't fit (seen in-game: an exit door
-            // there). A door beside the field's far end built fine.
-            let n = self.item(h.item).and_then(|it| it.normal);
-            let side = h.faces.first().map(|&(_, f)| f);
-            if let (Some(n), Some(side)) = (n, side) {
-                for &(c, _) in &h.faces {
-                    if !self.solid(step(c, n.opposite())) {
-                        continue;
-                    }
-                    for beside in [step(c, side), step(c, side.opposite())] {
-                        for it in &self.items {
-                            if it.kind.is_mounted()
-                                && it.index != h.item
-                                && it.normal == Some(n)
-                                && it.cell == beside
-                                && !swept.contains(&beside)
-                            {
-                                out.push(format!(
-                                    "item {} {:?} at {:?} is beside the emitters of {what}",
-                                    it.index, it.kind, it.cell
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-            for b in &self.barriers {
-                if b.faces.iter().any(|(c, _)| swept.contains(c)) {
-                    out.push(format!(
-                        "{:?} {} crosses the sweep of {what}",
-                        b.kind, b.item
-                    ));
-                }
-            }
-            for other in &self.hazards[i + 1..] {
-                if other.faces.iter().any(|(c, _)| swept.contains(c)) {
-                    out.push(format!(
-                        "{:?} {} crosses the sweep of {what}",
-                        other.kind, other.item
-                    ));
-                }
-            }
-        }
         out
     }
 
