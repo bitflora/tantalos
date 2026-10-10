@@ -5,8 +5,12 @@ A training sequence is
     <bos> <cond>... <sep> <level tokens>... <eos>
 
 Conditions describe the level (verdict, plan length, portal trips, cubes, which items it has).
-Each is dropped at random during training, so at sampling time any subset can be given and the
-rest are left to the model. Loss is only taken on the level tokens and <eos>.
+There is one slot per group, always in the same order, holding either a value or the group's
+`?` token, so the level starts at the same position however much is specified. (With slots
+simply left out, prompts with few conditions put the level where training rarely had it, and
+the model lost count of the size numbers.) Each sequence hides each condition with its own
+random probability, so at sampling time any subset can be given and the rest are left to the
+model. Loss is only taken on the level tokens and <eos>.
 """
 
 import json
@@ -30,7 +34,9 @@ GROUPS = {
     "cubes": ["<cubes:0>", "<cubes:1>", "<cubes:2+>"],
     **{f: [f"<{f}:no>", f"<{f}:yes>"] for f in FEATURES},
 }
-COND_TOKENS = [t for group in GROUPS.values() for t in group]
+# "Not specified", and the value of a group that doesn't apply (plan length of an unsolvable level).
+ANY = {group: f"<{group}:?>" for group in GROUPS}
+COND_TOKENS = [t for group, tokens in GROUPS.items() for t in tokens + [ANY[group]]]
 
 
 def conditions(record):
@@ -54,6 +60,19 @@ def conditions(record):
         present = any(t.startswith("g") and t[1:].isdigit() for t in level) if f == "goo" else f in has
         out.append(GROUPS[f][int(present)])
     return out
+
+
+def slots(conds):
+    """One token per group, in group order: the given condition, or the group's `?`."""
+    out = dict(ANY)
+    for t in conds:
+        group = next((g for g, tokens in GROUPS.items() if t in tokens or t == ANY[g]), None)
+        if group is None:
+            raise ValueError(f"{t} isn't a condition")
+        if out[group] != ANY[group]:
+            raise ValueError(f"two conditions for {group}: {out[group]} and {t}")
+        out[group] = t
+    return list(out.values())
 
 
 class Vocab:
@@ -80,17 +99,21 @@ class Vocab:
 class Levels:
     """All records of one split, as flat tensors."""
 
-    def __init__(self, level_ids, offsets, conds):
+    def __init__(self, level_ids, offsets, conds, any_ids):
         self.level_ids = level_ids  # int16, all levels end to end
         self.offsets = offsets  # int64, len N + 1
-        self.conds = conds  # list of lists of ids
+        self.conds = conds  # list of lists of ids, one per group
+        self.any_ids = any_ids  # each group's `?`
 
     def __len__(self):
         return len(self.conds)
 
     def sequence(self, i, drop):
-        """Token ids and loss mask for record i, each condition dropped with prob `drop`."""
-        conds = [c for c in self.conds[i] if random.random() >= drop]
+        """Token ids and loss mask for record i. Each condition is hidden with a probability
+        drawn uniformly from [0, `drop`] for this sequence, so both full and sparse prompts
+        are common."""
+        p = random.uniform(0, drop)
+        conds = [c if random.random() >= p else a for c, a in zip(self.conds[i], self.any_ids)]
         level = self.level_ids[self.offsets[i] : self.offsets[i + 1]].tolist()
         ids = [BOS] + conds + [SEP] + level + [EOS]
         learn = [False] * (len(conds) + 2) + [True] * (len(level) + 1)
@@ -136,12 +159,13 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
                 ids, offsets, conds = splits[split]
                 ids.extend(level)
                 offsets.append(len(ids))
-                conds.append(vocab.encode(conditions(r)))
+                conds.append(vocab.encode(slots(conditions(r))))
     out = {}
     for name, (ids, offsets, conds) in splits.items():
         out[name] = Levels(
             torch.frombuffer(ids, dtype=torch.int16) if ids else torch.zeros(0, dtype=torch.int16),
             torch.frombuffer(offsets, dtype=torch.int64),
             conds,
+            vocab.encode(ANY.values()),
         )
     return out["train"], out["val"], skipped

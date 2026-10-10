@@ -42,7 +42,12 @@ def main():
     ap.add_argument("--warmup", type=int, default=300)
     ap.add_argument("--iters", type=int, default=20_000)
     ap.add_argument("--weight-decay", type=float, default=0.1)
-    ap.add_argument("--cond-drop", type=float, default=0.25, help="chance each condition is hidden")
+    ap.add_argument(
+        "--cond-drop",
+        type=float,
+        default=1.0,
+        help="each sequence hides each condition with a chance drawn uniformly from [0, this]",
+    )
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--eval-batches", type=int, default=20)
     ap.add_argument("--score-n", type=int, default=32, help="levels sampled and scored per eval (0: off)")

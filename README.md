@@ -31,6 +31,7 @@ python -m venv .venv
 .venv/Scripts/pip install -r train/requirements.txt
 .venv/Scripts/python train/train.py --data data/levels.jsonl --out runs/first
 .venv/Scripts/python train/sample.py runs/first/best.pt --n 64 --verdict solvable --len 5-7 --p2c
+.venv/Scripts/python train/evaluate.py runs/first/best.pt --data data/levels.jsonl   # runs/first/eval/report.md
 ```
 - **Tokens** (`src/tokens.rs`): size, then rows of columns as solid/open/goo runs, then white
   surfaces as boxes, doors, panels, fields, droppers, buttons and pedestals with their wires.
@@ -46,13 +47,30 @@ python -m venv .venv
   solvable levels needing 0 actions falls from 34% to 10%, and portal use rises from 5% to 33%.
   About 250 levels/s on 12 threads. Seed-determined, independent of thread count.
 - **Scoring** (`glados score`): one token line in, one JSON line out (`unparsed`, `invalid`,
-  `unsupported`, `unsolvable`, `uncertain`, `solvable` + metrics; `canonical` if the line is
-  exactly what `encode` would write). `--p2c DIR` writes the solvable ones for playtesting.
+  `unsupported`, `unsolvable`, `uncertain`, `solvable` + metrics; `tokens`, the canonical form
+  of anything that parsed, and `canonical` if the line was already exactly that). `--p2c DIR`
+  writes the solvable ones for playtesting.
 - **Model** (`train/`): GPT-2-style decoder, 6 layers × 384 wide (~11M parameters), block 512,
   trained from scratch. A sequence is `<bos> conditions <sep> level <eos>`. Conditions: verdict,
   plan-length bucket, portal trips, cubes, and yes/no for fizzler, laser field, glass, grating,
-  pedestal and goo. Each is hidden 25% of the time, so sampling can fix any subset. Every eval
+  pedestal and goo. Each has a fixed slot holding its value or `?` (not given, or doesn't
+  apply), so the level always starts at the same position. Each sequence hides each condition
+  with a chance drawn from [0, 1], so sampling can fix any subset. The first run instead left
+  hidden conditions out, so the level's position varied. Prompts with only `<verdict:solvable>`
+  were then unlike anything in training, and the model dropped a size number: at step 5,000,
+  5% parsed with that prompt and 64% with full condition sets. Every eval
   samples levels conditioned on `<verdict:solvable>` and scores them with `glados score`.
+  Generation keeps a key/value cache, so each new token costs one position, not the whole level.
+- **Evaluation** (`train/evaluate.py`): samples 256 levels asked to be solvable, 64 with no
+  conditions, and 32 for every other condition value, scores them all, and writes `report.md`.
+  It covers: *validity* (parse, canonical, verdicts, the commonest parse errors);
+  *conditioning* (how often a level has what was asked for, against how often it has it
+  unasked); *novelty* (exact copies of dataset levels, and Jaccard similarity on token
+  4-grams to the nearest dataset level of the same size, with dataset levels against each other
+  as the baseline, because the generator's mutations have close neighbours too); and *model vs
+  generator* (solvable share, solvable levels per second, and the plan length, portal, cube,
+  item and score distributions of their solvable levels). `--cpu` samples on the CPU, for use
+  while the GPU is training: two jobs on a 4 GB card run out of memory and both crawl.
 - **First result** (RTX 3050 Laptop, 4 GB): about 50k tokens/s, so roughly 10 steps/s at batch
   32. On a 20k-level set, 3,000 steps (about 8 minutes) brought validation loss to 0.56 (0.89 at step 500).
   Of 256 samples asked for a solvable level, 46% parsed and 19% were solvable (mean plan 2
@@ -146,7 +164,10 @@ risk; next steps are a style prior from real levels and in-game checks of the wi
 ## Assumptions to verify in-game
 - Goo floods every open cell reachable sideways or downward from a goo item.
 - A 1-voxel ledge needs a cube to climb; 2+ voxels can't be climbed; any drop is survivable.
-- Generated files open in the editor and compile.
+- Generated files open in the editor and compile. **Confirmed for one level (2026-10-09):** a
+  model sample (fizzler, cube, button, 2 portal trips, 8-action plan) opened in the Puzzle
+  Maker, played, and was solved. The editor's puzzles live in
+  `steamapps/common/Portal 2/portal2/puzzles/<SteamID64>/`, not in Steam's userdata.
 - Line of sight: from the centre of a standable cell (64u eye) to the centre of the face.
   Grazing an edge counts as blocked.
 - Wall and floor portals can be walked into from the standable cell in front; ceiling portals

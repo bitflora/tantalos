@@ -485,12 +485,16 @@ fn run_score(args: &[String]) -> Result<()> {
             ),
             Ok(p) => {
                 let normal: Vec<&str> = line.split_whitespace().collect();
-                let canonical = tokens::encode(&p).is_ok_and(|t| t == normal);
+                let encoded = tokens::encode(&p).map(|t| t.join(" "));
+                let canonical = encoded.as_ref().is_ok_and(|t| *t == normal.join(" "));
+                let tokens = encoded.map_or(String::new(), |t| {
+                    format!("\"tokens\":{},", dataset::json_str(&t))
+                });
                 let label = dataset::label(&p, budget, i as u64);
                 let keep = matches!(label, dataset::Label::Solvable { .. }).then_some(p);
                 (
                     format!(
-                        "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{}}}",
+                        "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}}}",
                         label.json_fields()
                     ),
                     keep,

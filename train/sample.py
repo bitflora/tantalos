@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from data import BOS, EOS, SEP, GROUPS, Vocab  # noqa: E402
+from data import ANY, BOS, EOS, SEP, GROUPS, Vocab, slots  # noqa: E402
 from model import GPT, Config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,7 +33,9 @@ def load_checkpoint(path, device):
 
 
 def prompt(vocab, conds, prefix):
-    return [BOS] + vocab.encode(conds) + [SEP] + vocab.encode(prefix)
+    # Checkpoints from before condition slots have no `?` tokens and take the conditions as is.
+    cond = slots(conds) if ANY["verdict"] in vocab.stoi else list(conds)
+    return [BOS] + vocab.encode(cond) + [SEP] + vocab.encode(prefix)
 
 
 def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, batch=32):
@@ -49,7 +51,7 @@ def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, 
 
 def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None):
     """One result dict per line, from `glados score`."""
-    args = [str(glados), "score", "--budget", str(budget)]
+    args = [str(Path(glados).resolve()), "score", "--budget", str(budget)]
     if p2c_dir:
         args += ["--p2c", str(p2c_dir)]
     # Empty lines would be skipped by glados and break the alignment.
