@@ -146,14 +146,8 @@ fn glass_floor_is_a_floor() {
     assert_eq!(solvable_in(&fixtures::glass_bridge()).len(), 0);
 }
 
-#[test]
-fn fizzler_cube_needs_the_pedestal() {
-    let plan = solvable_in(&fixtures::fizzler_cube());
-    assert_eq!(plan.len(), 4);
-    assert!(plan.iter().any(|a| matches!(a, Action::Press { .. })));
-
-    // Unwired, the fizzler stays on and eats the cube on the way through.
-    let mut p = fixtures::fizzler_cube();
+/// `p` with the wires into its (one) fizzler cut, so it stays on.
+fn unwire_fizzler(mut p: Puzzle) -> Puzzle {
     let fizzler = p
         .items
         .iter()
@@ -164,6 +158,17 @@ fn fizzler_cube_needs_the_pedestal() {
     p.connections.retain(|c| {
         c.get_i32("Receiver") != Some(fizzler) || c.get("Type") != Some("CONNECTION_STANDARD")
     });
+    p
+}
+
+#[test]
+fn fizzler_cube_needs_the_pedestal() {
+    let plan = solvable_in(&fixtures::fizzler_cube());
+    assert_eq!(plan.len(), 4);
+    assert!(plan.iter().any(|a| matches!(a, Action::Press { .. })));
+
+    // Unwired, the fizzler stays on and eats the cube on the way through.
+    let p = unwire_fizzler(fixtures::fizzler_cube());
     assert_eq!(verdict(&p), Judgement::Unsolvable);
 
     let m = Model::new(&Level::from_puzzle(&p), Mode::Conservative).unwrap();
@@ -181,6 +186,59 @@ fn fizzler_cube_needs_the_pedestal() {
     assert_eq!(
         through.cubes[0].loc, m.start.cubes[0].loc,
         "the cube respawned"
+    );
+}
+
+#[test]
+fn shots_pass_a_fizzler_once_it_is_off() {
+    let plan = solvable_in(&fixtures::pedestal_window());
+    assert_eq!(plan.len(), 4);
+    // The far wall can only be shot after the press.
+    let press = plan
+        .iter()
+        .position(|a| matches!(a, Action::Press { .. }))
+        .unwrap();
+    let fires: Vec<usize> = (0..plan.len())
+        .filter(|&i| matches!(plan[i], Action::Fire { .. }))
+        .collect();
+    assert_eq!(fires.len(), 2);
+    assert!(fires[1] > press);
+
+    // Left on, it stops shots in both modes.
+    let p = unwire_fizzler(fixtures::pedestal_window());
+    assert_eq!(verdict(&p), Judgement::Unsolvable);
+}
+
+#[test]
+fn standing_on_a_button_holds_it_for_a_shot() {
+    let plan = solvable_in(&fixtures::button_window());
+    assert_eq!(plan.len(), 3);
+    assert!(matches!(
+        plan[0],
+        Action::Fire {
+            stand_on: Some(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        plan[1],
+        Action::Fire {
+            stand_on: None,
+            ..
+        }
+    ));
+
+    // A cube-only button ignores the player, and there is no cube.
+    let mut p = fixtures::button_window();
+    for it in &mut p.items {
+        if it.kind() == "ITEM_BUTTON_FLOOR" {
+            it.set("ITEM_PROPERTY_BUTTON_TYPE", "1");
+        }
+    }
+    assert_eq!(verdict(&p), Judgement::Unsolvable);
+    assert_eq!(
+        verdict(&unwire_fizzler(fixtures::button_window())),
+        Judgement::Unsolvable
     );
 }
 
@@ -277,7 +335,7 @@ fn liberal_sees_at_least_what_conservative_sees() {
             m.portals
                 .classes
                 .iter()
-                .map(|k| k.faces.len() * k.visible_from.iter().filter(|&&v| v).count())
+                .map(|k| k.faces.len() * k.visible_from.iter().filter(|v| !v.is_empty()).count())
                 .sum()
         };
         assert!(seen(&l) >= seen(&c), "{name}");

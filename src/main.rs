@@ -159,7 +159,7 @@ fn solve(path: &Path) -> Result<()> {
     );
     for c in &model.portals.classes {
         let seen: String = (0..model.graph.regions.len())
-            .filter(|&r| c.visible_from[r])
+            .filter(|&r| c.seen_from(r))
             .map(RegionGraph::label)
             .collect();
         let region = |r: Option<usize>| r.map_or('-', RegionGraph::label);

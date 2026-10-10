@@ -119,7 +119,7 @@ fn worked_example_face_classes() {
     // Every class can be seen from both regions: even B's floor-level wall shows over the
     // ledge lip from A's far corner (see line_of_sight_over_the_ledge for a cell that can't).
     for c in &m.portals.classes {
-        assert!(c.visible_from[a] && c.visible_from[b], "class {}", c.id);
+        assert!(c.seen_from(a) && c.seen_from(b), "class {}", c.id);
     }
 }
 

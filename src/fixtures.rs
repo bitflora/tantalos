@@ -172,6 +172,40 @@ pub fn fizzler_cube() -> Puzzle {
     b.build()
 }
 
+/// `goo_crossing` with a fizzler along the near edge of the trench, between the player and
+/// the far white wall, wired to a latching pedestal or (`button`) a floor button on the near
+/// side.
+fn fizzler_window(title: &str, button: bool) -> Puzzle {
+    let mut b = Builder::new(title, [8, 6, 4]);
+    b.carve([0, 0, 1], [7, 5, 3]);
+    b.carve([3, 0, 0], [4, 5, 0]);
+    b.goo([3, 2, 0]);
+    b.paint([0, 0, 1], [0, 5, 1], Dir::NegX, true);
+    b.paint([7, 0, 1], [7, 5, 3], Dir::PosX, true);
+    // Mounted on the y=-1 wall, three cells tall; field on x=2's +X faces.
+    let fizzler = b.fizzler([2, 0, 1], Dir::PosY, Dir::PosZ, 3, false, true);
+    // Not at x=1: a door can't sit beside the emitters.
+    b.entry([0, 0, 1], Dir::PosY);
+    b.exit([6, 5, 1], Dir::NegY);
+    let switch = if button {
+        b.floor_button([1, 3, 1])
+    } else {
+        b.pedestal([1, 4, 1], None)
+    };
+    b.connect(switch, fizzler);
+    b.build()
+}
+
+/// Press a latching pedestal to turn off the fizzler that hides the far wall, then portal.
+pub fn pedestal_window() -> Puzzle {
+    fizzler_window("Pedestal window", false)
+}
+
+/// Stand on the button to turn off the fizzler that hides the far wall and shoot through it.
+pub fn button_window() -> Puzzle {
+    fizzler_window("Button window", true)
+}
+
 /// A laser field splits a long room. A timed pedestal turns it off; run 5 voxels before it
 /// comes back. With `seconds` = 6 that's fine (140 u/s); 4 only at 190 u/s; 3 never.
 pub fn timed_field(seconds: u32) -> Puzzle {
@@ -213,6 +247,8 @@ pub fn all() -> Vec<(&'static str, Puzzle)> {
         ("grating_window", window(true)),
         ("glass_bridge", glass_bridge()),
         ("fizzler_cube", fizzler_cube()),
+        ("pedestal_window", pedestal_window()),
+        ("button_window", button_window()),
         ("timed_field", timed_field(6)),
         ("sphere_button", sphere_button()),
     ]

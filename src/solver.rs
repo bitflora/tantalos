@@ -11,9 +11,10 @@
 //! confidently solvable; liberal can't = confidently unsolvable; otherwise uncertain.
 //!
 //! Rules (ASSUMPTIONS until checked in-game), on top of `regions` and `portals`:
-//! - Floor buttons are held down only by cubes the button accepts (weighted: any; cube: not
-//!   the sphere; sphere: only the sphere). A player standing on one is ignored: they can't
-//!   also be somewhere else doing the thing the button enables.
+//! - Floor buttons are held down by cubes the button accepts (weighted: any; cube: not the
+//!   sphere; sphere: only the sphere). The player can stand on a weighted one too, but all
+//!   they do there is fire a portal from its cell while it is down (`Action::Fire` with
+//!   `stand_on`): walking off releases it.
 //! - Each receiver (exit door, fizzler, laser field) is on when all its inputs are (AND).
 //!   The exit door opens on that, inverted by `Start Open`; with no inputs it is open. A hazard
 //!   with inputs is on when `Start Enabled` XOR all inputs on; with none, `Start Enabled`.
@@ -22,16 +23,17 @@
 //!   Walking speed: conservative 140 u/s, liberal 190 u/s; falls take sqrt(2h/600) s.
 //! - Fizzlers: walking or falling through an active one clears both portals and destroys a
 //!   held cube, which respawns where it started. A cube falling through one respawns too.
-//!   Laser fields: the player can't pass an active one; cubes can.
+//!   Active fizzlers stop portal shots. Laser fields: the player can't pass an active one;
+//!   cubes can.
 //! - Conservative: no cube steps (unmeasured), no firing while carrying, strict line of
-//!   sight, any fizzler that can ever be on blocks shots. Liberal: the opposite.
+//!   sight. Liberal: the opposite.
 //! - A floor portal doesn't cut its region in two, and walking across it is optional.
 
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
 use crate::geom::{step, Cell, Dir};
 use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, MAX_HAZARDS};
-use crate::portals::{self, Landing, Portals, Sight};
+use crate::portals::{self, Landing, Masks, Portals, Sight};
 use crate::regions::{Move, RegionGraph};
 
 /// Items that don't affect play.
@@ -120,6 +122,9 @@ pub enum Action {
     Fire {
         color: Color,
         class: usize,
+        /// Fired standing on this floor button (index into `Model::buttons`), which is held
+        /// down meanwhile.
+        stand_on: Option<usize>,
     },
     /// Walk into the portal of this color.
     Enter {
@@ -196,6 +201,7 @@ pub struct Button {
     pub index: i32,
     pub region: Option<usize>,
     pub kind: ButtonKind,
+    cell: Cell,
 }
 
 #[derive(Clone, Debug)]
@@ -247,6 +253,9 @@ pub struct Model {
     /// Per region: where a cube dropped off each of its ledges lands.
     tosses: Vec<Vec<Landing>>,
     walk: WalkGraph,
+    /// Per floor button the player can stand on (`[]` for the others), per face class: the
+    /// masks of the clear shots from its cell.
+    button_sight: Vec<Vec<Masks>>,
     /// Face classes the search may use. Metrics switch one off to test whether it's needed.
     pub class_enabled: Vec<bool>,
 }
@@ -377,6 +386,7 @@ impl Model {
                 index: b.index,
                 region: graph.region_of(b.cell),
                 kind: b.button_kind(),
+                cell: b.cell,
             })
             .collect();
         let pedestals: Vec<Pedestal> = level
@@ -502,16 +512,15 @@ impl Model {
             return Err(problems);
         }
 
-        // Fizzlers that stop shots: conservative = any that can ever be on.
-        let mut blocking_hazards = 0u64;
+        // Fizzlers that stop shots: unwired ones that start on always do; wired ones while on.
+        let (mut blocking_hazards, mut switchable_hazards) = (0u64, 0u64);
         for (i, h) in hazards.iter().enumerate() {
-            let can_be_on = h.start_enabled || !h.inputs.is_empty();
-            let always_on = h.start_enabled && h.inputs.is_empty();
-            let blocks = match mode {
-                Mode::Conservative => can_be_on,
-                Mode::Liberal => always_on,
-            };
-            if h.kind == HazardKind::Fizzler && blocks {
+            if h.kind != HazardKind::Fizzler {
+                continue;
+            }
+            if !h.inputs.is_empty() {
+                switchable_hazards |= 1 << i;
+            } else if h.start_enabled {
                 blocking_hazards |= 1 << i;
             }
         }
@@ -522,6 +531,7 @@ impl Model {
                 walk_speed: 140.0,
                 sight: Sight {
                     blocking_hazards,
+                    switchable_hazards,
                     strict_grazing: true,
                     corner_targets: false,
                 },
@@ -532,6 +542,7 @@ impl Model {
                 walk_speed: 190.0,
                 sight: Sight {
                     blocking_hazards,
+                    switchable_hazards,
                     strict_grazing: false,
                     corner_targets: true,
                 },
@@ -543,6 +554,17 @@ impl Model {
             WalkGraph::default()
         };
         let portals = Portals::build(level, &graph, rules.sight);
+        let button_sight = buttons
+            .iter()
+            .map(|b| match b.region {
+                Some(_) if b.kind == ButtonKind::Weighted => portals
+                    .classes
+                    .iter()
+                    .map(|c| portals::shot_masks(level, &[b.cell], &c.faces, rules.sight))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
         Ok(Model {
             mode,
             rules,
@@ -565,43 +587,52 @@ impl Model {
             exit_inputs,
             tosses,
             walk,
+            button_sight,
         })
     }
 
-    /// `timed`: the timed pedestal currently running, if any.
-    fn signal(&self, s: &State, sig: Signal, timed: Option<usize>) -> bool {
-        match sig {
-            Signal::Floor(b) => s.cubes.iter().any(|c| c.loc == CubeLoc::OnButton(b)),
-            Signal::Pedestal(p) => timed == Some(p) || s.latched & (1 << p) != 0,
-        }
+    /// `held`: a signal held on for the moment, beyond what the state says: a running timed
+    /// pedestal, or a floor button the player stands on.
+    fn signal(&self, s: &State, sig: Signal, held: Option<Signal>) -> bool {
+        held == Some(sig)
+            || match sig {
+                Signal::Floor(b) => s.cubes.iter().any(|c| c.loc == CubeLoc::OnButton(b)),
+                Signal::Pedestal(p) => s.latched & (1 << p) != 0,
+            }
     }
 
-    fn all_on(&self, s: &State, inputs: &[Signal], timed: Option<usize>) -> bool {
-        inputs.iter().all(|&i| self.signal(s, i, timed))
+    fn all_on(&self, s: &State, inputs: &[Signal], held: Option<Signal>) -> bool {
+        inputs.iter().all(|&i| self.signal(s, i, held))
     }
 
-    fn exit_open_with(&self, s: &State, timed: Option<usize>) -> bool {
-        self.exit_inputs.is_empty()
-            || self.all_on(s, &self.exit_inputs, timed) != self.exit_inverted
+    fn exit_open_with(&self, s: &State, held: Option<Signal>) -> bool {
+        self.exit_inputs.is_empty() || self.all_on(s, &self.exit_inputs, held) != self.exit_inverted
     }
 
     pub fn exit_open(&self, s: &State) -> bool {
         self.exit_open_with(s, None)
     }
 
-    pub fn hazard_on(&self, s: &State, h: usize, timed: Option<usize>) -> bool {
+    fn hazard_on(&self, s: &State, h: usize, held: Option<Signal>) -> bool {
         let hz = &self.hazards[h];
         if hz.inputs.is_empty() {
             hz.start_enabled
         } else {
-            hz.start_enabled != self.all_on(s, &hz.inputs, timed)
+            hz.start_enabled != self.all_on(s, &hz.inputs, held)
         }
     }
 
-    fn active(&self, s: &State, mask: u64, kind: HazardKind, timed: Option<usize>) -> bool {
+    fn active(&self, s: &State, mask: u64, kind: HazardKind, held: Option<Signal>) -> bool {
         (0..self.hazards.len()).any(|h| {
-            mask & (1 << h) != 0 && self.hazards[h].kind == kind && self.hazard_on(s, h, timed)
+            mask & (1 << h) != 0 && self.hazards[h].kind == kind && self.hazard_on(s, h, held)
         })
+    }
+
+    /// Whether one of the shots with these masks gets past the fizzlers.
+    fn clear_shot(&self, s: &State, masks: &Masks, held: Option<Signal>) -> bool {
+        masks
+            .iter()
+            .any(|&m| !self.active(s, m, HazardKind::Fizzler, held))
     }
 
     pub fn is_goal(&self, s: &State) -> bool {
@@ -676,18 +707,45 @@ impl Model {
         }
 
         let can_fire = held.is_none() || self.rules.fire_while_holding;
+        // Free weighted buttons here the player could stand on.
+        let footholds: Vec<usize> = (0..self.buttons.len())
+            .filter(|&b| {
+                self.buttons[b].region == Some(r)
+                    && !self.button_sight[b].is_empty()
+                    && !s.cubes.iter().any(|c| c.loc == CubeLoc::OnButton(b))
+            })
+            .collect();
         for color in Color::BOTH {
             let me = color as usize;
             let other = s.portals[color.other() as usize];
             for class in &self.portals.classes {
                 let taken = other == Some(class.id) && class.faces.len() == 1;
-                let usable = self.class_enabled[class.id] && class.visible_from[r];
-                if can_fire && usable && s.portals[me] != Some(class.id) && !taken {
+                if !can_fire
+                    || !self.class_enabled[class.id]
+                    || s.portals[me] == Some(class.id)
+                    || taken
+                {
+                    continue;
+                }
+                let stand_on = if self.clear_shot(s, &class.visible_from[r], None) {
+                    Some(None)
+                } else {
+                    footholds
+                        .iter()
+                        .copied()
+                        .find(|&b| {
+                            let held = Some(Signal::Floor(b));
+                            self.clear_shot(s, &self.button_sight[b][class.id], held)
+                        })
+                        .map(Some)
+                };
+                if let Some(stand_on) = stand_on {
                     let mut n = s.clone();
                     n.portals[me] = Some(class.id);
                     let a = Action::Fire {
                         color,
                         class: class.id,
+                        stand_on,
                     };
                     out.push((a, n));
                 }
@@ -775,10 +833,11 @@ impl Model {
                 continue;
             }
             for &(to, fall, hazards) in &self.walk.moves[node] {
-                if self.active(s, hazards, HazardKind::LaserField, Some(p)) {
+                let timed = Some(Signal::Pedestal(p));
+                if self.active(s, hazards, HazardKind::LaserField, timed) {
                     continue;
                 }
-                let f = fizzled || self.active(s, hazards, HazardKind::Fizzler, Some(p));
+                let f = fizzled || self.active(s, hazards, HazardKind::Fizzler, timed);
                 let nt = t + ((step_time + fall_time(fall)) * 1e6) as u64;
                 if nt <= limit && best.get(&(to, f)).is_none_or(|&b| nt < b) {
                     best.insert((to, f), nt);
@@ -789,7 +848,7 @@ impl Model {
 
         let mut out = Vec::new();
         let exit = self.walk.node.get(&self.exit_cell);
-        if self.exit_open_with(s, Some(p)) && best.keys().any(|(n, _)| Some(n) == exit) {
+        if self.exit_open_with(s, Some(Signal::Pedestal(p))) && best.keys().any(|(n, _)| Some(n) == exit) {
             let mut n = s.clone();
             n.region = self.exit_region;
             n.escaped = true;
@@ -944,8 +1003,16 @@ impl Model {
                 };
                 format!("{what}{}", self.fields(hazards))
             }
-            Action::Fire { color, class } => format!(
-                "fire {} at class {class}: {}",
+            Action::Fire {
+                color,
+                class,
+                stand_on,
+            } => format!(
+                "{}fire {} at class {class}: {}",
+                stand_on.map_or(String::new(), |b| format!(
+                    "stand on button {} and ",
+                    self.buttons[b].index
+                )),
                 color.name(),
                 portals::describe(&self.portals.classes[class])
             ),
