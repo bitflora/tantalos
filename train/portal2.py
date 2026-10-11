@@ -217,7 +217,12 @@ def launch(log, saved, timeout=180):
         tag = f"GLADOS_{os.getpid()}_UP"
         if log.until(tag, timeout, poke=lambda: send([f"echo {tag}"], pid)) is None:
             raise GameUnavailable("the game didn't answer console commands")
-        send(["puzzlemaker_show 1", "puzzlemaker_switch_session puzzlemaker/preview sp"], pid)
+        # A game still starting up can answer the echo and then drop these, so resend them
+        # until the map starts loading.
+        open_editor = ["puzzlemaker_show 1", "puzzlemaker_switch_session puzzlemaker/preview sp"]
+        if log.until("Host_NewGame on map puzzlemaker/preview", timeout,
+                     poke=lambda: send(open_editor, pid)) is None:
+            raise GameUnavailable("the editor didn't start loading")
         if log.until("END loading assets", timeout) is None:
             raise GameUnavailable("the editor didn't open")
         time.sleep(3)
