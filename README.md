@@ -56,6 +56,12 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   pool of solvable ones that drifts toward higher `Metrics::score`. Over a 20k run the share of
   solvable levels needing 0 actions falls from 34% to 10%, and portal use rises from 5% to 33%.
   About 250 levels/s on 12 threads. Seed-determined, independent of thread count.
+  With turrets, gel and bigger rooms: about 13 levels/s. 40% of mutations now take their parent
+  from a reserve of 100 levels per mechanic (picked evenly over the mechanics seen), so rare ones
+  keep breeding: in 6k levels, cube-through-portal rose from 2% to 9% of solvable levels,
+  bounces from 2% to 13%, gel through a portal from 0 to 2%, and 0-action plans fell from 43% to
+  12%. Leaps stay near zero (orange gel rarely lands at the edge of a gap). Records carry
+  `mechanic_bits`, chain depth and the other metrics for conditioning.
 - **Scoring** (`glados score`): one token line in, one JSON line out (`unparsed`, `invalid`,
   `unsupported`, `unsolvable`, `uncertain`, `solvable` + metrics; `tokens`, the canonical form
   of anything that parsed, and `canonical` if the line was already exactly that). `--p2c DIR`

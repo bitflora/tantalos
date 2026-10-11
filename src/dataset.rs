@@ -248,10 +248,17 @@ fn sample(genome: &Genome, budget: usize, seed: u64) -> Option<Sample> {
     })
 }
 
+/// Parents kept per mechanic (bit of `Metrics::mechanics`), so rare mechanics keep breeding.
+const RESERVE: usize = 100;
+/// Share of mutations whose parent comes from a mechanic's reserve, picked evenly over the
+/// mechanics seen so far, rather than from the score-biased pool.
+const RESERVE_SHARE: f64 = 0.4;
+
 /// Emits `cfg.count` distinct levels in a seed-determined order.
 pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
     let mut rng = Rng::new(cfg.seed);
     let mut pool: Vec<(Genome, f64)> = Vec::new();
+    let mut reserves: Vec<Vec<Genome>> = vec![Vec::new(); crate::metrics::MECHANICS.len()];
     let mut seen = HashSet::new();
     let mut emitted = 0;
     // Fixed, so the job stream (and pool updates) don't depend on the thread count.
@@ -259,10 +266,17 @@ pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
     while emitted < cfg.count {
         let jobs: Vec<(Genome, u64)> = (0..BATCH)
             .map(|_| {
+                let stocked: Vec<usize> =
+                    (0..reserves.len()).filter(|&i| !reserves[i].is_empty()).collect();
                 let g = if pool.is_empty() || rng.chance(cfg.fresh) {
                     Genome::random(&mut rng)
                 } else {
-                    let mut g = rng.pick(&pool).0.clone();
+                    let mut g = if !stocked.is_empty() && rng.chance(RESERVE_SHARE) {
+                        let i = *rng.pick(&stocked);
+                        rng.pick(&reserves[i]).clone()
+                    } else {
+                        rng.pick(&pool).0.clone()
+                    };
                     for _ in 0..rng.range(1, 4) {
                         g.mutate(&mut rng);
                     }
@@ -284,6 +298,17 @@ pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
                 metrics: Some(m), ..
             } = &s.label
             {
+                for (i, reserve) in reserves.iter_mut().enumerate() {
+                    if m.mechanics & (1 << i) == 0 {
+                        continue;
+                    }
+                    if reserve.len() < RESERVE {
+                        reserve.push(s.genome.clone());
+                    } else {
+                        let j = rng.below(RESERVE);
+                        reserve[j] = s.genome.clone();
+                    }
+                }
                 let entry = (s.genome.clone(), m.score());
                 if pool.len() < cfg.pool {
                     pool.push(entry);
