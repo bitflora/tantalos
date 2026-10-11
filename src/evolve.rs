@@ -3,7 +3,7 @@
 //! depend only on the seed, not on the thread count.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use crate::generator::Genome;
@@ -21,6 +21,9 @@ pub struct Config {
     /// State budget per solve.
     pub budget: usize,
     pub threads: usize,
+    /// Smallest floor area (width × depth) a level may have. Big random rooms are rarely
+    /// solvable, so without a floor the search drifts back to small ones.
+    pub min_area: i32,
 }
 
 impl Default for Config {
@@ -29,8 +32,9 @@ impl Default for Config {
             seed: 1,
             population: 48,
             generations: 40,
-            budget: 50_000,
+            budget: 200_000,
             threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
+            min_area: 0,
         }
     }
 }
@@ -103,7 +107,8 @@ fn key(p: &Puzzle) -> u64 {
 
 /// Ranks by score (ties: older, then fewer states), drops behavioural duplicates, keeps `n`.
 /// Mutations that only touch unused space give a new file with identical metrics; without
-/// this the population fills with clones of one lineage.
+/// this the population fills with clones of one lineage. Each set of mechanics gets at most
+/// `n / 8` places (at least 4), so one kind of solution can't take over.
 fn cull(pop: &mut Vec<Candidate>, n: usize) {
     pop.sort_by(|a, b| {
         b.score
@@ -124,7 +129,15 @@ fn cull(pop: &mut Vec<Candidate>, n: usize) {
             m.necessary_classes,
             m.cubes,
             m.unnecessary_cubes,
+            m.mechanics,
         ))
+    });
+    let cap = (n / 8).max(4);
+    let mut niches: HashMap<u16, usize> = HashMap::new();
+    pop.retain(|c| {
+        let k = niches.entry(c.metrics.mechanics).or_default();
+        *k += 1;
+        *k <= cap
     });
     pop.truncate(n);
 }
@@ -160,7 +173,13 @@ pub fn evolve(cfg: &Config, mut progress: impl FnMut(&Stats, &[Candidate])) -> V
             break;
         }
         let jobs: Vec<_> = (0..cfg.population * 2)
-            .map(|_| (Genome::random(&mut rng), rng.next_u64()))
+            .map(|_| {
+                let mut g = Genome::random(&mut rng);
+                while area(&g) < cfg.min_area {
+                    g = Genome::random(&mut rng);
+                }
+                (g, rng.next_u64())
+            })
             .collect();
         evaluated += jobs.len();
         solved += admit(&mut pop, evaluate_all(&jobs, cfg, 0));
@@ -174,9 +193,14 @@ pub fn evolve(cfg: &Config, mut progress: impl FnMut(&Stats, &[Candidate])) -> V
     for generation in 1..=cfg.generations {
         let jobs: Vec<_> = (0..cfg.population)
             .map(|_| {
-                let mut child = tournament(&pop, &mut rng, 3).genome.clone();
+                let parent = &tournament(&pop, &mut rng, 3).genome;
+                let mut child = parent.clone();
                 for _ in 0..rng.range(1, 3) {
+                    let before = child.clone();
                     child.mutate(&mut rng);
+                    if area(&child) < cfg.min_area {
+                        child = before;
+                    }
                 }
                 (child, rng.next_u64())
             })
@@ -186,6 +210,10 @@ pub fn evolve(cfg: &Config, mut progress: impl FnMut(&Stats, &[Candidate])) -> V
         progress(&stats(generation, jobs.len(), solved, &pop), &pop);
     }
     pop
+}
+
+fn area(g: &Genome) -> i32 {
+    g.size[0] * g.size[1]
 }
 
 fn tournament<'a>(pop: &'a [Candidate], rng: &mut Rng, k: usize) -> &'a Candidate {

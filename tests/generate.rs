@@ -51,7 +51,20 @@ fn small(threads: usize) -> Config {
         generations: 4,
         budget: 50_000,
         threads,
+        min_area: 0,
     }
+}
+
+#[test]
+fn evolve_respects_min_area() {
+    let cfg = Config {
+        min_area: 100,
+        ..small(4)
+    };
+    let pop = evolve(&cfg, |_, pop| {
+        assert!(pop.iter().all(|c| c.genome.size[0] * c.genome.size[1] >= 100));
+    });
+    assert!(!pop.is_empty());
 }
 
 #[test]
@@ -103,4 +116,30 @@ fn genomes_produce_tier1_items() {
         barriers > 20 && hazards > 20 && pedestals > 20,
         "{barriers} {hazards} {pedestals}"
     );
+}
+
+#[test]
+fn genomes_make_big_rooms_walls_and_balconies() {
+    let mut rng = Rng::new(33);
+    let (mut big, mut walls, mut balconies) = (0, 0, 0);
+    for _ in 0..300 {
+        let mut g = Genome::random(&mut rng);
+        for _ in 0..10 {
+            g.mutate(&mut rng);
+        }
+        let Some(p) = g.build() else { continue };
+        let level = Level::from_puzzle(&p);
+        assert_eq!(level.mount_problems(), Vec::<String>::new(), "{g:?}");
+        let [sx, sy, sz] = level.size;
+        big += (sx > 10 || sy > 10) as usize;
+        for x in 0..sx {
+            for y in 0..sy {
+                let c: Vec<bool> = (0..sz).map(|z| level.solid([x, y, z])).collect();
+                // Solid all the way up: a wall. Open under solid: a balcony.
+                walls += c.iter().all(|&s| s) as usize;
+                balconies += c.windows(2).any(|w| !w[0] && w[1]) as usize;
+            }
+        }
+    }
+    assert!(big > 50 && walls > 50 && balconies > 50, "{big} {walls} {balconies}");
 }

@@ -12,7 +12,7 @@ use glados::{dataset, fixtures, portals, render, tokens};
 const USAGE: &str = "usage:
   glados info <file.p2c>...     summary, region graph and ASCII map
   glados solve <file.p2c>...    solvable / unsolvable / uncertain, shortest plan, metrics
-  glados evolve [--seed N] [--pop N] [--gens N] [--budget N] [--keep N] [--out DIR]
+  glados evolve [--seed N] [--pop N] [--gens N] [--budget N] [--min-area N] [--keep N] [--out DIR]
                                 search for interesting levels; writes the best + report.md
                                 (default out/evolve-<seed>)
   glados roundtrip <file.p2c>...  check parse -> write reproduces the file byte for byte
@@ -257,6 +257,7 @@ fn run_evolve(args: &[String]) -> Result<()> {
             "--pop" => cfg.population = num()?.max(2),
             "--gens" => cfg.generations = num()?,
             "--budget" => cfg.budget = num()?,
+            "--min-area" => cfg.min_area = num()? as i32,
             "--keep" => keep = num()?,
             "--out" => out = Some(PathBuf::from(value)),
             _ => {
