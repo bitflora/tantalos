@@ -31,7 +31,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import sample  # noqa: E402
-from data import GROUPS, conditions  # noqa: E402
+from data import GROUPS, conditions, groups_in  # noqa: E402
 
 SOLVABLE = "<verdict:solvable>"
 SHINGLE = 4
@@ -259,8 +259,9 @@ def report(ev):
                 f"| {key} (mean / median / p90) | {a['mean']:.2f} / {a['median']:.2f} / {a['p90']:.2f} "
                 f"| {b['mean']:.2f} / {b['median']:.2f} / {b['p90']:.2f} |"
             )
-    for group in ("len", "trips", "cubes", *[g for g in GROUPS if GROUPS[g][-1].endswith(":yes>")]):
-        tokens = GROUPS[group] if group in ("len", "trips", "cubes") else [GROUPS[group][1]]
+    graded = ("len", "trips", "cubes", "size", "diff")
+    for group in (*graded, *[g for g in GROUPS if GROUPS[g][-1].endswith(":yes>")]):
+        tokens = GROUPS[group] if group in graded else [GROUPS[group][1]]
         for t in tokens:
             lines.append(
                 f"| `{t}` | {pct(mod['conditions'].get(t, 0))} | {pct(gen['conditions'].get(t, 0))} |"
@@ -305,8 +306,9 @@ def main():
     # What to sample: the solvable baseline, nothing at all (the verdicts' base rate), and each
     # condition value in turn.
     settings = [("baseline", [SOLVABLE], args.n), ("unconditioned", [], 2 * args.n_cond)]
-    for group, tokens in GROUPS.items():
-        for t in tokens:
+    known = groups_in(vocab)
+    for group in known:
+        for t in GROUPS[group]:
             if t != SOLVABLE:
                 settings.append((t, [t] if group == "verdict" else [SOLVABLE, t], args.n_cond))
 
@@ -356,8 +358,8 @@ def main():
         return len(hs), hits, hits / max(len(hs), 1)
 
     conditioning = []
-    for group, tokens in GROUPS.items():
-        for t in tokens:
+    for group in known:
+        for t in GROUPS[group]:
             setting = "baseline" if t == SOLVABLE else t
             measurable, hits, acc = accuracy(setting, group, t)
             ref = "unconditioned" if group == "verdict" else "baseline"

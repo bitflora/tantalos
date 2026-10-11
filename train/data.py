@@ -4,13 +4,17 @@ A training sequence is
 
     <bos> <cond>... <sep> <level tokens>... <eos>
 
-Conditions describe the level (verdict, plan length, portal trips, cubes, which items it has).
+Conditions describe the level: verdict, plan length, portal trips, cubes, size, difficulty,
+which items and shapes it has, and which mechanics its solution uses.
 There is one slot per group, always in the same order, holding either a value or the group's
 `?` token, so the level starts at the same position however much is specified. (With slots
 simply left out, prompts with few conditions put the level where training rarely had it, and
 the model lost count of the size numbers.) Each sequence hides each condition with its own
 random probability, so at sampling time any subset can be given and the rest are left to the
 model. Loss is only taken on the level tokens and <eos>.
+
+Checkpoints trained before a group existed don't have its tokens; `groups_in(vocab)` lists the
+groups a checkpoint knows, and prompts for it only fill those slots.
 """
 
 import json
@@ -24,7 +28,29 @@ SPECIAL = ["<pad>", "<bos>", "<sep>", "<eos>"]
 PAD, BOS, SEP, EOS = range(4)
 
 LEN_BUCKETS = [(0, 0), (1, 2), (3, 4), (5, 7), (8, 11), (12, 10**9)]
-FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo"]
+FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo", "turret", "gel", "wall", "balcony"]
+# Floor area (width x depth): small, medium, large, extra large.
+SIZE_BUCKETS = [("s", 49), ("m", 100), ("l", 144), ("xl", 10**9)]
+# Difficulty: the solution's chain depth (steps that each need an earlier one; glados metrics).
+DIFF_BUCKETS = [0.0, 1.5, 3.0, 6.0, float("inf")]
+# glados `metrics::MECHANICS`, in bit order. Portal trips have their own group (`trips`).
+MECHANICS = [
+    "portal_trip",
+    "cube_portal",
+    "cube_button",
+    "stand_button",
+    "toss",
+    "latch",
+    "dash",
+    "fizzler_use",
+    "laser_use",
+    "turret_knock",
+    "bounce",
+    "leap",
+    "conversion",
+    "gel_portal",
+]
+MECH_GROUPS = MECHANICS[1:]
 
 # One group per condition; a sequence carries at most one token from each.
 GROUPS = {
@@ -33,10 +59,41 @@ GROUPS = {
     "trips": ["<trips:0>", "<trips:1>", "<trips:2+>"],
     "cubes": ["<cubes:0>", "<cubes:1>", "<cubes:2+>"],
     **{f: [f"<{f}:no>", f"<{f}:yes>"] for f in FEATURES},
+    "size": [f"<size:{name}>" for name, _ in SIZE_BUCKETS],
+    "diff": [f"<diff:{i}>" for i in range(len(DIFF_BUCKETS))],
+    **{m: [f"<{m}:no>", f"<{m}:yes>"] for m in MECH_GROUPS},
 }
 # "Not specified", and the value of a group that doesn't apply (plan length of an unsolvable level).
 ANY = {group: f"<{group}:?>" for group in GROUPS}
 COND_TOKENS = [t for group, tokens in GROUPS.items() for t in tokens + [ANY[group]]]
+
+
+def columns(level):
+    """The level's columns as lists of runs (e.g. ["s2", "o3"]), in the order written; `=` and
+    left-out columns aren't repeated, which doesn't matter for spotting shapes."""
+    out, cur = [], []
+    for t in level[4:]:
+        if t == "|":
+            out.append(cur)
+            cur = []
+        elif t in ("/", "="):
+            continue
+        elif len(t) > 1 and t[0] in "sog" and t[1:].isdigit():
+            cur.append(t)
+        else:
+            break
+    return out
+
+
+def shapes(level):
+    """(wall, balcony): a column solid to the ceiling; open space under something solid."""
+    height = level[3] if len(level) > 3 else None
+    cols = columns(level)
+    wall = any(c == [f"s{height}"] for c in cols)
+    balcony = any(
+        any(a[0] in "og" and b[0] == "s" for a, b in zip(c, c[1:])) for c in cols
+    )
+    return wall, balcony
 
 
 def conditions(record):
@@ -46,29 +103,57 @@ def conditions(record):
     if verdict not in ("solvable", "uncertain", "unsolvable"):
         verdict = "invalid"
     out = [f"<verdict:{verdict}>"]
+    metrics = record.get("metrics") or {}
     if verdict == "solvable":
         n = record["min_len"]
         lo, hi = next(b for b in LEN_BUCKETS if b[0] <= n <= b[1])
         out.append(GROUPS["len"][LEN_BUCKETS.index((lo, hi))])
-        trips = record.get("metrics", {}).get("portal_trips")
+        trips = metrics.get("portal_trips")
         if trips is not None:
             out.append(GROUPS["trips"][min(trips, 2)])
+        depth = metrics.get("chain_depth")
+        if depth is not None:
+            out.append(GROUPS["diff"][next(i for i, hi in enumerate(DIFF_BUCKETS) if depth <= hi)])
+        bits = metrics.get("mechanic_bits")
+        if bits is not None:
+            for i, m in enumerate(MECHANICS):
+                if m in GROUPS:
+                    out.append(GROUPS[m][(bits >> i) & 1])
     cubes = level.count("dropper")
     out.append(GROUPS["cubes"][min(cubes, 2)])
     has = set(level)
+    wall, balcony = shapes(level)
     for f in FEATURES:
-        present = any(t.startswith("g") and t[1:].isdigit() for t in level) if f == "goo" else f in has
+        if f == "goo":
+            present = any(t.startswith("g") and t[1:].isdigit() for t in level)
+        elif f == "wall":
+            present = wall
+        elif f == "balcony":
+            present = balcony
+        else:
+            present = f in has
         out.append(GROUPS[f][int(present)])
+    if len(level) > 3 and level[0] == "size" and level[1].isdigit() and level[2].isdigit():
+        area = int(level[1]) * int(level[2])
+        out.append(GROUPS["size"][next(i for i, (_, hi) in enumerate(SIZE_BUCKETS) if area <= hi)])
     return out
 
 
-def slots(conds):
-    """One token per group, in group order: the given condition, or the group's `?`."""
-    out = dict(ANY)
+def groups_in(vocab):
+    """The condition groups a vocabulary (a checkpoint's) has tokens for, in slot order."""
+    return [g for g in GROUPS if ANY[g] in vocab.stoi]
+
+
+def slots(conds, groups=None):
+    """One token per group (of `groups`, default all), in group order: the given condition,
+    or the group's `?`."""
+    out = {g: ANY[g] for g in (groups or GROUPS)}
     for t in conds:
         group = next((g for g, tokens in GROUPS.items() if t in tokens or t == ANY[g]), None)
         if group is None:
             raise ValueError(f"{t} isn't a condition")
+        if group not in out:
+            raise ValueError(f"{t}: this model wasn't trained with {group} conditions")
         if out[group] != ANY[group]:
             raise ValueError(f"two conditions for {group}: {out[group]} and {t}")
         out[group] = t

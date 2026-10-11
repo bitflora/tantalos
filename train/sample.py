@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from data import ANY, BOS, EOS, SEP, GROUPS, Vocab, slots  # noqa: E402
+from data import ANY, BOS, EOS, SEP, GROUPS, Vocab, groups_in, slots  # noqa: E402
 from model import GPT, Config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,8 +33,9 @@ def load_checkpoint(path, device):
 
 
 def prompt(vocab, conds, prefix):
-    # Checkpoints from before condition slots have no `?` tokens and take the conditions as is.
-    cond = slots(conds) if ANY["verdict"] in vocab.stoi else list(conds)
+    # Checkpoints from before condition slots have no `?` tokens and take the conditions as is;
+    # later ones get a slot for each group they were trained with.
+    cond = slots(conds, groups_in(vocab)) if ANY["verdict"] in vocab.stoi else list(conds)
     return [BOS] + vocab.encode(cond) + [SEP] + vocab.encode(prefix)
 
 
