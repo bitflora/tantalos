@@ -1,7 +1,8 @@
 //! Random chambers as a mutable genome: a room shaped by platforms, pits, dividing walls and
 //! balconies, with white patches, glass/grating panels, fizzlers/laser fields, cube droppers,
-//! floor and pedestal buttons (wired to the exit or to a field), and two doors on the outer
-//! walls. `Genome::build` turns it into a puzzle via `Builder`.
+//! turrets, gel droppers, floor and pedestal buttons (wired to the exit, a field or a gel
+//! dropper), and two doors on the outer walls. `Genome::build` turns it into a puzzle via
+//! `Builder`.
 //!
 //! Layout rules (keep generated files close to what the editor makes):
 //! - Floor is two voxels thick (`FLOOR`), so pits can be up to two deep.
@@ -71,6 +72,11 @@ pub enum Feature {
     /// A one-voxel slab at height `z` over the box: a floor above, open space below. Columns
     /// without two open voxels both above and below it are left out.
     Balcony { min: [i32; 2], max: [i32; 2], z: i32 },
+    /// A turret on this column's floor facing `facing` × 45° (0 = +x).
+    Turret { at: [i32; 2], facing: i32 },
+    /// Gel poured onto this column's floor from the ceiling above. `kind`: 0 repulsion,
+    /// 1 propulsion, 2 conversion, 3 water. It pours from the start unless a button drives it.
+    Gel { at: [i32; 2], kind: i32 },
     /// A glass (or grating) panel standing on this column's floor, on the cells' `side` faces,
     /// `len` cells wide and `height` tall.
     Glass {
@@ -91,12 +97,13 @@ pub enum Feature {
     },
 }
 
-/// What a button drives: the exit door, or the `n`-th field (modulo the number of fields that
-/// were built; the exit if there are none).
+/// What a button drives: the exit door, or the `n`-th field or gel dropper (modulo the number
+/// that were built; the exit if there are none).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
     Exit,
     Field(usize),
+    Gel(usize),
 }
 
 /// A door on the outer wall `side`, `along` cells from that wall's low end.
@@ -146,6 +153,8 @@ impl Genome {
             upto(0, 1.0),
             upto(0, 1.0),
             upto(0, 1.0),
+            upto(0, 1.0),
+            upto(0, 1.0),
         ];
         for (kind, &n) in counts.iter().enumerate() {
             for _ in 0..n {
@@ -170,7 +179,7 @@ impl Genome {
     }
 
     /// `kind`: 0 platform, 1 pit, 2 white, 3 dropper, 4 button, 5 glass, 6 field, 7 pedestal,
-    /// 8 wall, 9 balcony.
+    /// 8 wall, 9 balcony, 10 turret, 11 gel.
     fn random_feature(&self, rng: &mut Rng, kind: usize) -> Feature {
         match kind {
             0 => {
@@ -249,7 +258,7 @@ impl Genome {
                     gap_len: if rng.chance(0.7) { rng.range(1, 2) } else { 0 },
                 }
             }
-            _ => {
+            9 => {
                 let (min, max) = self.random_rect(rng);
                 Feature::Balcony {
                     min,
@@ -257,13 +266,21 @@ impl Genome {
                     z: rng.range(FLOOR + 2, (FLOOR + 2).max(self.size[2] - 3)),
                 }
             }
+            10 => Feature::Turret {
+                at: self.random_column(rng),
+                facing: rng.range(0, 7),
+            },
+            _ => Feature::Gel {
+                at: self.random_column(rng),
+                kind: random_paint(rng),
+            },
         }
     }
 
     pub fn mutate(&mut self, rng: &mut Rng) {
         match rng.below(20) {
             0..=5 => {
-                let kind = rng.below(10);
+                let kind = rng.below(12);
                 let f = self.random_feature(rng, kind);
                 self.features.push(f);
             }
@@ -522,9 +539,35 @@ impl Genome {
             used.push(c);
             free
         };
+        // Gels before buttons, which need their droppers' indices.
+        let mut gels = Vec::new();
+        for f in &self.features {
+            if let Feature::Gel { at, kind } = *f {
+                let Some(floor) = column(at) else { continue };
+                let mut dropper = floor;
+                while open(step(dropper, Dir::PosZ)) {
+                    dropper = step(dropper, Dir::PosZ);
+                }
+                if dropper == floor || swept.contains(&floor) || swept.contains(&dropper) {
+                    continue;
+                }
+                if !claim(floor) || !claim(dropper) {
+                    continue;
+                }
+                gels.push(b.gel_dropper(floor, kind.clamp(0, 3), true));
+            }
+        }
         let target = |t: Target| match t {
             Target::Field(n) if !fields.is_empty() => fields[n % fields.len()],
+            Target::Gel(n) if !gels.is_empty() => gels[n % gels.len()],
             _ => exit,
+        };
+        // A driven gel dropper pours only while its buttons are down.
+        let wire = |b: &mut Builder, sender: i32, receiver: i32| {
+            b.connect(sender, receiver);
+            if gels.contains(&receiver) {
+                b.gel_start(receiver, false);
+            }
         };
 
         for f in &self.features {
@@ -553,7 +596,7 @@ impl Genome {
                         return None;
                     }
                     let button = b.floor_button_of(cell, kind.clamp(0, 2));
-                    b.connect(button, target(t));
+                    wire(&mut b, button, target(t));
                 }
                 Feature::Pedestal {
                     at,
@@ -568,7 +611,14 @@ impl Genome {
                         return None;
                     }
                     let pedestal = b.pedestal(cell, timer);
-                    b.connect(pedestal, target(t));
+                    wire(&mut b, pedestal, target(t));
+                }
+                Feature::Turret { at, facing } => {
+                    let Some(cell) = column(at) else { continue };
+                    if swept.contains(&cell) || !claim(cell) {
+                        continue;
+                    }
+                    b.turret(cell, facing.rem_euclid(8) * 45);
                 }
                 _ => {}
             }
@@ -643,10 +693,20 @@ fn random_door(rng: &mut Rng, size: [i32; 3]) -> Door {
 }
 
 fn random_target(rng: &mut Rng) -> Target {
-    if rng.chance(0.6) {
-        Target::Exit
-    } else {
-        Target::Field(rng.below(4))
+    match rng.below(10) {
+        0..=5 => Target::Exit,
+        6..=8 => Target::Field(rng.below(4)),
+        _ => Target::Gel(rng.below(4)),
+    }
+}
+
+/// Repulsion and conversion most often; water least.
+fn random_paint(rng: &mut Rng) -> i32 {
+    match rng.below(10) {
+        0..=2 => 0,
+        3..=5 => 1,
+        6..=8 => 2,
+        _ => 3,
     }
 }
 
@@ -768,6 +828,20 @@ fn tweak(f: &mut Feature, rng: &mut Rng) {
             3 => *gap_len = (*gap_len + nudge(rng)).clamp(0, 3),
             _ => at[rng.below(2)] += nudge(rng),
         },
+        Feature::Turret { at, facing } => {
+            if rng.chance(0.4) {
+                *facing = (*facing + nudge(rng)).rem_euclid(8);
+            } else {
+                at[rng.below(2)] += nudge(rng);
+            }
+        }
+        Feature::Gel { at, kind } => {
+            if rng.chance(0.25) {
+                *kind = random_paint(rng);
+            } else {
+                at[rng.below(2)] += nudge(rng);
+            }
+        }
         Feature::Balcony { min, max, z } => match rng.below(4) {
             0 => *z = (*z + nudge(rng)).clamp(FLOOR + 2, MAX_HEIGHT - 3),
             1 => {

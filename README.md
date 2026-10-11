@@ -11,6 +11,8 @@ best levels it finds.
 and button types) and two solver modes that bracket the truth.
 **Slice 5:** levels as token sequences, a labelled dataset, scoring of model output, and a
 small GPT trained from scratch on them (`train/`).
+**Slice 6:** turrets and gel (repulsion, propulsion, conversion, water), in the solver,
+tokens, metrics and generator.
 
 ```bash
 cargo test
@@ -46,7 +48,9 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   depth. That was the main way early samples failed to parse. The worked example is 56 tokens;
   generated rooms average about 105 and stay under about 310. Round trip: `encode(decode(encode(p))) == encode(p)` and the
   solver's verdict is unchanged (tests on every fixture and hundreds of genomes). It keeps what
-  play depends on, not the file's bytes. Lasers, bridges, funnels, gel and the like are refused.
+  play depends on, not the file's bytes. Lasers, bridges, funnels and the like are refused.
+  Turrets and gel came later; their words are at the end of the vocabulary so earlier token
+  ids are unchanged.
 - **Dataset** (`glados dataset`): JSONL, one level per line with its tokens, verdict, plan length
   and metrics, plus `vocab.txt` beside it. Jobs are 30% fresh random genomes, 70% mutations of a
   pool of solvable ones that drifts toward higher `Metrics::score`. Over a 20k run the share of
@@ -108,18 +112,30 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   fizzler runs wall to wall right under a glass panel in the same plane, and the builder's
   output for both matches the editor's item for item (`tests/tier1.rs`).
 
-## Solver (Tiers 0 and 1)
+## Solver (Tiers 0 and 1, turrets and gel)
 `solve` runs two rule sets and reports **solvable** (conservative rules find a plan, printed),
 **unsolvable** (liberal rules find none), or **uncertain** (only liberal rules solve it, plan
 printed; or a budget ran out). It rejects levels that are invalid or use items it doesn't model
-(lasers, faith plates, bridges, funnels, gel, turrets, ...).
+(lasers, faith plates, bridges, funnels, ...).
 
 Search state = (region, portal face class per color, cubes as (kind, home, location), latched
-pedestals). Actions: drop, cube-step, walk through a field, fire, enter portal, pick up, put
-down (loose or on an accepting button), toss off a ledge, throw through a portal, press a
-latching pedestal, press a timed pedestal and dash on foot before it runs out. Reaching the exit
-region with the door open ends the plan (the plan's worked example is 5, not 6, because walking
-out isn't counted).
+pedestals, turrets knocked over, painted faces). Actions: drop, cube-step, walk through a field,
+fire, enter portal, pick up, put down (loose or on an accepting button), toss off a ledge, throw
+through a portal, press a latching pedestal, press a timed pedestal and dash on foot before it
+runs out, knock a turret over, bounce off repulsion gel, leap off propulsion gel. Reaching the
+exit region with the door open ends the plan (the plan's worked example is 5, not 6, because
+walking out isn't counted).
+
+- **Turrets** shoot within a cone. Regions split where the set of turrets that can shoot
+  changes, so walking out of a turret's sight is a move. Conservative rules never go where a
+  live turret can shoot; liberal ones run through but do nothing else there. A turret is knocked
+  over from its own cell or one beside it, by a cube landing on it, or by a portal opening in
+  the floor under it while the other is open (it falls through).
+- **Gel**: a pouring dropper paints where its stream lands after every action. With a portal
+  on the floor under the stream and the other on a ceiling, the gel lands under the ceiling
+  portal instead. Splats without a dropper are painted from the start; water washes paint off.
+  Droppers can be wired to buttons (they pour while the buttons are down). Conversion gel makes
+  faces portalable; repulsion floors give bounces; a run of propulsion floor gives a leap.
 
 | | Conservative | Liberal |
 |---|---|---|
@@ -129,6 +145,11 @@ out isn't counted).
 | shot targets | face centre | centre + 4 inset points |
 | fizzler that can ever be on | blocks shots | only one that is always on |
 | walking speed (timed dashes) | 140 u/s | 190 u/s |
+| turret sight | 60° either side, 16 voxels, grating doesn't stop bullets | 45°, 8 voxels, grating does |
+| in a live turret's sight | never | run through, nothing else |
+| paint spreads (Manhattan) | 1 voxel | 2 voxels |
+| repulsion bounce | up 1–2 voxels, 1 sideways | up 1–4, 2 sideways |
+| propulsion leap | 2 painted cells of run-up, gap up to 3 | 1 cell, gap up to 5 |
 
 | Chamber | Verdict |
 |---|---|
@@ -142,6 +163,11 @@ out isn't counted).
 | sphere_button | 2: the sphere, not the cube, on the sphere button |
 | step_ledge_cube | uncertain: only a cube-step solves it |
 | goo_pit, step_ledge, worked_example_black, glass_window | unsolvable |
+| turret_corridor | 2: knock the turret over, walk out of its old sight |
+| bounce_gel, speed_gel | 1: bounce up the ledge / leap the goo |
+| conversion_gel | 3: portals on the converted floor and the ceiling over the ledge, walk in |
+| redirect_gel | 3: portals under the stream and over the ledge, then bounce |
+| washed_gel | unsolvable: water washes the repulsion gel off |
 
 ## Metrics and score
 `solve` also prints, and `evolve` optimises, metrics from the full state space and ablations:
@@ -173,7 +199,9 @@ still a guess pending playtests.
 floor), two doors on the outer walls, and a list of features: platforms and pits, goo, walls
 from floor to ceiling with an optional opening, balconies (a one-voxel slab with space above and
 below), white patches, glass/grating panels, fizzlers/laser fields, ceiling cube droppers of any
-kind, floor buttons of any kind and pedestals, wired to the exit or a field. Feature counts
+kind, turrets facing any of 8 ways, gel droppers of any kind, floor buttons of any kind and
+pedestals, wired to the exit, a field or a gel dropper (which then pours only while they're
+down). Feature counts
 scale with floor area. Items stand on the highest floor of their column. The search scores
 levels with the conservative rules, so it can't win by leaning on unmeasured moves. `evolve`
 keeps an elitist population of solved levels, breeds children by mutation, drops behavioural
@@ -187,6 +215,13 @@ under the model and not trivial, but mazy rather than elegant. That's the plan's
 risk; next steps are a style prior from real levels and in-game checks of the winners.
 
 ## Assumptions to verify in-game
+- Turrets: the cone, range, what stops bullets, and that knocking one over from beside it,
+  dropping a cube on it or opening a portal under it puts it out for good. A player in its
+  sight is assumed dead (conservative) or able to run past (liberal).
+- Gel: how far paint spreads, bounce heights and reach, leap run-up and distance; gel through
+  a portal only lands from a ceiling portal. Generated gel copies the style map's one gel
+  (splat on the floor, dropper on the ceiling above, `CONNECTION_PAINT_DROPPER`); the export
+  type is a guess (set to the paint type), and splats without a dropper are unchecked.
 - Goo floods every open cell reachable sideways or downward from a goo item.
 - A 1-voxel ledge needs a cube to climb; 2+ voxels can't be climbed; any drop is survivable.
 - Generated files open in the editor and compile. **Confirmed for one level (2026-10-09):** a

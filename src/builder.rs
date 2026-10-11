@@ -391,6 +391,21 @@ impl Builder {
         dropper
     }
 
+    /// Whether the gel dropper `dropper` (and its splat) pours from the start.
+    pub fn gel_start(&mut self, dropper: i32, on: bool) -> &mut Self {
+        let splats: Vec<i32> = self
+            .connections
+            .iter()
+            .filter(|c| c.get("Type") == Some("CONNECTION_PAINT_DROPPER"))
+            .filter(|c| c.get_i32("Receiver") == Some(dropper))
+            .filter_map(|c| c.get_i32("Sender"))
+            .collect();
+        for item in splats.into_iter().chain([dropper]) {
+            self.items[item as usize].set("ITEM_PROPERTY_START_ENABLED", (on as i32).to_string());
+        }
+        self
+    }
+
     /// Gel that is there from the start, on the surface behind open `cell` against `normal`.
     /// ASSUMPTION: a splat with its dropper disabled needs no dropper item (unchecked).
     pub fn gel_splat(&mut self, cell: Cell, normal: Dir, paint_type: i32) -> i32 {

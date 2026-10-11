@@ -69,7 +69,7 @@ impl Label {
                          \"necessary_buttons\":{},\"necessary_pedestals\":{},\
                          \"load_bearing_fizzlers\":{},\"load_bearing_lasers\":{},\
                          \"load_bearing_turrets\":{},\"necessary_gels\":{},\
-                         \"necessary_items\":{},\"mechanics\":{},\"chain_depth\":{:.2},\
+                         \"necessary_items\":{},\"mechanics\":{},\"mechanic_bits\":{},\"chain_depth\":{:.2},\
                          \"travel\":{:.2},\"cube_travel\":{:.2},\"backtrack\":{:.2}}}",
                         m.score(),
                         m.portal_trips,
@@ -89,6 +89,7 @@ impl Label {
                         m.necessary_gels,
                         m.necessary_items(),
                         m.mechanics.count_ones(),
+                        m.mechanics,
                         m.chain_depth,
                         m.travel,
                         m.cube_travel,

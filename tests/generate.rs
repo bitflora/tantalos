@@ -143,3 +143,26 @@ fn genomes_make_big_rooms_walls_and_balconies() {
     }
     assert!(big > 50 && walls > 50 && balconies > 50, "{big} {walls} {balconies}");
 }
+
+#[test]
+fn genomes_produce_turrets_and_gel() {
+    let mut rng = Rng::new(44);
+    let (mut turrets, mut gels, mut wired) = (0, 0, 0);
+    for _ in 0..300 {
+        let mut g = Genome::random(&mut rng);
+        for _ in 0..10 {
+            g.mutate(&mut rng);
+        }
+        let Some(p) = g.build() else { continue };
+        let level = Level::from_puzzle(&p);
+        assert_eq!(level.mount_problems(), Vec::<String>::new(), "{g:?}");
+        turrets += level.turrets.len();
+        gels += level.gels.len();
+        wired += level
+            .gels
+            .iter()
+            .filter(|gel| gel.dropper.is_some_and(|(d, _)| level.inputs(d).next().is_some()))
+            .count();
+    }
+    assert!(turrets > 20 && gels > 20 && wired > 2, "{turrets} {gels} {wired}");
+}
