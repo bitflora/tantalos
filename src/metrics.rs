@@ -211,7 +211,11 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
         })
         .count();
 
-    // Ablations. Any non-solved verdict (including a blown budget) counts as "needed".
+    let path = replay(model, &plan).expect("the solver's own plan replays");
+
+    // Ablations. Any non-solved verdict (including a blown budget) counts as "needed". A face
+    // class, button or pedestal the plan never uses can't be needed (the plan still works
+    // without it), so only the ones it uses are tested.
     let solvable = |m: &Model| matches!(m.solve(budget).verdict, Verdict::Solved(_));
     let cubes = model.start.cubes.clone();
     let mut unnecessary_cubes = 0;
@@ -224,19 +228,35 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
     model.start.cubes = cubes;
     let classes = model.portals.classes.len();
     let mut necessary_classes = 0;
-    for c in 0..classes {
+    let fired = |c: usize| {
+        plan.iter()
+            .any(|a| matches!(*a, Action::Fire { class, .. } if class == c))
+    };
+    for c in (0..classes).filter(|&c| fired(c)) {
         model.class_enabled[c] = false;
         necessary_classes += !solvable(model) as usize;
         model.class_enabled[c] = true;
     }
+    let pressed = |b: usize| {
+        path.iter()
+            .any(|s| s.cubes.iter().any(|c| c.loc == CubeLoc::OnButton(b)))
+            || plan.iter().any(|a| {
+                matches!(*a, Action::Fire { stand_on: Some(on), .. } if on == b)
+            })
+    };
     let mut button_needed = vec![false; model.buttons.len()];
-    for b in 0..model.buttons.len() {
+    for b in (0..model.buttons.len()).filter(|&b| pressed(b)) {
         model.button_enabled[b] = false;
         button_needed[b] = !solvable(model);
         model.button_enabled[b] = true;
     }
+    let used = |p: usize| {
+        plan.iter().any(|a| {
+            matches!(*a, Action::Press { pedestal } | Action::Dash { pedestal, .. } if pedestal == p)
+        })
+    };
     let mut pedestal_needed = vec![false; model.pedestals.len()];
-    for p in 0..model.pedestals.len() {
+    for p in (0..model.pedestals.len()).filter(|&p| used(p)) {
         model.pedestal_enabled[p] = false;
         pedestal_needed[p] = !solvable(model);
         model.pedestal_enabled[p] = true;
@@ -263,7 +283,6 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
         }
     }
 
-    let path = replay(model, &plan).expect("the solver's own plan replays");
     let mut mechanics = 0u16;
     for a in &plan {
         let mut set = |bit: usize| mechanics |= 1 << bit;
