@@ -201,7 +201,7 @@ pub struct Button {
     pub index: i32,
     pub region: Option<usize>,
     pub kind: ButtonKind,
-    cell: Cell,
+    pub cell: Cell,
 }
 
 #[derive(Clone, Debug)]
@@ -210,11 +210,13 @@ pub struct Pedestal {
     pub region: Option<usize>,
     /// Seconds; `None` latches.
     pub timer: Option<f64>,
-    cell: Cell,
+    pub cell: Cell,
 }
 
+/// Something that drives a receiver: a floor button or a pedestal (indices into
+/// `Model::buttons` and `Model::pedestals`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Signal {
+pub enum Signal {
     Floor(usize),
     Pedestal(usize),
 }
@@ -247,7 +249,7 @@ pub struct Model {
     pub hazards: Vec<HazardInfo>,
     pub start: State,
     pub exit_region: usize,
-    exit_cell: Cell,
+    pub exit_cell: Cell,
     exit_inputs: Vec<Signal>,
     exit_inverted: bool,
     /// Per region: where a cube dropped off each of its ledges lands.
@@ -258,6 +260,12 @@ pub struct Model {
     button_sight: Vec<Vec<Masks>>,
     /// Face classes the search may use. Metrics switch one off to test whether it's needed.
     pub class_enabled: Vec<bool>,
+    /// Buttons and pedestals that send a signal. Metrics switch one off to test whether it's
+    /// needed: a disabled one never counts as pressed.
+    pub button_enabled: Vec<bool>,
+    pub pedestal_enabled: Vec<bool>,
+    /// Fields that can be on. Metrics switch one off to see whether it changes the solution.
+    pub hazard_enabled: Vec<bool>,
 }
 
 /// Every state reachable from the start, in BFS order, for metrics.
@@ -512,18 +520,14 @@ impl Model {
             return Err(problems);
         }
 
-        // Fizzlers that stop shots: unwired ones that start on always do; wired ones while on.
-        let (mut blocking_hazards, mut switchable_hazards) = (0u64, 0u64);
-        for (i, h) in hazards.iter().enumerate() {
-            if h.kind != HazardKind::Fizzler {
-                continue;
-            }
-            if !h.inputs.is_empty() {
-                switchable_hazards |= 1 << i;
-            } else if h.start_enabled {
-                blocking_hazards |= 1 << i;
-            }
-        }
+        // Fizzlers stop shots while on. Every fizzler goes in the shot masks, even one that is
+        // always on, so that switching it off (`hazard_enabled`) clears its shots too.
+        let blocking_hazards = 0u64;
+        let switchable_hazards = hazards
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.kind == HazardKind::Fizzler)
+            .fold(0u64, |m, (i, _)| m | 1 << i);
         let rules = match mode {
             Mode::Conservative => Rules {
                 cube_steps: false,
@@ -569,6 +573,9 @@ impl Model {
             mode,
             rules,
             class_enabled: vec![true; portals.classes.len()],
+            button_enabled: vec![true; buttons.len()],
+            pedestal_enabled: vec![true; pedestals.len()],
+            hazard_enabled: vec![true; hazards.len()],
             exit_inverted: !exit_inputs.is_empty() && exit_door.start_open == Some(true),
             exit_cell: exit_door.cell,
             graph,
@@ -594,11 +601,16 @@ impl Model {
     /// `held`: a signal held on for the moment, beyond what the state says: a running timed
     /// pedestal, or a floor button the player stands on.
     fn signal(&self, s: &State, sig: Signal, held: Option<Signal>) -> bool {
-        held == Some(sig)
-            || match sig {
-                Signal::Floor(b) => s.cubes.iter().any(|c| c.loc == CubeLoc::OnButton(b)),
-                Signal::Pedestal(p) => s.latched & (1 << p) != 0,
-            }
+        let enabled = match sig {
+            Signal::Floor(b) => self.button_enabled[b],
+            Signal::Pedestal(p) => self.pedestal_enabled[p],
+        };
+        enabled
+            && (held == Some(sig)
+                || match sig {
+                    Signal::Floor(b) => s.cubes.iter().any(|c| c.loc == CubeLoc::OnButton(b)),
+                    Signal::Pedestal(p) => s.latched & (1 << p) != 0,
+                })
     }
 
     fn all_on(&self, s: &State, inputs: &[Signal], held: Option<Signal>) -> bool {
@@ -609,13 +621,20 @@ impl Model {
         self.exit_inputs.is_empty() || self.all_on(s, &self.exit_inputs, held) != self.exit_inverted
     }
 
+    /// The buttons and pedestals wired to hazard `h`.
+    pub fn hazard_inputs(&self, h: usize) -> &[Signal] {
+        &self.hazards[h].inputs
+    }
+
     pub fn exit_open(&self, s: &State) -> bool {
         self.exit_open_with(s, None)
     }
 
     fn hazard_on(&self, s: &State, h: usize, held: Option<Signal>) -> bool {
         let hz = &self.hazards[h];
-        if hz.inputs.is_empty() {
+        if !self.hazard_enabled[h] {
+            false
+        } else if hz.inputs.is_empty() {
             hz.start_enabled
         } else {
             hz.start_enabled != self.all_on(s, &hz.inputs, held)
@@ -800,7 +819,7 @@ impl Model {
         }
 
         for (p, ped) in self.pedestals.iter().enumerate() {
-            if ped.region != Some(r) {
+            if ped.region != Some(r) || !self.pedestal_enabled[p] {
                 continue;
             }
             match ped.timer {

@@ -59,6 +59,12 @@ def jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
+# Metrics compared between model and generator. Older datasets lack the later ones, and a row
+# is only shown when both sides have it.
+METRIC_KEYS = ("score", "portal_trips", "necessary_classes", "random_success",
+               "necessary_items", "mechanics", "chain_depth", "travel")
+
+
 class Stats:
     """Distributions over solvable levels, fed one scored or dataset record at a time."""
 
@@ -77,7 +83,7 @@ class Stats:
         m = r.get("metrics") or {}
         self.values["plan length"].append(r["min_len"])
         self.values["tokens"].append(len(r["tokens"].split()))
-        for key in ("score", "portal_trips", "necessary_classes", "random_success"):
+        for key in METRIC_KEYS:
             if key in m:
                 self.values[key].append(m[key])
 
@@ -246,7 +252,7 @@ def report(ev):
             speed["model_solvable_per_s"], f"{gs['solvable'] / gs['seconds']:.1f}" if gs else "–"
         )
     )
-    for key in ("plan length", "portal_trips", "score", "necessary_classes", "random_success", "tokens"):
+    for key in ("plan length", *METRIC_KEYS, "tokens"):
         if key in mod and key in gen:
             a, b = mod[key], gen[key]
             lines.append(

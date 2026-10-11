@@ -65,7 +65,11 @@ impl Label {
                     s.push_str(&format!(
                         ",\"metrics\":{{\"score\":{:.4},\"portal_trips\":{},\"shortest_plans\":{},\
                          \"states\":{},\"dead_end_states\":{},\"cubes\":{},\"unnecessary_cubes\":{},\
-                         \"classes\":{},\"necessary_classes\":{},\"random_success\":{:.4}}}",
+                         \"classes\":{},\"necessary_classes\":{},\"random_success\":{:.4},\
+                         \"necessary_buttons\":{},\"necessary_pedestals\":{},\
+                         \"load_bearing_fizzlers\":{},\"load_bearing_lasers\":{},\
+                         \"necessary_items\":{},\"mechanics\":{},\"chain_depth\":{:.2},\
+                         \"travel\":{:.2},\"cube_travel\":{:.2},\"backtrack\":{:.2}}}",
                         m.score(),
                         m.portal_trips,
                         m.shortest_plans,
@@ -75,7 +79,17 @@ impl Label {
                         m.unnecessary_cubes,
                         m.classes,
                         m.necessary_classes,
-                        m.random_success
+                        m.random_success,
+                        m.necessary_buttons,
+                        m.necessary_pedestals,
+                        m.load_bearing_fizzlers,
+                        m.load_bearing_lasers,
+                        m.necessary_items(),
+                        m.mechanics.count_ones(),
+                        m.chain_depth,
+                        m.travel,
+                        m.cube_travel,
+                        m.backtrack
                     ));
                 }
             }

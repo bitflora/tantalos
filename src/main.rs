@@ -225,6 +225,18 @@ fn metric_lines(m: &Metrics) -> Vec<String> {
             m.classes,
             m.necessary_classes
         ),
+        format!(
+            "necessary: {} buttons, {} pedestals; load-bearing: {} fizzlers, {} laser fields",
+            m.necessary_buttons, m.necessary_pedestals, m.load_bearing_fizzlers, m.load_bearing_lasers
+        ),
+        format!(
+            "chain depth {:.1}; travel {:.1}, cube travel {:.1}, backtrack {:.1} voxels; mechanics: {}",
+            m.chain_depth,
+            m.travel,
+            m.cube_travel,
+            m.backtrack,
+            m.mechanic_names().join(", ")
+        ),
     ]
 }
 

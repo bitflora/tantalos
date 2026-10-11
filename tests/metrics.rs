@@ -80,3 +80,36 @@ fn random_players_are_seeded() {
     };
     assert_eq!(run(3), run(3));
 }
+
+#[test]
+fn worked_example_components_and_distance() {
+    let m = measure(&fixtures::worked_example());
+    assert_eq!(m.cubes - m.unnecessary_cubes, 1);
+    assert_eq!(m.necessary_buttons, 1);
+    assert_eq!(m.mechanic_names(), ["portal trip", "cube on a button"]);
+    // The two shots don't need each other; walking into the portal needs both, and putting
+    // the cube down needs the trip: 1 + 1 + 0.5.
+    assert_eq!(m.chain_depth, 2.5);
+    assert!(m.travel > 0.0 && m.cube_travel > 0.0);
+}
+
+#[test]
+fn fields_that_shape_the_plan_are_load_bearing() {
+    let m = measure(&fixtures::fizzler_cube());
+    assert_eq!((m.necessary_pedestals, m.load_bearing_fizzlers), (1, 1));
+    let m = measure(&fixtures::timed_field(6));
+    assert_eq!(m.load_bearing_lasers, 1);
+    assert!(m.mechanic_names().contains(&"timed dash"));
+    // Only there to make the player stand on the button while shooting.
+    let m = measure(&fixtures::button_window());
+    assert_eq!((m.necessary_buttons, m.load_bearing_fizzlers), (1, 1));
+    assert!(m.mechanic_names().contains(&"fire standing on a button"));
+}
+
+#[test]
+fn flat_room_has_no_components() {
+    let m = measure(&fixtures::flat_room());
+    assert_eq!(m.necessary_items(), 0);
+    assert_eq!(m.mechanics, 0);
+    assert_eq!((m.chain_depth, m.travel, m.cube_travel, m.backtrack), (0.0, 0.0, 0.0, 0.0));
+}
