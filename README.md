@@ -147,21 +147,40 @@ out isn't counted).
 `solve` also prints, and `evolve` optimises, metrics from the full state space and ablations:
 plan length and portal trips, number of shortest plans, dead-end (softlock) states, cubes that
 aren't needed, face classes that are (painting one black makes the level unsolvable), and the
-share of random players that stumble out. `Metrics::score` folds them into one number:
-log of weighted effort (portal shots and timed dashes 1, trips 2, latching presses 0, other
-actions 0.5) + random players failing +
-necessary classes − unnecessary cubes − softlock share. The first version rewarded plan length
-linearly and bred 30-action staircase slogs; weights are still a guess pending playtests.
+share of random players that stumble out. Also:
+- **Components:** floor buttons and pedestals the level can't be solved without (switch one
+  off and re-solve), and fizzlers/laser fields that shape the plan (switched off, the plan
+  gets shorter or easier, or a necessary button or pedestal drives them). Only items the plan
+  uses are tested; the rest can't be needed.
+- **Mechanics:** which of portal trip, cube through a portal, cube on a button, firing while
+  standing on a button, tossing off a ledge, latching pedestal, timed dash, fizzler and laser
+  field the plan uses.
+- **Chain depth:** replay the plan leaving out one step; later steps that can no longer be done
+  need it. The longest weighted chain of such needs (walking and cube chores 0.5, the rest 1):
+  serial puzzles score higher than piles of independent chores.
+- **Distance:** player travel between region centres (portal jumps included), how far cubes end
+  up from home, and backtracking (moving away from the exit), in voxels.
+
+`Metrics::score` folds them into one number: log of weighted effort (portal shots and timed
+dashes 1, trips 2, latching presses 0, other actions 0.5) + random players failing + necessary
+classes + per kind log(1 + necessary items) + mechanics used + log chain depth + log distances
+− unnecessary cubes − softlock share. The first version rewarded plan length linearly and bred
+30-action staircase slogs; the second (effort, surfaces) bred small portal mazes. Weights are
+still a guess pending playtests.
 
 ## Generator and search
-`generator::Genome`: room size, two doors on the outer walls, and a list of features (platforms
-and pits on a heightmap, goo, white patches, glass/grating panels, fizzlers/laser fields, ceiling
-cube droppers of any kind, floor buttons of any kind and pedestals, wired to the exit or a
-field). The search scores levels with the conservative rules, so it can't win by leaning on
-unmeasured moves. `evolve` keeps an elitist population of solved levels, breeds children by mutation, and
-drops behavioural duplicates (same size and metrics) so it doesn't fill with clones. Results
-depend only on the seed. 40 generations of 48 took 25 s–3 min on 12 threads: later generations,
-and levels with timed pedestals (a dash is re-solved in every state), are slower.
+`generator::Genome`: room size (6–14 wide at random, mutations 4–16; 3–8 voxels tall over the
+floor), two doors on the outer walls, and a list of features: platforms and pits, goo, walls
+from floor to ceiling with an optional opening, balconies (a one-voxel slab with space above and
+below), white patches, glass/grating panels, fizzlers/laser fields, ceiling cube droppers of any
+kind, floor buttons of any kind and pedestals, wired to the exit or a field. Feature counts
+scale with floor area. Items stand on the highest floor of their column. The search scores
+levels with the conservative rules, so it can't win by leaning on unmeasured moves. `evolve`
+keeps an elitist population of solved levels, breeds children by mutation, drops behavioural
+duplicates (same size and metrics) so it doesn't fill with clones, and gives each set of
+mechanics at most an eighth of the places. Big random rooms are rarely solvable (about 70%
+of those over 100 cells of floor are unsolvable), so the search drifts back to small ones unless
+`--min-area` holds it to big rooms. Results depend only on the seed.
 
 What it finds today: portal-hopping mazes with many necessary surfaces, 10–25 actions. Solvable
 under the model and not trivial, but mazy rather than elegant. That's the plan's "hard ≠ fun"
