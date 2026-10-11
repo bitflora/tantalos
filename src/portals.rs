@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::geom::{step, Cell, Dir};
+use crate::geom::{step, step_orders, Cell, Dir};
 use crate::level::{BarrierKind, ItemKind, Level};
 use crate::regions::RegionGraph;
 
@@ -228,29 +228,30 @@ pub fn shot_masks(level: &Level, eyes: &[Cell], faces: &[Face], sight: Sight) ->
 
 /// Whether the eye in open cell `eye` can see the centre of `face`, with strict rules.
 pub fn line_of_sight(level: &Level, eye: Cell, face: Face) -> bool {
-    !shots(level, eye, face, Sight::STRICT).is_empty()
+    shots(level, eye, face, Sight::STRICT).next().is_some()
 }
 
 /// The masks of the clear shots from the eye in open cell `eye` at `face` under `sight`, one
 /// per target point that can be hit.
-fn shots(level: &Level, eye: Cell, face: Face, sight: Sight) -> Vec<u64> {
+fn shots(level: &Level, eye: Cell, face: Face, sight: Sight) -> impl Iterator<Item = u64> + '_ {
+    const CORNERS: [(f64, f64); 4] = [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)];
     let (target, d) = face;
     let n = d.vector();
     let centre: [f64; 3] = std::array::from_fn(|a| target[a] as f64 + 0.5 + 0.5 * n[a] as f64);
-    let mut points = vec![centre];
-    if sight.corner_targets {
-        let plane: Vec<usize> = (0..3).filter(|&a| a != d.axis()).collect();
-        for (u, v) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+    let (u, v) = match d.axis() {
+        0 => (1, 2),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let corners = if sight.corner_targets { 4 } else { 0 };
+    std::iter::once(centre)
+        .chain(CORNERS[..corners].iter().map(move |&(du, dv)| {
             let mut p = centre;
-            p[plane[0]] += 0.3 * u;
-            p[plane[1]] += 0.3 * v;
-            points.push(p);
-        }
-    }
-    points
-        .into_iter()
-        .filter_map(|p| segment_hazards(level, eye, p, target, sight))
-        .collect()
+            p[u] += 0.3 * du;
+            p[v] += 0.3 * dv;
+            p
+        }))
+        .filter_map(move |p| segment_hazards(level, eye, p, target, sight))
 }
 
 /// Whether a shot crossing from `c` to its neighbour in `d` gets through, and if so the
@@ -305,47 +306,49 @@ fn segment_hazards(
         if t >= 1.0 - EPS {
             return None; // Ran out of segment without reaching the face's cell.
         }
-        let dirs: Vec<Dir> = (0..3)
-            .filter(|&a| t_max[a] - t < EPS)
-            .map(|a| Dir::from_axis(a, v[a] > 0.0))
-            .collect();
-        let way = |order: &Vec<Dir>| {
-            let mut c = cur;
-            let mut mask = 0;
-            for &d in order {
-                mask |= crossing(level, c, d, sight)?;
-                c = step(c, d);
+        let mut dirs = [Dir::PosX; 3];
+        let mut k = 0;
+        for a in 0..3 {
+            if t_max[a] - t < EPS {
+                dirs[k] = Dir::from_axis(a, v[a] > 0.0);
+                k += 1;
             }
-            Some(mask)
+        }
+        // Masks of the clear ways: all of them OR'd, and AND'd.
+        let (mut any, mut every, mut clear) = (0, u64::MAX, false);
+        for order in step_orders(k) {
+            let mut c = cur;
+            let mut mask = Some(0);
+            for &i in &order[..k] {
+                mask = mask
+                    .zip(crossing(level, c, dirs[i], sight))
+                    .map(|(a, m)| a | m);
+                if mask.is_none() {
+                    break;
+                }
+                c = step(c, dirs[i]);
+            }
+            match mask {
+                Some(m) => {
+                    any |= m;
+                    every &= m;
+                    clear = true;
+                }
+                None if sight.strict_grazing => return None,
+                None => {}
+            }
+        }
+        crossed |= match (sight.strict_grazing, clear) {
+            (true, _) => any,
+            (false, true) => every,
+            (false, false) => return None,
         };
-        let ways = permutations(&dirs).iter().map(way).collect::<Vec<_>>();
-        crossed |= if sight.strict_grazing {
-            ways.into_iter().try_fold(0, |a, m| m.map(|m| a | m))?
-        } else {
-            ways.into_iter().flatten().reduce(|a, m| a & m)?
-        };
-        for d in dirs {
+        for &d in &dirs[..k] {
             cur = step(cur, d);
             t_max[d.axis()] += t_delta[d.axis()];
         }
     }
     Some(crossed)
-}
-
-fn permutations(dirs: &[Dir]) -> Vec<Vec<Dir>> {
-    if dirs.len() <= 1 {
-        return vec![dirs.to_vec()];
-    }
-    let mut out = Vec::new();
-    for i in 0..dirs.len() {
-        let mut rest = dirs.to_vec();
-        let first = rest.remove(i);
-        for mut p in permutations(&rest) {
-            p.insert(0, first);
-            out.push(p);
-        }
-    }
-    out
 }
 
 /// Short human description of a class: its faces' bounding box and orientation.

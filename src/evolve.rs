@@ -6,6 +6,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use crate::dataset::par_map;
 use crate::generator::Genome;
 use crate::level::Level;
 use crate::metrics::{assess, Assessment, Metrics};
@@ -80,22 +81,8 @@ pub fn evaluate(genome: &Genome, budget: usize, seed: u64, born: usize) -> Optio
 }
 
 fn evaluate_all(jobs: &[(Genome, u64)], cfg: &Config, born: usize) -> Vec<Option<Candidate>> {
-    let chunk = jobs.len().div_ceil(cfg.threads.max(1)).max(1);
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .chunks(chunk)
-            .map(|part| {
-                scope.spawn(move || {
-                    part.iter()
-                        .map(|(g, seed)| evaluate(g, cfg.budget, *seed, born))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("evaluation thread panicked"))
-            .collect()
+    par_map(jobs, cfg.threads, |(g, seed)| {
+        evaluate(g, cfg.budget, *seed, born)
     })
 }
 

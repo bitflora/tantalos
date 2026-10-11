@@ -6,15 +6,18 @@
 //! Results depend only on the seed, not on the thread count.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Mutex};
 
 use crate::generator::Genome;
 use crate::level::Level;
-use crate::metrics::{assess, Assessment, Metrics};
+use crate::metrics::{measure, Assessment, Metrics};
 use crate::p2c::Puzzle;
 use crate::rng::Rng;
-use crate::solver::{judge, Judgement, Problem};
+use crate::solver::{Mode, Model, Problem, Verdict};
 use crate::tokens;
 
 /// What the solver says about a level.
@@ -110,8 +113,10 @@ pub fn label(puzzle: &Puzzle, budget: usize, seed: u64) -> Label {
     if !problems.is_empty() {
         return Label::Invalid(problems.join("; "));
     }
-    let judged = match judge(&level, budget) {
-        Ok(j) => j,
+    // `judge`, with the conservative search shared with the metrics, and the liberal model
+    // built only when needed (both models have the same problems).
+    let mut model = match Model::new(&level, Mode::Conservative) {
+        Ok(m) => m,
         Err(problems) => {
             let unsupported: Vec<&str> = problems
                 .iter()
@@ -134,20 +139,26 @@ pub fn label(puzzle: &Puzzle, budget: usize, seed: u64) -> Label {
             };
         }
     };
-    match judged.judgement {
-        Judgement::Solvable(plan) => {
-            let mut model = judged.conservative;
-            let metrics = match assess(&mut model, budget, seed) {
+    let space = model.explore(budget);
+    let strict = match space.verdict() {
+        Verdict::Solved(plan) => {
+            let metrics = match measure(&mut model, &space, budget, seed) {
                 Assessment::Solved(m) => Some(m),
                 _ => None,
             };
-            Label::Solvable {
+            return Label::Solvable {
                 min_len: plan.len(),
                 metrics,
-            }
+            };
         }
-        Judgement::Unsolvable => Label::Unsolvable,
-        Judgement::Uncertain(plan) => Label::Uncertain(plan.map(|p| p.len())),
+        strict => strict,
+    };
+    drop(space);
+    let liberal = Model::new(&level, Mode::Liberal).expect("same problems as conservative");
+    match liberal.solve(budget).verdict {
+        Verdict::Unsolvable if strict == Verdict::Unsolvable => Label::Unsolvable,
+        Verdict::Solved(plan) => Label::Uncertain(Some(plan.len())),
+        _ => Label::Uncertain(None),
     }
 }
 
@@ -169,24 +180,39 @@ pub fn json_str(s: &str) -> String {
     out
 }
 
-/// `f` over `items` on `threads` threads, results in input order.
+/// `f` over `items` on `threads` threads, results in input order. Each thread takes the next
+/// item when it's free, so one slow item doesn't hold up a fixed share of the rest.
 pub fn par_map<T: Sync, R: Send>(
     items: &[T],
     threads: usize,
     f: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    let chunk = items.len().div_ceil(threads.max(1)).max(1);
-    let f = &f;
+    let next = AtomicUsize::new(0);
+    let (f, next) = (&f, &next);
+    let mut out: Vec<Option<R>> = items.iter().map(|_| None).collect();
     std::thread::scope(|scope| {
-        let handles: Vec<_> = items
-            .chunks(chunk)
-            .map(|part| scope.spawn(move || part.iter().map(f).collect::<Vec<_>>()))
+        let handles: Vec<_> = (0..threads.clamp(1, items.len().max(1)))
+            .map(|_| {
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break };
+                        done.push((i, f(item)));
+                    }
+                    done
+                })
+            })
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("worker thread panicked"))
-            .collect()
-    })
+        for h in handles {
+            for (i, r) in h.join().expect("worker thread panicked") {
+                out[i] = Some(r);
+            }
+        }
+    });
+    out.into_iter()
+        .map(|r| r.expect("every item was mapped"))
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -254,20 +280,62 @@ const RESERVE: usize = 100;
 /// mechanics seen so far, rather than from the score-biased pool.
 const RESERVE_SHARE: f64 = 0.4;
 
-/// Emits `cfg.count` distinct levels in a seed-determined order.
+/// Job `j` takes its parent from the pool as it stood once the results of the jobs before
+/// `j - lag(j)` were in, so up to `lag` jobs run at once and a slow level holds up nothing
+/// until the rest are that far ahead. The lag starts at `BATCH` so the pool fills early.
+const BATCH: usize = 64;
+const WINDOW: usize = 512;
+
+fn lag(j: usize) -> usize {
+    (j / 2).clamp(BATCH, WINDOW)
+}
+
+/// Emits `cfg.count` distinct levels in a seed-determined order: jobs are made, and their
+/// results taken in, in a fixed order whatever the thread count.
 pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
     let mut rng = Rng::new(cfg.seed);
     let mut pool: Vec<(Genome, f64)> = Vec::new();
     let mut reserves: Vec<Vec<Genome>> = vec![Vec::new(); crate::metrics::MECHANICS.len()];
     let mut seen = HashSet::new();
     let mut emitted = 0;
-    // Fixed, so the job stream (and pool updates) don't depend on the thread count.
-    const BATCH: usize = 64;
-    while emitted < cfg.count {
-        let jobs: Vec<(Genome, u64)> = (0..BATCH)
-            .map(|_| {
-                let stocked: Vec<usize> =
-                    (0..reserves.len()).filter(|&i| !reserves[i].is_empty()).collect();
+    if cfg.count == 0 {
+        return;
+    }
+    let (job_tx, job_rx) = mpsc::channel::<(usize, Genome, u64)>();
+    let (result_tx, result_rx) = mpsc::channel::<(usize, std::thread::Result<Option<Sample>>)>();
+    let job_rx = Mutex::new(job_rx);
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..cfg.threads.max(1) {
+            let (job_rx, stop, result_tx) = (&job_rx, &stop, result_tx.clone());
+            scope.spawn(move || loop {
+                let job = job_rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                let Ok((j, genome, seed)) = job else { break };
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                // A panic goes to the coordinator, which would otherwise wait for this job.
+                let sample = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    sample(&genome, cfg.budget, seed)
+                }));
+                if result_tx.send((j, sample)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(result_tx);
+        // However this ends, jobs still queued are dropped (`_stop` goes first).
+        let job_tx = job_tx;
+        let _stop = StopOnDrop(&stop);
+
+        let mut waiting: HashMap<usize, Option<Sample>> = HashMap::new();
+        let mut next_job: usize = 0;
+        for taken in 0.. {
+            // Every job whose parent pool is complete now.
+            while next_job.saturating_sub(lag(next_job)) <= taken {
+                let stocked: Vec<usize> = (0..reserves.len())
+                    .filter(|&i| !reserves[i].is_empty())
+                    .collect();
                 let g = if pool.is_empty() || rng.chance(cfg.fresh) {
                     Genome::random(&mut rng)
                 } else {
@@ -282,11 +350,20 @@ pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
                     }
                     g
                 };
-                (g, rng.next_u64())
-            })
-            .collect();
-        let results = par_map(&jobs, cfg.threads, |(g, seed)| sample(g, cfg.budget, *seed));
-        for s in results.into_iter().flatten() {
+                job_tx
+                    .send((next_job, g, rng.next_u64()))
+                    .expect("workers wait for jobs");
+                next_job += 1;
+            }
+            let result = loop {
+                if let Some(r) = waiting.remove(&taken) {
+                    break r;
+                }
+                let (j, r) = result_rx.recv().expect("workers outlive the job queue");
+                let r = r.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                waiting.insert(j, r);
+            };
+            let Some(s) = result else { continue };
             let mut h = DefaultHasher::new();
             s.tokens.hash(&mut h);
             if !seen.insert(h.finish()) {
@@ -325,5 +402,14 @@ pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
                 break;
             }
         }
+    });
+}
+
+/// Tells the workers to stop when dropped.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }

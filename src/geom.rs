@@ -82,6 +82,26 @@ pub fn step(c: Cell, d: Dir) -> Cell {
     [c[0] + v[0], c[1] + v[1], c[2] + v[2]]
 }
 
+/// Every order of taking `k` steps (up to 3) at once, as indices into the steps: the first
+/// `k` of each entry.
+pub fn step_orders(k: usize) -> &'static [[usize; 3]] {
+    const ONE: [[usize; 3]; 1] = [[0, 0, 0]];
+    const TWO: [[usize; 3]; 2] = [[0, 1, 0], [1, 0, 0]];
+    const THREE: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    match k {
+        0 | 1 => &ONE,
+        2 => &TWO,
+        _ => &THREE,
+    }
+}
+
 /// The world axis that local axis `v` (Source: +x forward, +y left, +z up) points along after
 /// rotating by Source angles `[pitch, yaw, roll]` in degrees. `None` if not axis-aligned.
 pub fn rotate(angles: [f64; 3], v: [i32; 3]) -> Option<Dir> {

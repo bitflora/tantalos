@@ -5,7 +5,7 @@ use crate::geom::Cell;
 use crate::level::HazardKind;
 use crate::regions::Move;
 use crate::rng::Rng;
-use crate::solver::{Action, CubeLoc, Model, Signal, State, Verdict};
+use crate::solver::{Action, CubeLoc, Model, Signal, State, StateSpace, Verdict};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Metrics {
@@ -169,22 +169,28 @@ pub fn effort(plan: &[Action]) -> f64 {
 
 /// Solves `model` and measures it. `seed` drives the random players.
 pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
-    let plan = match model.solve(budget).verdict {
+    let space = model.explore(budget);
+    measure(model, &space, budget, seed)
+}
+
+/// `assess`, given `model.explore(budget)`: the search finds the plan, and the graph is reused.
+pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) -> Assessment {
+    let plan = match space.verdict() {
         Verdict::Solved(plan) => plan,
         Verdict::Unsolvable => return Assessment::Unsolvable,
         Verdict::Unknown => return Assessment::Unknown,
     };
-    let space = model.explore(budget);
     if !space.complete {
         return Assessment::Unknown;
     }
-    let n = space.states.len();
+    let n = space.len();
 
     // Shortest plans: count paths along depth-increasing edges.
     let mut paths = vec![0u64; n];
     paths[0] = 1;
     for i in 0..n {
-        for &j in &space.next[i] {
+        for &j in space.next(i) {
+            let j = j as usize;
             if space.depth[j] == space.depth[i] + 1 {
                 paths[j] = paths[j].saturating_add(paths[i]);
             }
@@ -194,19 +200,31 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
         .filter(|&i| space.goal[i] && space.depth[i] == plan.len())
         .fold(0u64, |acc, i| acc.saturating_add(paths[i]));
 
-    // Dead ends: states that can't reach any goal.
-    let mut prev = vec![Vec::new(); n];
-    for (i, next) in space.next.iter().enumerate() {
-        for &j in next {
-            prev[j].push(i);
+    // Dead ends: states that can't reach any goal. Predecessors of `j`:
+    // `prev[first[j]..first[j + 1]]`.
+    let mut first = vec![0usize; n + 1];
+    for i in 0..n {
+        for &j in space.next(i) {
+            first[j as usize + 1] += 1;
+        }
+    }
+    for j in 0..n {
+        first[j + 1] += first[j];
+    }
+    let mut fill = first.clone();
+    let mut prev = vec![0u32; first[n]];
+    for i in 0..n {
+        for &j in space.next(i) {
+            prev[fill[j as usize]] = i as u32;
+            fill[j as usize] += 1;
         }
     }
     let mut live = space.goal.clone();
     let mut stack: Vec<usize> = (0..n).filter(|&i| live[i]).collect();
     while let Some(j) = stack.pop() {
-        for &i in &prev[j] {
-            if !std::mem::replace(&mut live[i], true) {
-                stack.push(i);
+        for &i in &prev[first[j]..first[j + 1]] {
+            if !std::mem::replace(&mut live[i as usize], true) {
+                stack.push(i as usize);
             }
         }
     }
@@ -221,10 +239,10 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
                 if space.goal[i] {
                     return true;
                 }
-                if space.next[i].is_empty() {
+                if space.next(i).is_empty() {
                     return false;
                 }
-                i = *rng.pick(&space.next[i]);
+                i = *rng.pick(space.next(i)) as usize;
             }
             space.goal[i]
         })
@@ -234,7 +252,9 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
 
     // Ablations. Any non-solved verdict (including a blown budget) counts as "needed". A face
     // class, button or pedestal the plan never uses can't be needed (the plan still works
-    // without it), so only the ones it uses are tested.
+    // without it), so only the ones it uses are tested. Switching a class or a pedestal off
+    // only takes away the actions that use it, so whether the level is still solvable can be
+    // read off the explored graph; the rest change states and are solved again.
     let solvable = |m: &Model| matches!(m.solve(budget).verdict, Verdict::Solved(_));
     let cubes = model.start.cubes.clone();
     let mut unnecessary_cubes = 0;
@@ -252,9 +272,7 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
             .any(|a| matches!(*a, Action::Fire { class, .. } if class == c))
     };
     for c in (0..classes).filter(|&c| fired(c)) {
-        model.class_enabled[c] = false;
-        necessary_classes += !solvable(model) as usize;
-        model.class_enabled[c] = true;
+        necessary_classes += !space.solvable_without_class(c) as usize;
     }
     let pressed = |b: usize| {
         path.iter()
@@ -265,9 +283,12 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
     };
     let mut button_needed = vec![false; model.buttons.len()];
     for b in (0..model.buttons.len()).filter(|&b| pressed(b)) {
-        model.button_enabled[b] = false;
-        button_needed[b] = !solvable(model);
-        model.button_enabled[b] = true;
+        button_needed[b] = model.exit_needs(Signal::Floor(b)) || {
+            model.button_enabled[b] = false;
+            let solved = solvable(model);
+            model.button_enabled[b] = true;
+            !solved
+        };
     }
     let used = |p: usize| {
         plan.iter().any(|a| {
@@ -276,25 +297,30 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
     };
     let mut pedestal_needed = vec![false; model.pedestals.len()];
     for p in (0..model.pedestals.len()).filter(|&p| used(p)) {
-        model.pedestal_enabled[p] = false;
-        pedestal_needed[p] = !solvable(model);
-        model.pedestal_enabled[p] = true;
+        pedestal_needed[p] = !space.solvable_without_pedestal(p);
     }
     // A field shapes the level if the shortest plan gets shorter or easier without it (walking
     // through a field that's off is still a move, so the length alone can stay the same), or
     // if a necessary button or pedestal drives it: then the field is why that input matters,
-    // e.g. standing on a button to shoot through a fizzler.
+    // e.g. standing on a button to shoot through a fizzler. Only plans as short as this one
+    // can be the same, so the searches stop there.
+    let same_plan = |m: &Model| {
+        matches!(m.solve_within(budget, plan.len()).verdict,
+            Verdict::Solved(p) if p.len() == plan.len() && effort(&p) == effort(&plan))
+    };
     let (mut load_bearing_fizzlers, mut load_bearing_lasers) = (0, 0);
     for h in 0..model.hazards.len() {
         let driven = model.hazard_inputs(h).iter().any(|&i| match i {
             Signal::Floor(b) => button_needed[b],
             Signal::Pedestal(p) => pedestal_needed[p],
         });
-        model.hazard_enabled[h] = false;
-        let same = matches!(model.solve(budget).verdict,
-            Verdict::Solved(p) if p.len() == plan.len() && effort(&p) == effort(&plan));
-        model.hazard_enabled[h] = true;
-        if driven || !same {
+        let shapes = driven || {
+            model.hazard_enabled[h] = false;
+            let same = same_plan(model);
+            model.hazard_enabled[h] = true;
+            !same
+        };
+        if shapes {
             match model.hazards[h].kind {
                 HazardKind::Fizzler => load_bearing_fizzlers += 1,
                 HazardKind::LaserField => load_bearing_lasers += 1,
@@ -303,10 +329,6 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
     }
 
     // Turrets and gels, like fields and buttons.
-    let same_plan = |m: &Model| {
-        matches!(m.solve(budget).verdict,
-            Verdict::Solved(p) if p.len() == plan.len() && effort(&p) == effort(&plan))
-    };
     let mut load_bearing_turrets = 0;
     for t in 0..model.turrets.len() {
         model.turret_enabled[t] = false;

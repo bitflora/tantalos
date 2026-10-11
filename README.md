@@ -56,7 +56,12 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   pool of solvable ones that drifts toward higher `Metrics::score`. Over a 20k run the share of
   solvable levels needing 0 actions falls from 34% to 10%, and portal use rises from 5% to 33%.
   About 250 levels/s on 12 threads. Seed-determined, independent of thread count.
-  With turrets, gel and bigger rooms: about 13 levels/s. 40% of mutations now take their parent
+  With turrets, gel and bigger rooms: about 13 levels/s, falling to 3 as the pool drifts to big
+  state spaces; the faster search (below) and pipelined jobs brought the start of a run to about
+  100 levels/s (12 threads, sharing the laptop with that old generator and a training run). Jobs
+  used to run in batches of 64 that waited for their slowest level, which kept the threads less
+  than half busy; now job `j` takes its parent from the pool as it stood up to 512 jobs earlier
+  (64 at the start), and results are still taken in order. 40% of mutations now take their parent
   from a reserve of 100 levels per mechanic (picked evenly over the mechanics seen), so rare ones
   keep breeding: in 6k levels, cube-through-portal rose from 2% to 9% of solvable levels,
   bounces from 2% to 13%, gel through a portal from 0 to 2%, and 0-action plans fell from 43% to
@@ -132,6 +137,12 @@ runs out, knock a turret over, bounce off repulsion gel, leap off propulsion gel
 exit region with the door open ends the plan (the plan's worked example is 5, not 6, because
 walking out isn't counted).
 
+The search packs each state into a few 32-bit words (region, portals, pedestals, turrets, cube
+locations, 2 bits of paint per face), stores it once in an open-addressing table, and builds
+successors in reused buffers, from per-region lists of edges, targets and buttons. On the v3
+data that labels levels about 15 times faster than hashing and cloning `State`s did, with
+identical results (checked state by state against the old code).
+
 - **Turrets** shoot within a cone. Regions split where the set of turrets that can shoot
   changes, so walking out of a turret's sight is a move. Conservative rules never go where a
   live turret can shoot; liberal ones run through but do nothing else there. A turret is knocked
@@ -183,7 +194,10 @@ share of random players that stumble out. Also:
 - **Components:** floor buttons and pedestals the level can't be solved without (switch one
   off and re-solve), and fizzlers/laser fields that shape the plan (switched off, the plan
   gets shorter or easier, or a necessary button or pedestal drives them). Only items the plan
-  uses are tested; the rest can't be needed.
+  uses are tested; the rest can't be needed. Switching a face class or a pedestal off only
+  takes actions away, so those are read off the explored graph rather than solved again; a
+  button the exit can't open without needs no search, and fields and turrets only need plans
+  as short as the original.
 - **Mechanics:** which of portal trip, cube through a portal, cube on a button, firing while
   standing on a button, tossing off a ledge, latching pedestal, timed dash, fizzler and laser
   field the plan uses.

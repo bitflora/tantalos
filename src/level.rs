@@ -22,8 +22,6 @@
 //!   `ITEM_PROPERTY_START_ENABLED` says whether it pours from the start. Without a dropper the
 //!   splat is paint that is there from the start.
 
-use std::collections::HashMap;
-
 use crate::geom::{rotate, step, up_from_angles, Cell, Dir};
 use crate::p2c::{Props, Puzzle, Voxels};
 
@@ -297,7 +295,8 @@ pub struct Level {
     pub hazards: Vec<Hazard>,
     pub turrets: Vec<Turret>,
     pub gels: Vec<Gel>,
-    faces: HashMap<(Cell, usize), FaceInfo>,
+    /// What sits on each face, at `face_slot`.
+    faces: Vec<FaceInfo>,
     /// Items that couldn't be decoded (bad extents, too many hazards).
     pub decode_problems: Vec<String>,
 }
@@ -364,7 +363,10 @@ impl Level {
             hazards: Vec::new(),
             turrets: Vec::new(),
             gels: Vec::new(),
-            faces: HashMap::new(),
+            faces: vec![
+                FaceInfo::default();
+                3 * size.map(|s| s as usize + 1).iter().product::<usize>()
+            ],
             decode_problems: Vec::new(),
         };
         level.flood_goo();
@@ -520,12 +522,16 @@ impl Level {
         }
         for b in &self.barriers {
             for &(c, d) in &b.faces {
-                self.faces.entry(face_key(c, d)).or_default().barrier = Some(b.kind);
+                if let Some(i) = self.face_slot(c, d) {
+                    self.faces[i].barrier = Some(b.kind);
+                }
             }
         }
         for (i, h) in self.hazards.iter().enumerate() {
             for &(c, d) in &h.faces {
-                self.faces.entry(face_key(c, d)).or_default().hazards |= 1 << i;
+                if let Some(f) = self.face_slot(c, d) {
+                    self.faces[f].hazards |= 1 << i;
+                }
             }
         }
     }
@@ -550,7 +556,18 @@ impl Level {
 
     /// Barriers and hazard fields on the face between `c` and `step(c, d)`.
     pub fn face(&self, c: Cell, d: Dir) -> FaceInfo {
-        self.faces.get(&face_key(c, d)).copied().unwrap_or_default()
+        self.face_slot(c, d)
+            .map_or_else(FaceInfo::default, |i| self.faces[i])
+    }
+
+    /// Where `faces` keeps the face between `c` and `step(c, d)`: its cells on the negative
+    /// side run from -1 to `size - 1` on each axis.
+    fn face_slot(&self, c: Cell, d: Dir) -> Option<usize> {
+        let (k, axis) = face_key(c, d);
+        let [x, y, z] = k.map(|v| v + 1);
+        let [sx, sy, sz] = self.size.map(|s| s + 1);
+        let inside = x >= 0 && y >= 0 && z >= 0 && x < sx && y < sy && z < sz;
+        inside.then(|| 3 * ((z * sy + y) * sx + x) as usize + axis)
     }
 
     /// Something the player and cubes can stand on or are stopped by: solid, glass, grating.

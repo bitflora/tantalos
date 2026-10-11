@@ -10,7 +10,7 @@
 //!   knocked over: by the player walking up to it from a cell it can't shoot, by a cube landing
 //!   on it, or by a portal opening in the floor under it (it falls through).
 
-use crate::geom::{step, Cell, Dir};
+use crate::geom::{step, step_orders, Cell, Dir};
 use crate::level::{BarrierKind, Level, Turret};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,15 +74,19 @@ fn clear_line(level: &Level, a: [f64; 3], b: [f64; 3], grating_blocks: bool) -> 
         if next == cur {
             continue;
         }
-        let dirs: Vec<Dir> = (0..3)
-            .filter(|&i| next[i] != cur[i])
-            .map(|i| Dir::from_axis(i, next[i] > cur[i]))
-            .collect();
-        let one_way_clear = orders(&dirs).iter().any(|order| {
+        let mut dirs = [Dir::PosX; 3];
+        let mut moved = 0;
+        for i in 0..3 {
+            if next[i] != cur[i] {
+                dirs[moved] = Dir::from_axis(i, next[i] > cur[i]);
+                moved += 1;
+            }
+        }
+        let one_way_clear = step_orders(moved).iter().any(|order| {
             let mut c = cur;
-            order.iter().all(|&d| {
-                let ok = !stops(c, d);
-                c = step(c, d);
+            order[..moved].iter().all(|&i| {
+                let ok = !stops(c, dirs[i]);
+                c = step(c, dirs[i]);
                 ok
             })
         });
@@ -92,20 +96,4 @@ fn clear_line(level: &Level, a: [f64; 3], b: [f64; 3], grating_blocks: bool) -> 
         cur = next;
     }
     true
-}
-
-fn orders(dirs: &[Dir]) -> Vec<Vec<Dir>> {
-    if dirs.len() <= 1 {
-        return vec![dirs.to_vec()];
-    }
-    let mut out = Vec::new();
-    for i in 0..dirs.len() {
-        let mut rest = dirs.to_vec();
-        let first = rest.remove(i);
-        for mut o in orders(&rest) {
-            o.insert(0, first);
-            out.push(o);
-        }
-    }
-    out
 }
