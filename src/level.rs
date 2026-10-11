@@ -12,6 +12,15 @@
 //!   extents the field runs along the normal until it hits a wall. It is a plane across the
 //!   axis normal × right, drawn on each cell's face on the positive side of that axis (the
 //!   editor offsets it 0.375 voxel that way, or centres it).
+//!
+//! Turrets and gel (from the community style map, fixtures/real/1500854111.p2c):
+//! - `ITEM_TURRET` stands on a floor; `Facing` holds its yaw (pitch, yaw, roll in degrees).
+//! - `ITEM_PAINT_SPLAT` marks where gel lands, on the surface against its up axis;
+//!   `ITEM_PROPERTY_PAINT_TYPE` 0 repulsion, 1 propulsion, 2 conversion, 3 cleansing water.
+//!   With `ITEM_PROPERTY_DROPPER_ENABLED` an `ITEM_DROPPER_PAINT` on the ceiling above
+//!   (linked by `CONNECTION_PAINT_DROPPER`) pours it; buttons wire to the dropper, whose
+//!   `ITEM_PROPERTY_START_ENABLED` says whether it pours from the start. Without a dropper the
+//!   splat is paint that is there from the start.
 
 use std::collections::HashMap;
 
@@ -33,7 +42,32 @@ pub enum ItemKind {
     Fizzler,
     LaserField,
     HazardExtent,
+    Turret,
+    PaintSplat,
+    PaintDropper,
     Other(String),
+}
+
+/// Gel, by `ITEM_PROPERTY_PAINT_TYPE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PaintKind {
+    /// Repulsion (blue): bounces.
+    Bounce,
+    /// Propulsion (orange): speed.
+    Speed,
+    /// Conversion (white): portals can go on it.
+    Portal,
+    /// Cleansing water: washes paint off.
+    Water,
+}
+
+impl PaintKind {
+    pub const ALL: [PaintKind; 4] = [
+        PaintKind::Bounce,
+        PaintKind::Speed,
+        PaintKind::Portal,
+        PaintKind::Water,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -83,6 +117,9 @@ impl ItemKind {
             }
             "ITEM_BARRIER_HAZARD" => ItemKind::Fizzler,
             "ITEM_BARRIER_HAZARD_EXTENT" => ItemKind::HazardExtent,
+            "ITEM_TURRET" => ItemKind::Turret,
+            "ITEM_PAINT_SPLAT" => ItemKind::PaintSplat,
+            "ITEM_DROPPER_PAINT" => ItemKind::PaintDropper,
             other => ItemKind::Other(other.to_string()),
         }
     }
@@ -101,6 +138,9 @@ impl ItemKind {
                 | ItemKind::Grating
                 | ItemKind::Fizzler
                 | ItemKind::LaserField
+                | ItemKind::Turret
+                | ItemKind::PaintSplat
+                | ItemKind::PaintDropper
         )
     }
 }
@@ -151,10 +191,50 @@ impl PlacedItem {
         (t >= 3.0).then_some(t)
     }
 
-    /// Fizzlers and laser fields: `ITEM_PROPERTY_START_ENABLED` (default on).
+    /// Fizzlers, laser fields and gel droppers: `ITEM_PROPERTY_START_ENABLED` (default on).
     pub fn start_enabled(&self) -> bool {
         self.flag("ITEM_PROPERTY_START_ENABLED").unwrap_or(true)
     }
+
+    pub fn paint_kind(&self) -> PaintKind {
+        match self.props.get_i32("ITEM_PROPERTY_PAINT_TYPE").unwrap_or(0) {
+            1 => PaintKind::Speed,
+            2 => PaintKind::Portal,
+            3 => PaintKind::Water,
+            _ => PaintKind::Bounce,
+        }
+    }
+
+    /// Gel splats: poured by a dropper (default), or painted from the start.
+    pub fn dropper_enabled(&self) -> bool {
+        self.flag("ITEM_PROPERTY_DROPPER_ENABLED").unwrap_or(true)
+    }
+
+    /// Yaw in degrees from `Facing` (turrets).
+    pub fn yaw(&self) -> Option<f64> {
+        self.props.get_f64s::<3>("Facing").map(|[_, yaw, _]| yaw)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Turret {
+    pub item: i32,
+    pub cell: Cell,
+    /// Degrees; 0 faces +x, 90 faces +y.
+    pub yaw: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gel {
+    /// The splat item.
+    pub item: i32,
+    pub kind: PaintKind,
+    /// The surface it paints: (open cell, direction to the solid side).
+    pub face: Face,
+    /// The dropper pouring it (the item buttons wire to), if any, and the cell it is in.
+    pub dropper: Option<(i32, Cell)>,
+    /// Whether the dropper pours from the start.
+    pub start_enabled: bool,
 }
 
 /// A `CONNECTION_STANDARD` wire: `sender` drives `receiver` (item indices).
@@ -205,6 +285,7 @@ pub struct FaceInfo {
 }
 
 pub const MAX_HAZARDS: usize = 64;
+pub const MAX_TURRETS: usize = 32;
 
 pub struct Level {
     pub size: [i32; 3],
@@ -214,6 +295,8 @@ pub struct Level {
     pub links: Vec<Link>,
     pub barriers: Vec<Barrier>,
     pub hazards: Vec<Hazard>,
+    pub turrets: Vec<Turret>,
+    pub gels: Vec<Gel>,
     faces: HashMap<(Cell, usize), FaceInfo>,
     /// Items that couldn't be decoded (bad extents, too many hazards).
     pub decode_problems: Vec<String>,
@@ -263,6 +346,12 @@ impl Level {
             .filter(|c| c.get("Type") == Some("CONNECTION_BARRIER_ANCHOR_TO_EXTENT"))
             .filter_map(wire)
             .collect();
+        let paint_links: Vec<Link> = p
+            .connections
+            .iter()
+            .filter(|c| c.get("Type") == Some("CONNECTION_PAINT_DROPPER"))
+            .filter_map(wire)
+            .collect();
         let size = p.chamber_size();
         let n = size.iter().product::<i32>() as usize;
         let mut level = Level {
@@ -273,12 +362,72 @@ impl Level {
             links,
             barriers: Vec::new(),
             hazards: Vec::new(),
+            turrets: Vec::new(),
+            gels: Vec::new(),
             faces: HashMap::new(),
             decode_problems: Vec::new(),
         };
         level.flood_goo();
         level.decode_barriers(&extent_links);
+        level.decode_turrets_and_gel(&paint_links);
         level
+    }
+
+    fn decode_turrets_and_gel(&mut self, paint_links: &[Link]) {
+        for it in self.items.clone() {
+            let problem = |what: &str| format!("item {} {:?}: {what}", it.index, it.kind);
+            match it.kind {
+                ItemKind::Turret => {
+                    if it.normal != Some(Dir::PosZ) {
+                        self.decode_problems.push(problem("turret not on a floor"));
+                        continue;
+                    }
+                    self.turrets.push(Turret {
+                        item: it.index,
+                        cell: it.cell,
+                        yaw: it.yaw().unwrap_or(0.0),
+                    });
+                }
+                ItemKind::PaintSplat => {
+                    let Some(n) = it.normal else {
+                        self.decode_problems.push(problem("angles not axis-aligned"));
+                        continue;
+                    };
+                    let mut gel = Gel {
+                        item: it.index,
+                        kind: it.paint_kind(),
+                        face: (it.cell, n.opposite()),
+                        dropper: None,
+                        start_enabled: true,
+                    };
+                    if it.dropper_enabled() {
+                        let dropper = paint_links
+                            .iter()
+                            .filter(|l| l.sender == it.index)
+                            .find_map(|l| self.item(l.receiver))
+                            .filter(|d| d.kind == ItemKind::PaintDropper);
+                        let Some(d) = dropper else {
+                            self.decode_problems.push(problem("gel splat has no dropper"));
+                            continue;
+                        };
+                        if n != Dir::PosZ {
+                            self.decode_problems
+                                .push(problem("gel dropper over a splat that isn't on a floor"));
+                            continue;
+                        }
+                        gel.dropper = Some((d.index, d.cell));
+                        gel.start_enabled = d.start_enabled();
+                    }
+                    self.gels.push(gel);
+                }
+                _ => {}
+            }
+        }
+        if self.turrets.len() > MAX_TURRETS {
+            self.decode_problems
+                .push(format!("more than {MAX_TURRETS} turrets"));
+            self.turrets.truncate(MAX_TURRETS);
+        }
     }
 
     fn decode_barriers(&mut self, extent_links: &[Link]) {
@@ -545,6 +694,9 @@ impl Level {
                         | ItemKind::CubeDropper
                         | ItemKind::FloorButton
                         | ItemKind::PedestalButton
+                        | ItemKind::Turret
+                        | ItemKind::PaintSplat
+                        | ItemKind::PaintDropper
                 );
                 if blocks && swept.contains(&it.cell) {
                     out.push(format!(

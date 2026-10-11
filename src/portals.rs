@@ -11,8 +11,10 @@
 //!   standable. Ceiling portals can't be entered.
 //! - Coming out of a portal (player or cube) you fall straight down from the cell in front
 //!   of it, with no momentum. Ending in goo means death, so there is no landing.
+//! - Gel poured into a floor portal comes out of the other one; out of a ceiling portal it
+//!   falls straight down. (Out of a wall or floor portal it isn't modelled: it paints nothing.)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::geom::{step, Cell, Dir};
 use crate::level::{BarrierKind, ItemKind, Level};
@@ -51,6 +53,9 @@ pub struct Landing {
     pub region: usize,
     /// Index of the floor button at the landing cell, if any. A cube landing here presses it.
     pub button: Option<i32>,
+    /// Index (in `Level::turrets`) of a turret at the landing cell: a cube landing on it
+    /// knocks it over.
+    pub turret: Option<usize>,
     /// Hazard fields fallen through on the way down.
     pub hazards: u64,
 }
@@ -66,6 +71,7 @@ impl Landing {
                 .of_kind(&ItemKind::FloorButton)
                 .find(|b| b.cell == f)
                 .map(|b| b.index),
+            turret: level.turrets.iter().position(|t| t.cell == f),
         })
     }
 }
@@ -81,6 +87,16 @@ pub struct FaceClass {
     /// Indexed by region: the masks of its clear shots at faces of this class. Empty if it
     /// can't shoot one at all.
     pub visible_from: Vec<Masks>,
+    /// The floor face under this turret (index in `Level::turrets`): a portal here drops it.
+    pub turret: Option<usize>,
+    /// Where this gel stream (index in `Level::gels`) lands: a portal here takes the gel.
+    pub stream: Option<usize>,
+    /// Ceiling faces whose fall lands in this cell: gel coming out of a portal here paints
+    /// around it. Only set when a stream can be sent through a portal.
+    pub gel_cell: Option<Cell>,
+    /// Not white: only usable while this face (the solver's id, from `Extras::paintable`)
+    /// has conversion gel on it.
+    pub needs_paint: Option<usize>,
 }
 
 impl FaceClass {
@@ -108,39 +124,87 @@ pub struct Portals {
     pub classes: Vec<FaceClass>,
 }
 
+/// What besides white surfaces shapes face classes: gel streams that can be sent through a
+/// portal, and faces conversion gel can make white.
+#[derive(Clone, Debug, Default)]
+pub struct Extras {
+    /// The floor face each gel stream lands on (index in `Level::gels`).
+    pub streams: Vec<(Face, usize)>,
+    /// Split ceiling classes by where their fall lands, for gel coming out of them.
+    pub split_ceilings: bool,
+    /// Faces that aren't white but conversion gel may paint, with the id the solver knows
+    /// each by.
+    pub paintable: Vec<(Face, usize)>,
+}
+
+type ClassKey = (
+    Option<usize>,
+    Option<Landing>,
+    Option<usize>,
+    Option<usize>,
+    Option<Cell>,
+    Option<usize>,
+);
+
 impl Portals {
-    /// Groups every portalable face by (entry, landing). Faces with neither are useless in
-    /// Tier 0 and dropped, as are classes no region can see.
-    pub fn build(level: &Level, graph: &RegionGraph, sight: Sight) -> Portals {
-        let mut groups: BTreeMap<(Option<usize>, Option<Landing>), Vec<Face>> = BTreeMap::new();
-        for (c, d) in level.portal_surfaces() {
+    /// Groups every portalable face by (entry, landing), plus what makes faces special: a
+    /// turret standing on it, a gel stream landing on it, where gel out of a ceiling portal
+    /// lands, and conversion gel it needs. Faces with no entry or landing are useless and
+    /// dropped, as are classes no region can see.
+    pub fn build(level: &Level, graph: &RegionGraph, sight: Sight, extras: &Extras) -> Portals {
+        let mut groups: BTreeMap<ClassKey, Vec<Face>> = BTreeMap::new();
+        let streams: HashMap<Face, usize> = extras.streams.iter().copied().collect();
+        let mut add = |(c, d): Face, needs_paint: Option<usize>| {
             let entry = (d != Dir::PosZ && level.standable(c))
                 .then(|| graph.region_of(c))
                 .flatten();
             let landing = Landing::from_fall(level, graph, c);
-            if entry.is_some() || landing.is_some() {
-                groups.entry((entry, landing)).or_default().push((c, d));
+            if entry.is_none() && landing.is_none() {
+                return;
             }
+            let turret = (d == Dir::NegZ)
+                .then(|| level.turrets.iter().position(|t| t.cell == c))
+                .flatten();
+            let stream = streams.get(&(c, d)).copied();
+            let gel_cell = (extras.split_ceilings && d == Dir::PosZ)
+                .then(|| level.fall(c))
+                .flatten();
+            let key = (entry, landing, turret, stream, gel_cell, needs_paint);
+            groups.entry(key).or_default().push((c, d));
+        };
+        for f in level.portal_surfaces() {
+            add(f, None);
+        }
+        for &(f, id) in &extras.paintable {
+            add(f, Some(id));
         }
         let classes = groups
             .into_iter()
-            .map(|((entry, landing), faces)| {
+            .map(|(key, faces)| {
                 let visible_from = graph
                     .regions
                     .iter()
                     .map(|r| shot_masks(level, &r.cells, &faces, sight))
                     .collect();
-                (entry, landing, faces, visible_from)
+                (key, faces, visible_from)
             })
-            .filter(|(.., vis): &(_, _, _, Vec<Masks>)| vis.iter().any(|m| !m.is_empty()))
+            .filter(|(.., vis): &(_, _, Vec<Masks>)| vis.iter().any(|m| !m.is_empty()))
             .enumerate()
-            .map(|(id, (entry, landing, faces, visible_from))| FaceClass {
-                id,
-                faces,
-                entry,
-                landing,
-                visible_from,
-            })
+            .map(
+                |(id, ((entry, landing, turret, stream, gel_cell, needs_paint), faces, visible_from))| {
+                    FaceClass {
+                        id,
+                        faces,
+                        entry,
+                        landing,
+                        visible_from,
+                        turret,
+                        stream,
+                        gel_cell,
+                        needs_paint,
+                    }
+                },
+            )
             .collect();
         Portals { classes }
     }

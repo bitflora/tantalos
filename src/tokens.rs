@@ -25,11 +25,17 @@
 //!                                  K: standard companion reflection sphere franken
 //! button x y z K [> T]*            floor button. K: weighted cube sphere
 //! pedestal x y z S|inf [> T]*      pedestal button with an S-second timer, or latching
+//! gel x y z N K stream on|off      gel K (bounce speed portal water) poured onto the floor of
+//!                                  (x, y, z) by a dropper in the ceiling above, pouring from
+//!                                  the start or not; N is +z
+//! gel x y z N K splat              gel K painted from the start on the surface against N
+//! turret x y z F                   turret on the floor, facing F × 45° (0 = +x, 2 = +y)
 //! ```
-//! Targets `T`: `exit`, or `field N` (the N-th fizzler/laser field in the sequence).
+//! Targets `T`: `exit`, `field N` (the N-th fizzler/laser field in the sequence), or `gel N`
+//! (the N-th gel, which must be poured).
 //!
-//! `encode` writes items in a fixed order (white, doors, panels, fields, droppers, buttons,
-//! pedestals; each sorted), so `encode(decode(encode(p))) == encode(p)`. The encoding keeps
+//! `encode` writes items in a fixed order (white, doors, panels, fields, gels, droppers,
+//! buttons, pedestals, turrets; each sorted), so `encode(decode(encode(p))) == encode(p)`. The encoding keeps
 //! what play depends on (the `Level` view), not the file's bytes: decorative items, property
 //! order and face bits that aren't on a surface are dropped. `decode` accepts items in any
 //! order and rejects anything malformed with an error instead of panicking, so it can read
@@ -40,7 +46,7 @@ use std::collections::{BTreeSet, HashSet};
 use crate::builder::Builder;
 use crate::generator::TITLE;
 use crate::geom::{rotate, step, Cell, Dir};
-use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, PlacedItem};
+use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, PaintKind, PlacedItem};
 use crate::p2c::Puzzle;
 use crate::solver::DECORATIVE;
 
@@ -49,6 +55,10 @@ pub const MAX_NUM: i32 = 32;
 
 const CUBE_KINDS: [&str; 5] = ["standard", "companion", "reflection", "sphere", "franken"];
 const BUTTON_KINDS: [&str; 3] = ["weighted", "cube", "sphere"];
+const PAINT_KINDS: [&str; 4] = ["bounce", "speed", "portal", "water"];
+/// Words added after the first models were trained: they go at the end of the vocabulary,
+/// so earlier tokens keep their ids.
+const LATER_WORDS: [&str; 4] = ["turret", "gel", "stream", "splat"];
 const DIRS: [(Dir, &str); 6] = [
     (Dir::PosX, "+x"),
     (Dir::NegX, "-x"),
@@ -93,6 +103,7 @@ pub fn vocab() -> Vec<String> {
             v.push(k.to_string());
         }
     }
+    v.extend(LATER_WORDS.iter().chain(&PAINT_KINDS).map(|s| s.to_string()));
     v
 }
 
@@ -261,6 +272,37 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
     let field_items: Vec<i32> = fields.iter().map(|f| f.2).collect();
     out.extend(fields.into_iter().flat_map(|(_, t, _)| t));
 
+    // Gels, sorted; buttons refer to poured ones by position.
+    let mut gels = Vec::new();
+    for g in &level.gels {
+        let (cell, d) = g.face;
+        let n = d.opposite();
+        let mut t = vec!["gel".to_string()];
+        t.extend(cell_tokens(cell));
+        t.push(dir_token(n).into());
+        t.push(PAINT_KINDS[paint_index(g.kind)].into());
+        match g.dropper {
+            Some((dropper, at)) => {
+                let mut top = cell;
+                while !level.solid(step(top, Dir::PosZ)) {
+                    top = step(top, Dir::PosZ);
+                }
+                if at != top {
+                    return Err(format!(
+                        "gel dropper {dropper} isn't in the ceiling above its splat"
+                    ));
+                }
+                t.push("stream".into());
+                t.push(if g.start_enabled { "on" } else { "off" }.into());
+            }
+            None => t.push("splat".into()),
+        }
+        gels.push(((cell, n), t, g.dropper.map(|(d, _)| d)));
+    }
+    gels.sort();
+    let gel_items: Vec<Option<i32>> = gels.iter().map(|g| g.2).collect();
+    out.extend(gels.into_iter().flat_map(|(_, t, _)| t));
+
     // Droppers carry their cube; every cube must sit under one.
     let mut droppers = Vec::new();
     for d in level.of_kind(&ItemKind::CubeDropper) {
@@ -311,12 +353,15 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
         .filter(|i| matches!(i.kind, ItemKind::FloorButton | ItemKind::PedestalButton))
         .map(|i| i.index)
         .collect();
+    let gel_of = |item: i32| gel_items.iter().position(|&g| g == Some(item));
     for l in &level.links {
         let to = level.item(l.receiver).map(|i| &i.kind);
-        let to_ok = matches!(to, Some(ItemKind::ExitDoor)) || field_items.contains(&l.receiver);
+        let to_ok = matches!(to, Some(ItemKind::ExitDoor))
+            || field_items.contains(&l.receiver)
+            || gel_of(l.receiver).is_some();
         if !senders.contains(&l.sender) || !to_ok {
             return Err(format!(
-                "wire {} -> {} isn't button -> exit/field",
+                "wire {} -> {} isn't button -> exit/field/gel",
                 l.sender, l.receiver
             ));
         }
@@ -324,15 +369,19 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
     let targets = |sender: i32| -> Vec<String> {
         let mut ts: BTreeSet<(usize, usize)> = BTreeSet::new();
         for l in level.links.iter().filter(|l| l.sender == sender) {
-            match field_items.iter().position(|&f| f == l.receiver) {
-                Some(i) => ts.insert((1, i)),
-                None => ts.insert((0, 0)),
-            };
+            if let Some(i) = field_items.iter().position(|&f| f == l.receiver) {
+                ts.insert((1, i));
+            } else if let Some(i) = gel_of(l.receiver) {
+                ts.insert((2, i));
+            } else {
+                ts.insert((0, 0));
+            }
         }
         ts.into_iter()
             .flat_map(|(kind, i)| match kind {
                 0 => vec![">".to_string(), "exit".into()],
-                _ => vec![">".to_string(), "field".into(), num(i as i32)],
+                1 => vec![">".to_string(), "field".into(), num(i as i32)],
+                _ => vec![">".to_string(), "gel".into(), num(i as i32)],
             })
             .collect()
     };
@@ -374,7 +423,26 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
     }
     pedestals.sort();
     out.extend(pedestals.into_iter().flat_map(|(_, t)| t));
+
+    let mut turrets = Vec::new();
+    for t in &level.turrets {
+        let yaw = t.yaw.rem_euclid(360.0);
+        let f = (yaw / 45.0).round();
+        if (yaw - f * 45.0).abs() > 1e-6 {
+            return Err(format!("turret {} faces {yaw}°, not a multiple of 45", t.item));
+        }
+        let mut tok = vec!["turret".to_string()];
+        tok.extend(cell_tokens(t.cell));
+        tok.push(num(f as i32 % 8));
+        turrets.push(tok);
+    }
+    turrets.sort();
+    out.extend(turrets.into_iter().flatten());
     Ok(out)
+}
+
+fn paint_index(k: PaintKind) -> usize {
+    PaintKind::ALL.iter().position(|&p| p == k).unwrap()
 }
 
 fn cube_index(k: CubeKind) -> usize {
@@ -512,6 +580,7 @@ impl<'a> Reader<'a> {
 enum Target {
     Exit,
     Field(i32),
+    Gel(i32),
 }
 
 /// Builds the puzzle a token sequence describes. Errors name the offending token.
@@ -619,6 +688,8 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
 
     let (mut entry, mut exit, mut inverted) = (None, None, false);
     let mut fields: Vec<i32> = Vec::new();
+    // Each gel's dropper, if poured.
+    let mut gels: Vec<Option<i32>> = Vec::new();
     let mut wires: Vec<(i32, Target)> = Vec::new();
     while let Some(t) = r.peek() {
         r.pos += 1;
@@ -718,12 +789,35 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
                 };
                 while r.peek() == Some(">") {
                     r.pos += 1;
-                    let target = match r.word(&["exit", "field"])? {
+                    let target = match r.word(&["exit", "field", "gel"])? {
                         0 => Target::Exit,
-                        _ => Target::Field(r.num(0, MAX_NUM)?),
+                        1 => Target::Field(r.num(0, MAX_NUM)?),
+                        _ => Target::Gel(r.num(0, MAX_NUM)?),
                     };
                     wires.push((sender, target));
                 }
+            }
+            "gel" => {
+                let (cell, n) = (r.cell(size)?, r.dir()?);
+                let kind = r.word(&PAINT_KINDS)? as i32;
+                if b.solid(cell) || !b.solid(step(cell, n.opposite())) {
+                    return r.fail("gel isn't on a surface");
+                }
+                if r.word(&["stream", "splat"])? == 0 {
+                    let on = r.word(&["on", "off"])? == 0;
+                    if n != Dir::PosZ {
+                        return r.fail("poured gel must be on a floor");
+                    }
+                    gels.push(Some(b.gel_dropper(cell, kind, on)));
+                } else {
+                    b.gel_splat(cell, n, kind);
+                    gels.push(None);
+                }
+            }
+            "turret" => {
+                let cell = r.cell(size)?;
+                let f = r.num(0, 7)?;
+                b.turret(cell, f * 45);
             }
             other => return r.fail(format!("unexpected {other:?}")),
         }
@@ -736,6 +830,9 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
             Target::Exit => exit.ok_or("a button is wired to the exit, but there is none")?,
             Target::Field(i) => *fields.get(i as usize).ok_or(format!(
                 "a button is wired to field {i}, which doesn't exist"
+            ))?,
+            Target::Gel(i) => gels.get(i as usize).copied().flatten().ok_or(format!(
+                "a button is wired to gel {i}, which doesn't exist or isn't poured"
             ))?,
         };
         b.connect(sender, receiver);

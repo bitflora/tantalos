@@ -9,6 +9,8 @@
 //!   Long-fall boots mean any drop height is survivable. Glass and grating floors stop a fall.
 //! - A one-voxel (128u) ledge can't be jumped; it is a `Step` edge that needs a cube.
 //!   Two or more voxels can't be climbed at all.
+//! - Cells covered by different sets of turrets are in different regions, joined by `Walk`
+//!   edges, so the solver can tell where turrets can shoot.
 
 use std::collections::BTreeSet;
 
@@ -20,16 +22,23 @@ pub struct Region {
     pub id: usize,
     pub z: i32,
     pub cells: Vec<Cell>,
+    /// Bit `i`: turret `i` (of `Level::turrets`) can shoot every cell here.
+    pub danger: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Move {
-    /// Walk through a fizzler or laser field to a neighbouring cell at the same height.
+    /// Walk to a neighbouring cell at the same height: through a fizzler or laser field, or
+    /// into or out of a turret's sight.
     Walk,
     /// Fall `height` voxels.
     Drop { height: i32 },
     /// Climb a one-voxel ledge; needs something to stand on (a cube).
     Step,
+    /// Bounce up off repulsion gel.
+    Bounce,
+    /// Leap a gap at speed from a run of propulsion gel.
+    Leap,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -50,6 +59,11 @@ pub struct RegionGraph {
 
 impl RegionGraph {
     pub fn build(level: &Level) -> RegionGraph {
+        RegionGraph::build_with(level, |_| 0)
+    }
+
+    /// Regions that also split where `danger` (the turrets that can shoot a cell) changes.
+    pub fn build_with(level: &Level, danger: impl Fn(Cell) -> u32) -> RegionGraph {
         let size = level.size;
         let mut g = RegionGraph {
             regions: Vec::new(),
@@ -63,10 +77,11 @@ impl RegionGraph {
                 continue;
             }
             let id = g.regions.len();
+            let mask = danger(c);
             let mut cells = Vec::new();
             let mut stack = vec![c];
             while let Some(c) = stack.pop() {
-                if !level.standable(c) || g.region_of(c).is_some() {
+                if !level.standable(c) || g.region_of(c).is_some() || danger(c) != mask {
                     continue;
                 }
                 let i = g.idx(c).unwrap();
@@ -79,7 +94,12 @@ impl RegionGraph {
                 }
             }
             cells.sort_by_key(|c| (c[2], c[1], c[0]));
-            g.regions.push(Region { id, z: c[2], cells });
+            g.regions.push(Region {
+                id,
+                z: c[2],
+                cells,
+                danger: mask,
+            });
         }
 
         let mut edges = BTreeSet::new();
@@ -109,8 +129,9 @@ impl RegionGraph {
                     } else if face.barrier.is_some() {
                         // Glass or grating: no way through.
                     } else if level.standable(n) {
-                        if face.hazards != 0 {
-                            edge(g.region_of(n).unwrap(), Move::Walk, face.hazards);
+                        let to = g.region_of(n).unwrap();
+                        if face.hazards != 0 || to != r.id {
+                            edge(to, Move::Walk, face.hazards);
                         }
                     } else if let Some((f, fallen)) = level.fall_path(n) {
                         edge(

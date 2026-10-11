@@ -68,6 +68,7 @@ impl Label {
                          \"classes\":{},\"necessary_classes\":{},\"random_success\":{:.4},\
                          \"necessary_buttons\":{},\"necessary_pedestals\":{},\
                          \"load_bearing_fizzlers\":{},\"load_bearing_lasers\":{},\
+                         \"load_bearing_turrets\":{},\"necessary_gels\":{},\
                          \"necessary_items\":{},\"mechanics\":{},\"chain_depth\":{:.2},\
                          \"travel\":{:.2},\"cube_travel\":{:.2},\"backtrack\":{:.2}}}",
                         m.score(),
@@ -84,6 +85,8 @@ impl Label {
                         m.necessary_pedestals,
                         m.load_bearing_fizzlers,
                         m.load_bearing_lasers,
+                        m.load_bearing_turrets,
+                        m.necessary_gels,
                         m.necessary_items(),
                         m.mechanics.count_ones(),
                         m.chain_depth,

@@ -3,6 +3,7 @@
 
 use crate::geom::Cell;
 use crate::level::HazardKind;
+use crate::regions::Move;
 use crate::rng::Rng;
 use crate::solver::{Action, CubeLoc, Model, Signal, State, Verdict};
 
@@ -32,6 +33,10 @@ pub struct Metrics {
     /// Fizzlers and laser fields that change the shortest plan's length when switched off.
     pub load_bearing_fizzlers: usize,
     pub load_bearing_lasers: usize,
+    /// Turrets that change the shortest plan's length when removed.
+    pub load_bearing_turrets: usize,
+    /// Gels the level can't be solved without.
+    pub necessary_gels: usize,
     /// Bits of `MECHANICS`: what the plan does.
     pub mechanics: u16,
     /// Longest chain of plan steps that each need an earlier one (see `chain_depth`).
@@ -45,7 +50,7 @@ pub struct Metrics {
 }
 
 /// What a plan can do, for `Metrics::mechanics`.
-pub const MECHANICS: [&str; 9] = [
+pub const MECHANICS: [&str; 14] = [
     "portal trip",
     "cube through a portal",
     "cube on a button",
@@ -55,6 +60,11 @@ pub const MECHANICS: [&str; 9] = [
     "timed dash",
     "fizzler",
     "laser field",
+    "turret knocked over",
+    "bounce on repulsion gel",
+    "leap on propulsion gel",
+    "portal on conversion gel",
+    "gel through a portal",
 ];
 
 pub const RANDOM_TRIALS: usize = 200;
@@ -96,6 +106,8 @@ impl Metrics {
             self.necessary_pedestals,
             self.load_bearing_fizzlers,
             self.load_bearing_lasers,
+            self.load_bearing_turrets,
+            self.necessary_gels,
         ]
         .iter()
         .map(|&n| (1.0 + n as f64).ln())
@@ -120,6 +132,8 @@ impl Metrics {
             + self.necessary_pedestals
             + self.load_bearing_fizzlers
             + self.load_bearing_lasers
+            + self.load_bearing_turrets
+            + self.necessary_gels
     }
 
     /// Names of the mechanics the plan uses.
@@ -135,12 +149,17 @@ impl Metrics {
     }
 }
 
-/// Weighted plan length for `Metrics::score`: portal shots and timed dashes 1, trips through a
-/// portal 2, latching presses 0, other actions 0.5.
+/// Weighted plan length for `Metrics::score`: portal shots, timed dashes, gel bounces and
+/// leaps and knocking turrets over 1, trips through a portal 2, latching presses 0, other
+/// actions 0.5.
 pub fn effort(plan: &[Action]) -> f64 {
     plan.iter()
         .map(|a| match a {
-            Action::Fire { .. } | Action::Dash { .. } => 1.0,
+            Action::Fire { .. } | Action::Dash { .. } | Action::Knock { .. } => 1.0,
+            Action::Move {
+                kind: Move::Bounce | Move::Leap,
+                ..
+            } => 1.0,
             Action::Enter { .. } | Action::Throw { .. } => 2.0,
             Action::Press { .. } => 0.0,
             _ => 0.5,
@@ -283,8 +302,32 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
         }
     }
 
+    // Turrets and gels, like fields and buttons.
+    let same_plan = |m: &Model| {
+        matches!(m.solve(budget).verdict,
+            Verdict::Solved(p) if p.len() == plan.len() && effort(&p) == effort(&plan))
+    };
+    let mut load_bearing_turrets = 0;
+    for t in 0..model.turrets.len() {
+        model.turret_enabled[t] = false;
+        load_bearing_turrets += !same_plan(model) as usize;
+        model.turret_enabled[t] = true;
+    }
+    let mut necessary_gels = 0;
+    for g in 0..model.gels.len() {
+        model.gel_enabled[g] = false;
+        necessary_gels += !solvable(model) as usize;
+        model.gel_enabled[g] = true;
+    }
+
     let mut mechanics = 0u16;
-    for a in &plan {
+    for (i, a) in plan.iter().enumerate() {
+        if path[i + 1].down & !path[i].down != 0 {
+            mechanics |= 1 << 9;
+        }
+        if model.redirected(&path[i + 1]) {
+            mechanics |= 1 << 13;
+        }
         let mut set = |bit: usize| mechanics |= 1 << bit;
         match *a {
             Action::Enter { .. } => set(0),
@@ -308,6 +351,15 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
             }
             Action::Press { .. } => set(5),
             Action::Dash { .. } => set(6),
+            Action::Move {
+                kind: Move::Bounce, ..
+            } => set(10),
+            Action::Move {
+                kind: Move::Leap, ..
+            } => set(11),
+            Action::Fire { class, .. } if model.portals.classes[class].needs_paint.is_some() => {
+                set(12)
+            }
             _ => {}
         }
     }
@@ -339,6 +391,8 @@ pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
         necessary_pedestals: pedestal_needed.iter().filter(|&&n| n).count(),
         load_bearing_fizzlers,
         load_bearing_lasers,
+        load_bearing_turrets,
+        necessary_gels,
         mechanics,
         chain_depth,
         travel,
@@ -367,13 +421,14 @@ pub fn replay(model: &Model, plan: &[Action]) -> Option<Vec<State>> {
         }
         false
     }
-    let mut path = vec![model.start.clone()];
+    let mut path = vec![model.initial()];
     go(model, plan, &mut path).then_some(path)
 }
 
 /// Longest weighted chain of plan steps where each needs an earlier one. Step `j` needs step
 /// `i` if, replaying the plan from just before `i` without it, `j` can't be done. A step
-/// counts 1, or 0.5 for walking and cube chores (move, pick up, put down). Independent steps
+/// counts 1, or 0.5 for walking and cube chores (walk, drop, step, pick up, put down; gel
+/// bounces and leaps count 1). Independent steps
 /// (two portals fired in either order, chores in any order) don't lengthen the chain.
 pub fn chain_depth(model: &Model, plan: &[Action], path: &[State]) -> f64 {
     let n = plan.len();
@@ -398,6 +453,10 @@ pub fn chain_depth(model: &Model, plan: &[Action], path: &[State]) -> f64 {
         }
     }
     let weight = |a: &Action| match a {
+        Action::Move {
+            kind: Move::Bounce | Move::Leap,
+            ..
+        } => 1.0,
         Action::Move { .. } | Action::PickUp { .. } | Action::PutDown { .. } => 0.5,
         _ => 1.0,
     };

@@ -7,11 +7,13 @@
 //! search (`evolve`).
 //! Slice 5: levels as token sequences (`tokens`), labelled training data and scoring of model
 //! output (`dataset`).
+//! Turrets (`turrets`) and gel (`gel`): where turrets shoot, where paint lands, and gel moves.
 
 pub mod builder;
 pub mod dataset;
 pub mod evolve;
 pub mod fixtures;
+pub mod gel;
 pub mod generator;
 pub mod geom;
 pub mod kv;
@@ -24,3 +26,4 @@ pub mod render;
 pub mod rng;
 pub mod solver;
 pub mod tokens;
+pub mod turrets;

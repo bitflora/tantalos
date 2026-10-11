@@ -352,6 +352,54 @@ impl Builder {
         self.add("ITEM_GOO", cell, Dir::PosZ, &[], &[])
     }
 
+    /// A turret on the floor of `cell`, facing `yaw` degrees (0 = +x, 90 = +y). Copies the
+    /// style map's turrets: no properties, the yaw in `Facing`.
+    pub fn turret(&mut self, cell: Cell, yaw: i32) -> i32 {
+        let t = self.add("ITEM_TURRET", cell, Dir::PosZ, &[], &[]);
+        self.items[t as usize].set("Facing", format!("0 {yaw} 0"));
+        t
+    }
+
+    fn paint_props(paint_type: i32, dropper: bool, start_on: bool) -> Vec<(&'static str, String)> {
+        // ASSUMPTION: the export type follows the paint type (the style map's one gel, type
+        // 0, has 0). The editor may recompute it.
+        vec![
+            ("ITEM_PROPERTY_PAINT_TYPE", paint_type.to_string()),
+            ("ITEM_PROPERTY_DROPPER_ENABLED", (dropper as i32).to_string()),
+            ("ITEM_PROPERTY_ALLOW_STREAK_PAINT", "1".into()),
+            ("ITEM_PROPERTY_PAINT_FLOW_TYPE", "1".into()),
+            ("ITEM_PROPERTY_START_ENABLED", (start_on as i32).to_string()),
+            ("ITEM_PROPERTY_PAINT_EXPORT_TYPE", paint_type.to_string()),
+        ]
+    }
+
+    /// Gel poured onto the floor of `cell` by a dropper in the ceiling above it (the top open
+    /// cell of the column), pouring from the start if `start_on`. `paint_type`: 0 repulsion,
+    /// 1 propulsion, 2 conversion, 3 water. Returns the dropper: wire buttons to it.
+    pub fn gel_dropper(&mut self, cell: Cell, paint_type: i32, start_on: bool) -> i32 {
+        let mut top = cell;
+        while !self.solid(step(top, Dir::PosZ)) {
+            top = step(top, Dir::PosZ);
+        }
+        let props = Self::paint_props(paint_type, true, start_on);
+        let splat = self.add("ITEM_PAINT_SPLAT", cell, Dir::PosZ, &props, &[]);
+        self.items[splat as usize].set("ConnectionVisiblity", "2");
+        let mut dropper_props = vec![("ITEM_PROPERTY_CONNECTION_COUNT", "0".to_string())];
+        dropper_props.extend(props);
+        let dropper = self.add("ITEM_DROPPER_PAINT", top, Dir::NegZ, &dropper_props, &[]);
+        self.link(splat, dropper, "CONNECTION_PAINT_DROPPER");
+        dropper
+    }
+
+    /// Gel that is there from the start, on the surface behind open `cell` against `normal`.
+    /// ASSUMPTION: a splat with its dropper disabled needs no dropper item (unchecked).
+    pub fn gel_splat(&mut self, cell: Cell, normal: Dir, paint_type: i32) -> i32 {
+        let props = Self::paint_props(paint_type, false, true);
+        let splat = self.add("ITEM_PAINT_SPLAT", cell, normal, &props, &[]);
+        self.items[splat as usize].set("ConnectionVisiblity", "2");
+        splat
+    }
+
     /// Wires `sender` to activate `receiver`. A wired exit door starts closed.
     pub fn connect(&mut self, sender: i32, receiver: i32) -> &mut Self {
         self.link(sender, receiver, "CONNECTION_STANDARD");

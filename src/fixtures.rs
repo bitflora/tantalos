@@ -232,6 +232,80 @@ pub fn sphere_button() -> Puzzle {
     b.build()
 }
 
+/// A turret in a corridor faces the exit; the player starts behind it and knocks it over.
+pub fn turret_corridor() -> Puzzle {
+    let mut b = Builder::new("Turret corridor", [8, 3, 4]);
+    b.carve([0, 0, 1], [7, 2, 3]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([7, 1, 1], Dir::NegX);
+    b.turret([2, 1, 1], 0);
+    b.build()
+}
+
+/// The exit is on a two-voxel ledge; repulsion gel poured in front of it bounces you up.
+pub fn bounce_gel() -> Puzzle {
+    let mut b = Builder::new("Bounce gel", [6, 3, 6]);
+    b.carve([0, 0, 1], [5, 2, 5]);
+    b.fill([3, 0, 1], [5, 2, 2]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([5, 1, 3], Dir::NegX);
+    b.gel_dropper([2, 1, 1], 0, true);
+    b.build()
+}
+
+/// A goo trench three wide; propulsion gel poured at its edge lets you leap it.
+pub fn speed_gel() -> Puzzle {
+    let mut b = Builder::new("Speed gel", [10, 3, 4]);
+    b.carve([0, 0, 1], [9, 2, 3]);
+    b.carve([4, 0, 0], [6, 2, 0]);
+    b.goo([5, 1, 0]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([9, 1, 1], Dir::NegX);
+    b.gel_dropper([3, 1, 1], 1, true);
+    b.build()
+}
+
+/// The exit is on a high ledge under a white ceiling. Conversion gel poured on the floor
+/// makes it portalable: floor portal in, ceiling portal out.
+pub fn conversion_gel() -> Puzzle {
+    let mut b = Builder::new("Conversion gel", [8, 3, 6]);
+    b.carve([0, 0, 1], [7, 2, 5]);
+    b.fill([5, 0, 1], [7, 2, 3]);
+    b.paint([5, 0, 5], [7, 2, 5], Dir::PosZ, true);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([7, 1, 4], Dir::NegX);
+    b.gel_dropper([2, 1, 1], 2, true);
+    b.build()
+}
+
+/// `bounce_gel` with the dropper too far back: put a portal on the white floor under the
+/// stream and one on the white ceiling in front of the ledge, and the gel lands there.
+pub fn redirect_gel() -> Puzzle {
+    let mut b = Builder::new("Redirect gel", [8, 3, 6]);
+    b.carve([0, 0, 1], [7, 2, 5]);
+    b.fill([5, 0, 1], [7, 2, 2]);
+    b.paint([1, 1, 1], [1, 1, 1], Dir::NegZ, true);
+    b.paint([4, 1, 5], [4, 1, 5], Dir::PosZ, true);
+    b.entry([0, 0, 1], Dir::PosX);
+    b.exit([7, 1, 3], Dir::NegX);
+    b.gel_dropper([1, 1, 1], 0, true);
+    b.build()
+}
+
+/// `bounce_gel` with the repulsion gel already on the floor, and water pouring on it.
+pub fn washed_gel(water: bool) -> Puzzle {
+    let mut b = Builder::new("Washed gel", [6, 3, 6]);
+    b.carve([0, 0, 1], [5, 2, 5]);
+    b.fill([3, 0, 1], [5, 2, 2]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([5, 1, 3], Dir::NegX);
+    b.gel_splat([2, 1, 1], Dir::PosZ, 0);
+    if water {
+        b.gel_dropper([2, 1, 1], 3, true);
+    }
+    b.build()
+}
+
 pub fn all() -> Vec<(&'static str, Puzzle)> {
     vec![
         ("flat_room", flat_room()),
@@ -249,6 +323,12 @@ pub fn all() -> Vec<(&'static str, Puzzle)> {
         ("fizzler_cube", fizzler_cube()),
         ("pedestal_window", pedestal_window()),
         ("button_window", button_window()),
+        ("turret_corridor", turret_corridor()),
+        ("bounce_gel", bounce_gel()),
+        ("speed_gel", speed_gel()),
+        ("conversion_gel", conversion_gel()),
+        ("redirect_gel", redirect_gel()),
+        ("washed_gel", washed_gel(true)),
         ("timed_field", timed_field(6)),
         ("sphere_button", sphere_button()),
     ]

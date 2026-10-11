@@ -6,7 +6,7 @@ use crate::level::{ItemKind, Level};
 use crate::regions::{Move, RegionGraph};
 
 pub const LEGEND: &str = "# solid  ~ goo  . open air  A-Z region floor  \
-E entry  X exit  c cube  D dropper  b button  (+Y is up)";
+E entry  X exit  c cube  D dropper  b button  T turret  G gel  (+Y is up)";
 
 pub fn render(level: &Level, graph: &RegionGraph) -> String {
     let [sx, sy, sz] = level.size;
@@ -35,6 +35,8 @@ fn glyph(level: &Level, graph: &RegionGraph, c: [i32; 3]) -> char {
             ItemKind::Cube => Some('c'),
             ItemKind::CubeDropper => Some('D'),
             ItemKind::FloorButton => Some('b'),
+            ItemKind::Turret => Some('T'),
+            ItemKind::PaintSplat => Some('G'),
             _ => None,
         }
     });
@@ -64,6 +66,8 @@ pub fn describe_regions(graph: &RegionGraph) -> String {
                     Move::Walk => format!("walk{via} -> {to}"),
                     Move::Drop { height } => format!("drop {height}{via} -> {to}"),
                     Move::Step => format!("step (needs cube){via} -> {to}"),
+                    Move::Bounce => format!("bounce (needs gel) -> {to}"),
+                    Move::Leap => format!("leap (needs gel) -> {to}"),
                 }
             })
             .collect();
@@ -72,9 +76,14 @@ pub fn describe_regions(graph: &RegionGraph) -> String {
         } else {
             moves.join(", ")
         };
+        let danger = if r.danger != 0 {
+            format!(", turrets {:b}", r.danger)
+        } else {
+            String::new()
+        };
         writeln!(
             out,
-            "  {}: z={}, {} cells; {}",
+            "  {}: z={}, {} cells{danger}; {}",
             RegionGraph::label(r.id),
             r.z,
             r.cells.len(),

@@ -98,6 +98,7 @@ fn worked_example_face_classes() {
         Some(Landing {
             region,
             button: None,
+            turret: None,
             hazards: 0,
         })
     };
@@ -237,10 +238,13 @@ fn real_files_are_rejected_with_reasons() {
             .unwrap()
     };
     let style = load("fixtures/real/1500854111.p2c");
-    assert!(style.contains(&Problem::Unsupported(
-        "ITEM_TURRET (item 16, 61, 99)".into()
-    )));
+    assert!(style.contains(&Problem::Unsupported("ITEM_TBEAM (item 62)".into())));
     assert!(style.iter().all(|p| matches!(p, Problem::Unsupported(_))));
+    // Its turrets and gel are understood.
+    let text = format!("{style:?}");
+    for item in ["ITEM_TURRET", "ITEM_PAINT_SPLAT", "ITEM_DROPPER_PAINT"] {
+        assert!(!text.contains(item), "{text}");
+    }
     let skybox = load("fixtures/real/1501698868.p2c");
     assert_eq!(skybox, vec![Problem::Invalid("no exit door".into())]);
 }

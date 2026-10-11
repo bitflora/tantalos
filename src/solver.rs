@@ -28,13 +28,23 @@
 //! - Conservative: no cube steps (unmeasured), no firing while carrying, strict line of
 //!   sight. Liberal: the opposite.
 //! - A floor portal doesn't cut its region in two, and walking across it is optional.
+//! - Turrets (`turrets`): conservative rules never enter a region a live turret can shoot;
+//!   liberal rules run through, but do nothing there except move or walk into a portal.
+//!   Knocking one over is an action from a region beside it; a cube landing on it or a portal
+//!   opening under it (with the other portal open) knocks it over too.
+//! - Gel (`gel`): paint is part of the state. A pouring dropper paints where its stream lands
+//!   after every action, through a portal if one is under the stream. Splats without a
+//!   dropper are painted from the start. Water washes paint off. Conversion gel makes faces
+//!   portalable; repulsion and propulsion floors allow bounces and leaps.
 
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
+use crate::gel::{self, GelRules};
 use crate::geom::{step, Cell, Dir};
-use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, MAX_HAZARDS};
-use crate::portals::{self, Landing, Masks, Portals, Sight};
+use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, PaintKind, MAX_HAZARDS};
+use crate::portals::{self, Extras, Face, Landing, Masks, Portals, Sight};
 use crate::regions::{Move, RegionGraph};
+use crate::turrets::{self, TurretSight};
 
 /// Items that don't affect play.
 pub const DECORATIVE: &[&str] = &[
@@ -67,6 +77,46 @@ pub struct Rules {
     /// Units per second, for timed dashes.
     pub walk_speed: f64,
     pub sight: Sight,
+    pub turret_sight: TurretSight,
+    /// Run through places a live turret can shoot (doing nothing else there).
+    pub run_past_turrets: bool,
+    pub gel: GelRules,
+}
+
+impl Rules {
+    fn turret_sight(mode: Mode) -> TurretSight {
+        match mode {
+            Mode::Conservative => TurretSight {
+                half_angle: 60.0,
+                range: 16.0,
+                grating_blocks: false,
+            },
+            Mode::Liberal => TurretSight {
+                half_angle: 45.0,
+                range: 8.0,
+                grating_blocks: true,
+            },
+        }
+    }
+
+    fn gel(mode: Mode) -> GelRules {
+        match mode {
+            Mode::Conservative => GelRules {
+                radius: 1,
+                bounce_height: 2,
+                bounce_reach: 1,
+                leap_run: 2,
+                leap_gap: 3,
+            },
+            Mode::Liberal => GelRules {
+                radius: 2,
+                bounce_height: 4,
+                bounce_reach: 2,
+                leap_run: 1,
+                leap_gap: 5,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -156,6 +206,10 @@ pub enum Action {
         to: usize,
         escaped: bool,
     },
+    /// Walk up to a turret from where it can't shoot and knock it over.
+    Knock {
+        turret: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -169,6 +223,11 @@ pub struct State {
     pub latched: u32,
     /// Left through the exit during a timed dash.
     pub escaped: bool,
+    /// Bit `i`: turret `i` has been knocked over.
+    pub down: u32,
+    /// Painted faces, sorted, each `face << 2 | PaintKind` (face: index into
+    /// `Model::paint_faces`).
+    pub paint: Vec<u32>,
 }
 
 impl State {
@@ -229,6 +288,38 @@ pub struct HazardInfo {
     inputs: Vec<Signal>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TurretInfo {
+    pub index: i32,
+    pub cell: Cell,
+    /// Regions it can be knocked over from: its own cell, or beside it at the same height.
+    reach: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GelInfo {
+    /// The splat item.
+    pub index: i32,
+    pub kind: PaintKind,
+    /// The dropper item, if a dropper pours it; otherwise it is painted from the start.
+    pub dropper: Option<i32>,
+    start_enabled: bool,
+    inputs: Vec<Signal>,
+    /// Faces (indices into `Model::paint_faces`) it paints where it lands, unredirected.
+    spot: Vec<usize>,
+}
+
+/// A move off painted floor: every face in `needs` must have `paint`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct GelMove {
+    from: usize,
+    to: usize,
+    kind: Move,
+    paint: PaintKind,
+    needs: Vec<usize>,
+    hazards: u64,
+}
+
 /// Standable cells and on-foot moves between them, for timed dashes.
 #[derive(Default)]
 struct WalkGraph {
@@ -260,6 +351,17 @@ pub struct Model {
     button_sight: Vec<Vec<Masks>>,
     /// Face classes the search may use. Metrics switch one off to test whether it's needed.
     pub class_enabled: Vec<bool>,
+    pub turrets: Vec<TurretInfo>,
+    /// Turrets that exist. Metrics switch one off to see whether it changes the solution.
+    pub turret_enabled: Vec<bool>,
+    pub gels: Vec<GelInfo>,
+    /// Gels that paint. Metrics switch one off to test whether it's needed.
+    pub gel_enabled: Vec<bool>,
+    /// Every face paint can land on.
+    pub paint_faces: Vec<Face>,
+    /// Where gel coming out of a ceiling portal paints, by the cell it lands in.
+    cell_spots: HashMap<Cell, Vec<usize>>,
+    gel_moves: Vec<GelMove>,
     /// Buttons and pedestals that send a signal. Metrics switch one off to test whether it's
     /// needed: a disabled one never counts as pressed.
     pub button_enabled: Vec<bool>,
@@ -345,7 +447,18 @@ impl Model {
             .iter()
             .map(|p| Problem::Invalid(p.clone()))
             .collect();
-        let graph = RegionGraph::build(level);
+        // Regions split where the turrets that can shoot change.
+        let turret_sight = Rules::turret_sight(mode);
+        let danger: HashMap<Cell, u32> = if level.turrets.is_empty() {
+            HashMap::new()
+        } else {
+            level
+                .cells()
+                .filter(|&c| level.standable(c))
+                .map(|c| (c, turrets::danger(level, turret_sight, c)))
+                .collect()
+        };
+        let graph = RegionGraph::build_with(level, |c| danger.get(&c).copied().unwrap_or(0));
 
         let mut unsupported: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
         for it in &level.items {
@@ -422,6 +535,19 @@ impl Model {
             })
             .collect();
         assert!(hazards.len() <= MAX_HAZARDS);
+        let gel_rules = Rules::gel(mode);
+        let mut gels: Vec<GelInfo> = level
+            .gels
+            .iter()
+            .map(|g| GelInfo {
+                index: g.item,
+                kind: g.kind,
+                dropper: g.dropper.map(|(d, _)| d),
+                start_enabled: g.start_enabled,
+                inputs: Vec::new(),
+                spot: Vec::new(),
+            })
+            .collect();
 
         let mut exit_inputs = Vec::new();
         for link in &level.links {
@@ -456,6 +582,15 @@ impl Model {
                         Some(h) => h.inputs.push(signal),
                         None => problems.push(Problem::Invalid(format!(
                             "wire {} -> {} goes to a field that couldn't be decoded",
+                            link.sender, link.receiver
+                        ))),
+                    }
+                }
+                Some(ItemKind::PaintDropper) => {
+                    match gels.iter_mut().find(|g| g.dropper == Some(link.receiver)) {
+                        Some(g) => g.inputs.push(signal),
+                        None => problems.push(Problem::Invalid(format!(
+                            "wire {} -> {} goes to a gel dropper with no splat",
                             link.sender, link.receiver
                         ))),
                     }
@@ -539,6 +674,9 @@ impl Model {
                     strict_grazing: true,
                     corner_targets: false,
                 },
+                turret_sight,
+                run_past_turrets: false,
+                gel: gel_rules,
             },
             Mode::Liberal => Rules {
                 cube_steps: true,
@@ -550,14 +688,170 @@ impl Model {
                     strict_grazing: false,
                     corner_targets: true,
                 },
+                turret_sight,
+                run_past_turrets: true,
+                gel: gel_rules,
             },
         };
+
+        // Gel: every face paint can land on, by id.
+        let mut paint_faces: Vec<Face> = Vec::new();
+        let mut face_id: HashMap<Face, usize> = HashMap::new();
+        fn intern(
+            faces: Vec<Face>,
+            paint_faces: &mut Vec<Face>,
+            face_id: &mut HashMap<Face, usize>,
+        ) -> Vec<usize> {
+            faces
+                .into_iter()
+                .map(|f| {
+                    *face_id.entry(f).or_insert_with(|| {
+                        paint_faces.push(f);
+                        paint_faces.len() - 1
+                    })
+                })
+                .collect()
+        }
+        let floor_spot = |c: Cell| gel::spot(level, (c, Dir::NegZ), gel_rules.radius);
+        // The floor face each stream lands on.
+        let mut stream_faces: Vec<Option<Face>> = Vec::new();
+        for (g, info) in level.gels.iter().zip(gels.iter_mut()) {
+            let (faces, stream) = match g.dropper {
+                Some((_, cell)) => match level.fall(cell) {
+                    Some(land) => (floor_spot(land), Some((land, Dir::NegZ))),
+                    None => (Vec::new(), None),
+                },
+                None => (gel::spot(level, g.face, gel_rules.radius), None),
+            };
+            info.spot = intern(faces, &mut paint_faces, &mut face_id);
+            stream_faces.push(stream);
+        }
+        let portal_gel: HashSet<usize> = gels
+            .iter()
+            .filter(|g| g.kind == PaintKind::Portal)
+            .flat_map(|g| g.spot.iter().copied())
+            .collect();
+        // A stream can go through a portal if the floor it lands on is white or can be made so.
+        let redirectable: Vec<usize> = (0..gels.len())
+            .filter(|&g| {
+                stream_faces[g].is_some_and(|(c, d)| {
+                    level.portal_surface(c, d)
+                        || face_id.get(&(c, d)).is_some_and(|f| portal_gel.contains(f))
+                })
+            })
+            .collect();
+        let mut cell_spots: HashMap<Cell, Vec<usize>> = HashMap::new();
+        if !redirectable.is_empty() {
+            for (c, d) in level.portal_surfaces() {
+                if d != Dir::PosZ {
+                    continue;
+                }
+                if let Some(land) = level.fall(c) {
+                    if !cell_spots.contains_key(&land) {
+                        let spot = intern(floor_spot(land), &mut paint_faces, &mut face_id);
+                        cell_spots.insert(land, spot);
+                    }
+                }
+            }
+        }
+        // Faces conversion gel can paint: where portal gel lands, and anywhere a stream of it
+        // can be sent.
+        let mut whitenable: HashSet<usize> = portal_gel;
+        if redirectable
+            .iter()
+            .any(|&g| gels[g].kind == PaintKind::Portal)
+        {
+            whitenable.extend(cell_spots.values().flatten().copied());
+        }
+        let mut paintable: Vec<(Face, usize)> = whitenable
+            .into_iter()
+            .map(|f| (paint_faces[f], f))
+            .filter(|&((c, d), _)| !level.portal_surface(c, d))
+            .collect();
+        paintable.sort();
+        let extras = Extras {
+            streams: redirectable
+                .iter()
+                .map(|&g| (stream_faces[g].unwrap(), g))
+                .collect(),
+            split_ceilings: !redirectable.is_empty(),
+            paintable,
+        };
+
+        // Moves off painted floors.
+        let has = |k: PaintKind| gels.iter().any(|g| g.kind == k);
+        let mut gel_moves: HashSet<GelMove> = HashSet::new();
+        for (f, &(c, d)) in paint_faces.iter().enumerate() {
+            let Some(from) = graph.region_of(c).filter(|_| d == Dir::NegZ) else {
+                continue;
+            };
+            if has(PaintKind::Bounce) {
+                for (t, hazards) in gel::bounces(level, c, gel_rules) {
+                    if let Some(to) = graph.region_of(t) {
+                        gel_moves.insert(GelMove {
+                            from,
+                            to,
+                            kind: Move::Bounce,
+                            paint: PaintKind::Bounce,
+                            needs: vec![f],
+                            hazards,
+                        });
+                    }
+                }
+            }
+            if has(PaintKind::Speed) {
+                for dir in Dir::HORIZONTAL {
+                    let Some((run, t, hazards)) = gel::leap(level, c, dir, gel_rules) else {
+                        continue;
+                    };
+                    let needs: Option<Vec<usize>> = run
+                        .iter()
+                        .map(|&r| face_id.get(&(r, Dir::NegZ)).copied())
+                        .collect();
+                    if let (Some(needs), Some(to)) = (needs, graph.region_of(t)) {
+                        gel_moves.insert(GelMove {
+                            from,
+                            to,
+                            kind: Move::Leap,
+                            paint: PaintKind::Speed,
+                            needs,
+                            hazards,
+                        });
+                    }
+                }
+            }
+        }
+        let mut gel_moves: Vec<GelMove> = gel_moves.into_iter().collect();
+        gel_moves.sort_by_key(|m| (m.from, m.to, m.needs.clone(), m.hazards, m.kind));
+
+        let turret_list: Vec<TurretInfo> = level
+            .turrets
+            .iter()
+            .map(|t| {
+                let mut reach: Vec<usize> = std::iter::once(t.cell)
+                    .chain(
+                        Dir::HORIZONTAL
+                            .iter()
+                            .filter(|&&d| level.face(t.cell, d).barrier.is_none())
+                            .map(|&d| step(t.cell, d)),
+                    )
+                    .filter_map(|c| graph.region_of(c))
+                    .collect();
+                reach.sort();
+                reach.dedup();
+                TurretInfo {
+                    index: t.item,
+                    cell: t.cell,
+                    reach,
+                }
+            })
+            .collect();
         let walk = if pedestals.iter().any(|p| p.timer.is_some()) {
             walk_graph(level, &graph)
         } else {
             WalkGraph::default()
         };
-        let portals = Portals::build(level, &graph, rules.sight);
+        let portals = Portals::build(level, &graph, rules.sight, &extras);
         let button_sight = buttons
             .iter()
             .map(|b| match b.region {
@@ -573,6 +867,13 @@ impl Model {
             mode,
             rules,
             class_enabled: vec![true; portals.classes.len()],
+            turret_enabled: vec![true; turret_list.len()],
+            turrets: turret_list,
+            gel_enabled: vec![true; gels.len()],
+            gels,
+            paint_faces,
+            cell_spots,
+            gel_moves,
             button_enabled: vec![true; buttons.len()],
             pedestal_enabled: vec![true; pedestals.len()],
             hazard_enabled: vec![true; hazards.len()],
@@ -589,6 +890,8 @@ impl Model {
                 cubes,
                 latched: 0,
                 escaped: false,
+                down: 0,
+                paint: Vec::new(),
             },
             exit_region,
             exit_inputs,
@@ -619,6 +922,100 @@ impl Model {
 
     fn exit_open_with(&self, s: &State, held: Option<Signal>) -> bool {
         self.exit_inputs.is_empty() || self.all_on(s, &self.exit_inputs, held) != self.exit_inverted
+    }
+
+    /// The start state: paint from splats without droppers, then whatever the droppers pour.
+    pub fn initial(&self) -> State {
+        let mut s = self.start.clone();
+        for (g, gel) in self.gels.iter().enumerate() {
+            if gel.dropper.is_none() && self.gel_enabled[g] {
+                paint(&mut s.paint, &gel.spot, gel.kind);
+            }
+        }
+        self.settle(&mut s);
+        s
+    }
+
+    /// Turrets live in state `s` (not knocked over, not switched off).
+    fn alive(&self, s: &State) -> u32 {
+        let enabled = self
+            .turret_enabled
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e)
+            .fold(0u32, |m, (i, _)| m | 1 << i);
+        enabled & !s.down
+    }
+
+    /// Whether a live turret can shoot region `r`.
+    fn exposed(&self, s: &State, r: usize) -> bool {
+        self.graph.regions[r].danger & self.alive(s) != 0
+    }
+
+    fn gel_on(&self, s: &State, g: usize) -> bool {
+        let gel = &self.gels[g];
+        if gel.inputs.is_empty() {
+            gel.start_enabled
+        } else {
+            gel.start_enabled != self.all_on(s, &gel.inputs, None)
+        }
+    }
+
+    /// The class of the portal gel stream `g` comes out of, if one is under it.
+    fn redirect(&self, s: &State, g: usize) -> Option<usize> {
+        let [Some(a), Some(b)] = s.portals else {
+            return None;
+        };
+        let classes = &self.portals.classes;
+        if classes[a].stream == Some(g) {
+            Some(b)
+        } else if classes[b].stream == Some(g) {
+            Some(a)
+        } else {
+            None
+        }
+    }
+
+    /// Whether a pouring gel stream goes through a portal in state `s`.
+    pub fn redirected(&self, s: &State) -> bool {
+        (0..self.gels.len()).any(|g| {
+            self.gels[g].dropper.is_some()
+                && self.gel_enabled[g]
+                && self.gel_on(s, g)
+                && self.redirect(s, g).is_some()
+        })
+    }
+
+    pub fn painted(&self, s: &State, face: usize, kind: PaintKind) -> bool {
+        s.paint.binary_search(&paint_code(face, kind)).is_ok()
+    }
+
+    /// What follows by itself after any action: a turret over an open portal falls through,
+    /// and pouring droppers paint where their streams land.
+    fn settle(&self, s: &mut State) {
+        if let [Some(a), Some(b)] = s.portals {
+            for c in [a, b] {
+                if let Some(t) = self.portals.classes[c].turret {
+                    s.down |= 1 << t;
+                }
+            }
+        }
+        for (g, gel) in self.gels.iter().enumerate() {
+            if gel.dropper.is_none() || !self.gel_enabled[g] || !self.gel_on(s, g) {
+                continue;
+            }
+            let spot: &[usize] = match self.redirect(s, g) {
+                None => &gel.spot,
+                Some(exit) => match self.portals.classes[exit]
+                    .gel_cell
+                    .and_then(|c| self.cell_spots.get(&c))
+                {
+                    Some(spot) => spot,
+                    None => continue,
+                },
+            };
+            paint(&mut s.paint, spot, gel.kind);
+        }
     }
 
     /// The buttons and pedestals wired to hazard `h`.
@@ -692,6 +1089,9 @@ impl Model {
         if self.active(s, hazards, HazardKind::LaserField, None) {
             return None;
         }
+        if !self.rules.run_past_turrets && self.exposed(s, to) {
+            return None;
+        }
         let mut n = s.clone();
         n.region = to;
         if self.active(s, hazards, HazardKind::Fizzler, None) {
@@ -707,6 +1107,12 @@ impl Model {
         }
         let r = s.region;
         let held = s.held();
+        // Where a live turret can shoot, the player can only keep moving, and only under
+        // liberal rules: conservative ones never go there, so this is the start, and fatal.
+        let act = !self.exposed(s, r);
+        if !act && !self.rules.run_past_turrets {
+            return Vec::new();
+        }
 
         for e in self.graph.edges_from(r) {
             let ok = match e.kind {
@@ -724,6 +1130,34 @@ impl Model {
                 out.push((a, n));
             }
         }
+        for m in self.gel_moves.iter().filter(|m| m.from == r) {
+            if !m.needs.iter().all(|&f| self.painted(s, f, m.paint)) {
+                continue;
+            }
+            if let Some(n) = self.travel(s, m.to, m.hazards) {
+                let a = Action::Move {
+                    to: m.to,
+                    kind: m.kind,
+                    hazards: m.hazards,
+                };
+                out.push((a, n));
+            }
+        }
+        if !act {
+            if self.rules.run_past_turrets {
+                for color in Color::BOTH {
+                    if let Some(l) = self.through(s, color) {
+                        if let Some(n) = self.travel(s, l.region, l.hazards) {
+                            out.push((Action::Enter { color }, n));
+                        }
+                    }
+                }
+            }
+            for (_, n) in &mut out {
+                self.settle(n);
+            }
+            return out;
+        }
 
         let can_fire = held.is_none() || self.rules.fire_while_holding;
         // Free weighted buttons here the player could stand on.
@@ -739,10 +1173,14 @@ impl Model {
             let other = s.portals[color.other() as usize];
             for class in &self.portals.classes {
                 let taken = other == Some(class.id) && class.faces.len() == 1;
+                let unpainted = class
+                    .needs_paint
+                    .is_some_and(|f| !self.painted(s, f, PaintKind::Portal));
                 if !can_fire
                     || !self.class_enabled[class.id]
                     || s.portals[me] == Some(class.id)
                     || taken
+                    || unpainted
                 {
                     continue;
                 }
@@ -775,7 +1213,9 @@ impl Model {
                 }
                 if let Some(cube) = held {
                     let to = self.cube_lands(l, s, cube);
-                    out.push((Action::Throw { color, to }, s.move_cube(cube, to)));
+                    let mut n = s.move_cube(cube, to);
+                    knock(&mut n, l.turret);
+                    out.push((Action::Throw { color, to }, n));
                 }
             }
         }
@@ -795,7 +1235,9 @@ impl Model {
             }
             for &l in &self.tosses[r] {
                 let to = self.cube_lands(l, s, cube);
-                out.push((Action::Toss { to }, s.move_cube(cube, to)));
+                let mut n = s.move_cube(cube, to);
+                knock(&mut n, l.turret);
+                out.push((Action::Toss { to }, n));
             }
         } else {
             let mut here: Vec<Cube> = s
@@ -832,6 +1274,18 @@ impl Model {
                 Some(t) => out.extend(self.dash(s, p, ped.cell, t)),
             }
         }
+
+        let alive = self.alive(s);
+        for (t, turret) in self.turrets.iter().enumerate() {
+            if alive & (1 << t) != 0 && turret.reach.contains(&r) {
+                let mut n = s.clone();
+                n.down |= 1 << t;
+                out.push((Action::Knock { turret: t }, n));
+            }
+        }
+        for (_, n) in &mut out {
+            self.settle(n);
+        }
         out
     }
 
@@ -854,6 +1308,9 @@ impl Model {
             for &(to, fall, hazards) in &self.walk.moves[node] {
                 let timed = Some(Signal::Pedestal(p));
                 if self.active(s, hazards, HazardKind::LaserField, timed) {
+                    continue;
+                }
+                if !self.rules.run_past_turrets && self.exposed(s, self.walk.region[to]) {
                     continue;
                 }
                 let f = fizzled || self.active(s, hazards, HazardKind::Fizzler, timed);
@@ -904,9 +1361,10 @@ impl Model {
 
     /// Breadth-first search from the start state, exploring at most `max_states` states.
     pub fn solve(&self, max_states: usize) -> Outcome {
-        let mut states = vec![self.start.clone()];
+        let start = self.initial();
+        let mut states = vec![start.clone()];
         let mut parent: Vec<Option<(usize, Action)>> = vec![None];
-        let mut seen = HashMap::from([(self.start.clone(), 0)]);
+        let mut seen = HashMap::from([(start, 0)]);
         let mut next = 0;
         while next < states.len() {
             let s = states[next].clone();
@@ -948,14 +1406,15 @@ impl Model {
     /// Explores every reachable state (up to `max_states`), past goals too: metrics need the
     /// whole graph to find dead ends.
     pub fn explore(&self, max_states: usize) -> StateSpace {
+        let start = self.initial();
         let mut space = StateSpace {
-            states: vec![self.start.clone()],
+            states: vec![start.clone()],
             depth: vec![0],
             next: Vec::new(),
             goal: Vec::new(),
             complete: true,
         };
-        let mut seen = HashMap::from([(self.start.clone(), 0)]);
+        let mut seen = HashMap::from([(start, 0)]);
         let mut i = 0;
         while i < space.states.len() {
             let s = space.states[i].clone();
@@ -1019,6 +1478,8 @@ impl Model {
                     Move::Walk => format!("walk to region {}", label(to)),
                     Move::Drop { height } => format!("drop {height} to region {}", label(to)),
                     Move::Step => format!("climb onto region {} using a cube", label(to)),
+                    Move::Bounce => format!("bounce off repulsion gel up to region {}", label(to)),
+                    Move::Leap => format!("leap off propulsion gel across to region {}", label(to)),
                 };
                 format!("{what}{}", self.fields(hazards))
             }
@@ -1027,13 +1488,18 @@ impl Model {
                 class,
                 stand_on,
             } => format!(
-                "{}fire {} at class {class}: {}",
+                "{}fire {} at class {class}: {}{}",
                 stand_on.map_or(String::new(), |b| format!(
                     "stand on button {} and ",
                     self.buttons[b].index
                 )),
                 color.name(),
-                portals::describe(&self.portals.classes[class])
+                portals::describe(&self.portals.classes[class]),
+                if self.portals.classes[class].needs_paint.is_some() {
+                    " (conversion gel)"
+                } else {
+                    ""
+                }
             ),
             Action::Enter { color } => format!("walk into the {} portal", color.name()),
             Action::PickUp { cube, from } => {
@@ -1069,7 +1535,31 @@ impl Model {
                     )
                 }
             }
+            Action::Knock { turret } => {
+                format!("knock over turret {}", self.turrets[turret].index)
+            }
         }
+    }
+}
+
+fn paint_code(face: usize, kind: PaintKind) -> u32 {
+    (face as u32) << 2 | kind as u32
+}
+
+/// Paints `spot` with `kind` (water washes it).
+fn paint(list: &mut Vec<u32>, spot: &[usize], kind: PaintKind) {
+    for &f in spot {
+        list.retain(|&e| e >> 2 != f as u32);
+        if kind != PaintKind::Water {
+            list.push(paint_code(f, kind));
+        }
+    }
+    list.sort();
+}
+
+fn knock(s: &mut State, turret: Option<usize>) {
+    if let Some(t) = turret {
+        s.down |= 1 << t;
     }
 }
 
