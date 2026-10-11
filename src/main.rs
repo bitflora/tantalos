@@ -450,7 +450,7 @@ fn run_dataset(args: &[String]) -> Result<()> {
 }
 
 fn run_score(args: &[String]) -> Result<()> {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, Write};
     let mut budget = 50_000;
     let mut p2c_dir = None;
     let mut all = false;
@@ -466,61 +466,70 @@ fn run_score(args: &[String]) -> Result<()> {
             _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
         }
     }
-    let input = match rest.as_slice() {
-        [] | ["-"] => {
-            let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s)?;
-            s
-        }
-        [file] => std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?,
+    // Streamed: levels are read as threads need them and written, in order, as they're done.
+    let input: Box<dyn BufRead + Send> = match rest.as_slice() {
+        [] | ["-"] => Box::new(std::io::BufReader::new(std::io::stdin())),
+        [file] => Box::new(std::io::BufReader::new(
+            std::fs::File::open(file).map_err(|e| format!("{file}: {e}"))?,
+        )),
         _ => return Err(format!("score takes one input file\n{USAGE}").into()),
     };
-    let lines: Vec<(usize, &str)> = input
+    let lines = input
         .lines()
         .enumerate()
-        .map(|(i, l)| (i + 1, l.trim()))
-        .filter(|(_, l)| !l.is_empty())
-        .collect();
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let scored = dataset::par_map(&lines, threads, |&(i, line)| {
-        let n = line.split_whitespace().count();
-        match tokens::decode(line) {
-            Err(e) => (
-                format!(
-                    "{{\"line\":{i},\"n_tokens\":{n},\"verdict\":\"unparsed\",\"problem\":{}}}",
-                    dataset::json_str(&e)
-                ),
-                None,
-            ),
-            Ok(p) => {
-                let normal: Vec<&str> = line.split_whitespace().collect();
-                let encoded = tokens::encode(&p).map(|t| t.join(" "));
-                let canonical = encoded.as_ref().is_ok_and(|t| *t == normal.join(" "));
-                let tokens = encoded.map_or(String::new(), |t| {
-                    format!("\"tokens\":{},", dataset::json_str(&t))
-                });
-                let label = dataset::label(&p, budget, i as u64);
-                let keep = (all || matches!(label, dataset::Label::Solvable { .. })).then_some(p);
-                (
-                    format!(
-                        "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}}}",
-                        label.json_fields()
-                    ),
-                    keep,
-                )
-            }
-        }
-    });
+        .map(|(i, l)| (i + 1, l))
+        .filter(|(_, l)| !l.as_ref().is_ok_and(|l| l.trim().is_empty()));
     if let Some(dir) = &p2c_dir {
         std::fs::create_dir_all(dir)?;
     }
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    for ((i, _), (json, puzzle)) in lines.iter().zip(scored) {
-        writeln!(out, "{json}")?;
-        if let (Some(dir), Some(p)) = (&p2c_dir, puzzle) {
-            std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
-        }
-    }
+    dataset::par_map_ordered(
+        lines,
+        threads,
+        |(i, line)| {
+            let line = line?;
+            let line = line.trim();
+            let n = line.split_whitespace().count();
+            Ok(match tokens::decode(line) {
+                Err(e) => (
+                    i,
+                    format!(
+                        "{{\"line\":{i},\"n_tokens\":{n},\"verdict\":\"unparsed\",\"problem\":{}}}",
+                        dataset::json_str(&e)
+                    ),
+                    None,
+                ),
+                Ok(p) => {
+                    let normal: Vec<&str> = line.split_whitespace().collect();
+                    let encoded = tokens::encode(&p).map(|t| t.join(" "));
+                    let canonical = encoded.as_ref().is_ok_and(|t| *t == normal.join(" "));
+                    let tokens = encoded.map_or(String::new(), |t| {
+                        format!("\"tokens\":{},", dataset::json_str(&t))
+                    });
+                    let label = dataset::label(&p, budget, i as u64);
+                    let keep =
+                        (all || matches!(label, dataset::Label::Solvable { .. })).then_some(p);
+                    (
+                        i,
+                        format!(
+                            "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}}}",
+                            label.json_fields()
+                        ),
+                        keep,
+                    )
+                }
+            })
+        },
+        |scored: std::io::Result<(usize, String, Option<Puzzle>)>| -> Result<()> {
+            let (i, json, puzzle) = scored?;
+            writeln!(out, "{json}")?;
+            if let (Some(dir), Some(p)) = (&p2c_dir, puzzle) {
+                std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
+            }
+            Ok(())
+        },
+    )?;
     out.flush()?;
     Ok(())
 }
@@ -552,7 +561,11 @@ fn editor_check(args: &[String]) -> Result<()> {
                     fl.pos[0],
                     fl.pos[1],
                     fl.pos[2],
-                    fl.rules.iter().map(|r| format!("\"{r}\"")).collect::<Vec<_>>().join(",")
+                    fl.rules
+                        .iter()
+                        .map(|r| format!("\"{r}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 )
             })
             .collect();
