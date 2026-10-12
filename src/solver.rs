@@ -365,8 +365,8 @@ pub struct Model {
     pedestals_in: Vec<Vec<usize>>,
     knock_from: Vec<Vec<usize>>,
     /// Hazards that are fizzlers, and those that are laser fields.
-    fizzlers: u64,
-    lasers: u64,
+    pub fizzlers: u64,
+    pub lasers: u64,
 }
 
 /// Every state reachable from the start, in BFS order, for metrics.
@@ -1092,6 +1092,13 @@ impl Model {
                 && self.gel_on(&cx.lay, &s, g)
                 && self.redirect(&s, g).is_some()
         })
+    }
+
+    /// Bit `h`: hazard `h` is on in state `s`, with `held` on for the moment as well (a running
+    /// timed pedestal, or a floor button the player stands on).
+    pub fn hazards_on_in(&self, s: &State, held: Option<Signal>) -> u64 {
+        let cx = self.context(&s.cubes);
+        self.hazards_on(&cx.lay, &self.pack(&cx.lay, s), held)
     }
 
     /// The buttons and pedestals wired to hazard `h`.

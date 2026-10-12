@@ -317,3 +317,24 @@ disagreements to `data/ingame/disagreements.jsonl` (for fitting rules with
 `tools/ingame/rules.py`) and game-invalid levels to `data/ingame/invalid.jsonl`, which later
 runs train on as invalid without relabelling. If the game can't be used it logs that and the
 run carries on.
+
+## Playing a solution in the game
+`glados route FILE` makes the conservative plan concrete (`src/route.rs`): for each step, the
+cells to walk through, where to stand, the face each portal goes on and the point to aim at,
+the cube to pick up and where it ends up, then a last walk out of the exit door. Choices the
+plan leaves open go to the nearest cell on foot, avoiding cubes, buttons, pedestals, turrets,
+gel and open floor portals when there is another way. It replays the plan with a concrete
+state (player cell, portal faces, cube cells) and checks after every step that it abstracts to
+the solver's state; `tests/route.rs` grounds every solvable fixture and about 130 generated
+levels, and checks the walks are legal steps or drops and the shots clear.
+
+`train/play.py LEVEL.p2c --launch` plays the route in Portal 2 with the player's own controls,
+for watching: it loads the level into the editor (as the in-game check does), builds it with
+`puzzlemaker_compile_and_preview`, walks out of the elevator, and plays each step with `setang`
+(a perfect mouse) and +forward, +jump, +attack, +attack2 and +use, steering by positions a small
+VScript prints each tick. Commands go over the game's TCP console (`-netconport`, with a random
+`-netconpassword`) rather than a `-hijack` process per command. Each step is checked (player
+cell, portals, cubes); one that didn't work is put right by teleporting (`setpos`, a cube's
+`SetOrigin`, `portal_place`) and reported as recovered. `--spike` checks the console, VScript,
+coordinates, movement and these commands instead of playing. **Not yet run in the game**: it
+has only been run against a fake netcon server.

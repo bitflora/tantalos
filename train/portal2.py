@@ -196,14 +196,15 @@ def autosaves():
     return [p for p in (GAME / "portal2" / "puzzles").rglob("autosave.*") if STAGE not in p.parents]
 
 
-def launch(log, saved, timeout=180):
-    """Start the game, open the editor and patch it. Returns the game's pid."""
+def launch(log, saved, timeout=180, extra=()):
+    """Start the game, open the editor and patch it. Returns the game's pid. `extra`: more
+    command-line options (e.g. `-netconport` for train/play.py)."""
     if game_process() is not None:
         raise GameUnavailable("Portal 2 is already running (maybe being played); not interrupting it")
     if not PREVIEW.exists():
         raise GameUnavailable(f"{PREVIEW} is missing: build any puzzle in the editor once")
     subprocess.Popen([str(EXE), "-game", "portal2", "-steam", "-insecure", "-novid", "-windowed",
-                      "-w", "1280", "-h", "800", "+con_logfile", LOGNAME], cwd=GAME)
+                      "-w", "1280", "-h", "800", *extra, "+con_logfile", LOGNAME], cwd=GAME)
     pid = None
     try:
         # Before the window exists, -hijack would start a second game instead of forwarding.

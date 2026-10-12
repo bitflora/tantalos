@@ -8,6 +8,7 @@
 //! Slice 5: levels as token sequences (`tokens`), labelled training data and scoring of model
 //! output (`dataset`).
 //! Turrets (`turrets`) and gel (`gel`): where turrets shoot, where paint lands, and gel moves.
+//! Plans made concrete for playing them in the game (`route`).
 
 pub mod builder;
 pub mod dataset;
@@ -25,6 +26,7 @@ pub mod portals;
 pub mod regions;
 pub mod render;
 pub mod rng;
+pub mod route;
 pub mod solver;
 pub mod tokens;
 pub mod turrets;

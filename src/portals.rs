@@ -233,7 +233,7 @@ pub fn line_of_sight(level: &Level, eye: Cell, face: Face) -> bool {
 
 /// The masks of the clear shots from the eye in open cell `eye` at `face` under `sight`, one
 /// per target point that can be hit.
-fn shots(level: &Level, eye: Cell, face: Face, sight: Sight) -> impl Iterator<Item = u64> + '_ {
+pub fn shots(level: &Level, eye: Cell, face: Face, sight: Sight) -> impl Iterator<Item = u64> + '_ {
     const CORNERS: [(f64, f64); 4] = [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)];
     let (target, d) = face;
     let n = d.vector();

@@ -7,7 +7,7 @@ use glados::metrics::{assess, Assessment, Metrics};
 use glados::p2c::Puzzle;
 use glados::regions::RegionGraph;
 use glados::solver::{judge, Judged, Judgement, Mode, Model, Problem, DEFAULT_MAX_STATES};
-use glados::{dataset, fixtures, portals, render, tokens};
+use glados::{dataset, fixtures, portals, render, route, tokens};
 
 const USAGE: &str = "usage:
   glados info <file.p2c>...     summary, region graph and ASCII map
@@ -27,7 +27,9 @@ const USAGE: &str = "usage:
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
                                 --p2c-all every one that parsed
   glados editor <file.p2c|dir>...
-                                items the Puzzle Maker would mark invalid, one JSON line per file";
+                                items the Puzzle Maker would mark invalid, one JSON line per file
+  glados route <file.p2c>       the conservative plan made concrete for playing it in the game:
+                                where to stand, look, fire and walk (JSON lines, src/route.rs)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -45,6 +47,7 @@ fn main() -> ExitCode {
         Some("dataset") => run_dataset(&args[1..]),
         Some("score") => run_score(&args[1..]),
         Some("editor") if args.len() > 1 => editor_check(&args[1..]),
+        Some("route") if args.len() == 2 => print_route(Path::new(&args[1])),
         Some("roundtrip") if args.len() > 1 => {
             args[1..].iter().try_for_each(|f| roundtrip(Path::new(f)))
         }
@@ -208,6 +211,16 @@ fn solve(path: &Path) -> Result<()> {
     }
     println!("  judged and measured in {:.1?}", start.elapsed());
     println!();
+    Ok(())
+}
+
+fn print_route(path: &Path) -> Result<()> {
+    let (_, puzzle) = load(path)?;
+    let level = Level::from_puzzle(&puzzle);
+    let r = route::route(&level, DEFAULT_MAX_STATES).map_err(|e| format!("{}: {e}", path.display()))?;
+    for line in r.json_lines(puzzle.title(), level.size) {
+        println!("{line}");
+    }
     Ok(())
 }
 
