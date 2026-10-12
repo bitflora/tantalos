@@ -24,6 +24,8 @@ use crate::solver::{Action, Color, Cube, CubeLoc, Mode, Model, Signal, State, Ve
 
 const VOXEL: f64 = 128.0;
 const GRAVITY: f64 = 600.0;
+/// Shots preferably meet the face at least this steeply (cosine to its normal, about 25°).
+const MIN_SHOT_COS: f64 = 0.42;
 
 /// Where things are, concretely.
 #[derive(Clone, Debug, PartialEq)]
@@ -482,36 +484,51 @@ impl<'a> Grounder<'a> {
                 let on = model.hazards_on_in(s, stand_on.map(Signal::Floor));
                 let faces = &model.portals.classes[class].faces;
                 let other = h.portals[1 - k];
-                self.find(h, s, |c| {
-                    match stand_on {
-                        Some(b) if c != model.buttons[b].cell => return None,
-                        None if self.in_the_way(h, s, c) => return None,
-                        _ => {}
-                    }
-                    let eye = [c[0] as f64 + 0.5, c[1] as f64 + 0.5, c[2] as f64 + 0.5];
-                    let dist = |&(fc, d): &Face| {
-                        let p = face_centre((fc, d));
-                        (0..3).map(|i| (p[i] - eye[i]).powi(2)).sum::<f64>()
-                    };
-                    let face = faces
-                        .iter()
-                        .filter(|&&f| Some(f) != other)
-                        .filter(|&&f| {
-                            portals::shots(level, c, f, rules.sight)
-                                .any(|m| m & on & model.fizzlers == 0)
-                        })
-                        .min_by(|a, b| dist(a).total_cmp(&dist(b)))?;
-                    let mut after = h.clone();
-                    after.portals[k] = Some(*face);
-                    self.matches(&after, next).then_some((
-                        Act::Fire {
-                            color,
-                            face: *face,
-                            eye: c,
-                        },
-                        after,
-                    ))
-                })
+                // A shot along a wall from close to it rarely lands in the game: first look for
+                // a face seen at a fair angle (from a farther cell if need be), then any.
+                let at_angle = |min_cos: f64| {
+                    self.find(h, s, |c| {
+                        match stand_on {
+                            Some(b) if c != model.buttons[b].cell => return None,
+                            None if self.in_the_way(h, s, c) => return None,
+                            _ => {}
+                        }
+                        let eye = [c[0] as f64 + 0.5, c[1] as f64 + 0.5, c[2] as f64 + 0.5];
+                        // Squared distance to the face's centre, and the cosine between the
+                        // face's normal and the way back to the eye.
+                        let seen = |&(fc, d): &Face| {
+                            let p = face_centre((fc, d));
+                            let v: [f64; 3] = std::array::from_fn(|i| eye[i] - p[i]);
+                            let d2: f64 = v.iter().map(|x| x * x).sum();
+                            let n = d.opposite().vector();
+                            let cos = (0..3).map(|i| v[i] * n[i] as f64).sum::<f64>() / d2.sqrt();
+                            (d2, cos)
+                        };
+                        let score = |f: &Face| {
+                            let (d2, cos) = seen(f);
+                            d2 / cos.max(0.05).powi(2)
+                        };
+                        let face = faces
+                            .iter()
+                            .filter(|&&f| Some(f) != other && seen(&f).1 >= min_cos)
+                            .filter(|&&f| {
+                                portals::shots(level, c, f, rules.sight)
+                                    .any(|m| m & on & model.fizzlers == 0)
+                            })
+                            .min_by(|a, b| score(a).total_cmp(&score(b)))?;
+                        let mut after = h.clone();
+                        after.portals[k] = Some(*face);
+                        self.matches(&after, next).then_some((
+                            Act::Fire {
+                                color,
+                                face: *face,
+                                eye: c,
+                            },
+                            after,
+                        ))
+                    })
+                };
+                at_angle(MIN_SHOT_COS).or_else(|| at_angle(-1.0))
             }
 
             Action::Enter { color } => {

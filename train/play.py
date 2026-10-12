@@ -6,7 +6,8 @@
 
 `glados route` turns the solver's shortest plan into cells, faces and points (src/route.rs).
 This loads the level into the Puzzle Maker (train/portal2.py), builds it, and plays it with the
-player's own controls: `setang` to look (a perfect mouse) and +forward, +jump, +attack (blue),
+player's own controls: `setang` to look (a perfect mouse, turning smoothly so it can be watched;
+--fast snaps it, for validation runs) and +forward, +jump, +attack (blue),
 +attack2 (orange) and +use, steering by the positions a small VScript reports each tick. The
 step being played shows on screen. Each step's result is checked against the route; one that
 didn't work out is put right by teleporting (setpos, a cube's SetOrigin, portal_place) and
@@ -32,6 +33,9 @@ SCRIPT = portal2.GAME / "portal2" / "scripts" / "vscripts" / "glados_play.nut"
 LEVEL = portal2.STAGE / "play.p2c"
 COLORS = ("blue", "orange")
 FIRE_KEY = {"blue": "attack", "orange": "attack2"}
+TURN_RATE = 270.0  # degrees a second, turning to look or to walk somewhere
+MIN_SPEED = 50.0   # slowest walk while easing into a stop
+PEDESTAL_TOP = 40.0  # a pedestal button's button, over the entity's origin (its base)
 MOVES = ("forward", "back", "moveleft", "moveright")
 DIRS = {"-x": (-1, 0, 0), "+x": (1, 0, 0), "-y": (0, -1, 0), "+y": (0, 1, 0), "-z": (0, 0, -1), "+z": (0, 0, 1)}
 
@@ -52,6 +56,8 @@ function glados_obs(n) {
 		glados_list(n, "portals", "prop_portal")
 		glados_list(n, "cubes", "prop_weighted_cube")
 		glados_list(n, "turrets", "npc_portal_turret_floor")
+		glados_list(n, "pedestals", "prop_button")
+		glados_list(n, "pedestals", "prop_under_button")
 	}
 	printl("GLADOS_END " + n)
 }
@@ -70,6 +76,28 @@ function glados_names() {
 		local e = null
 		while ((e = Entities.FindByClassname(e, cls)) != null)
 			printl("GLADOS_NAME " + cls + " " + e.entindex() + " " + e.GetName() + " " + glados_v(e.GetOrigin()))
+	}
+}
+function glados_arrival() {
+	foreach (cls in ["trigger_once", "linked_portal_door", "func_tracktrain"]) {
+		local e = null
+		while ((e = Entities.FindByClassname(e, cls)) != null) {
+			local name = e.GetName()
+			if (name.find("leaving_elevator_trigger") != null || name == "@entrance_portal_elevator_side" || name.find("arrival_elevator-elevator_1") != null)
+				printl("GLADOS_ARRIVAL " + name + " " + glados_v(e.GetOrigin()))
+		}
+	}
+}
+// The level's own start (what the editor's Build & Play does): the relay that teleports the
+// player to the entry corridor and opens the entry door.
+function glados_start() {
+	local e = null
+	while ((e = Entities.FindByClassname(e, "logic_relay")) != null) {
+		local n = e.GetName()
+		if (n.len() >= 15 && n.slice(n.len() - 15) == "player_start_rl") {
+			DoEntFire(n, "Trigger", "", 0, null, null)
+			printl("GLADOS_START " + n)
+		}
 	}
 }
 printl("GLADOS_SCRIPT loaded")
@@ -182,8 +210,9 @@ def fmt(p):
 class Game:
     """The player in a running level: what it sees (via glados_play.nut) and its controls."""
 
-    def __init__(self, con, origin=(0.0, 0.0, 0.0)):
+    def __init__(self, con, origin=(0.0, 0.0, 0.0), turn_rate=TURN_RATE):
         self.con = con
+        self.turn_rate = turn_rate  # degrees a second; math.inf snaps (--fast)
         self.origin = origin
         self.n = 0
         self.held = set()
@@ -191,7 +220,12 @@ class Game:
         self.last = None
         self.jumped = False
         self.portal_ids = {}
+        self.held_id = None     # the cube picked up, until it's let go
+        self.hold_dist = 75.0   # how far in front of the eye a held cube hangs (measured)
         self.text_made = False
+        out = con.ask(["cl_forwardspeed"], 5) or ""
+        m = re.search(r'"cl_forwardspeed" = "([\d.]+)"', out)
+        self.top_speed = float(m.group(1)) if m else 175.0
 
     # positions: route voxels -> world units
     def world(self, p):
@@ -219,7 +253,7 @@ class Game:
         s = json.loads(head.split(" ", 2)[2]) if head else None
         if s is None:
             raise Stuck("no player")
-        s.update(portals=[], cubes=[], turrets=[])
+        s.update(portals=[], cubes=[], turrets=[], pedestals=[])
         for l in got[0]:
             if l.startswith(f"GLADOS_ENT {n} "):
                 _, _, kind, item = l.split(" ", 3)
@@ -235,12 +269,34 @@ class Game:
     def speed(s):
         return math.hypot(s["v"][0], s["v"][1])
 
+    def forward(self):
+        p, y = math.radians(self.pitch), math.radians(self.yaw)
+        return (math.cos(p) * math.cos(y), math.cos(p) * math.sin(y), -math.sin(p))
+
     def holding(self, s):
-        """The cube the player is holding, if any: near the eye and off the floor."""
+        """The cube the player is holding, if any: the one picked up, while it hangs where a
+        held cube does in front of the view, or near the eye and off the floor. (Looking down
+        at a button, a held cube hangs low, so height alone doesn't tell; and a cube lying
+        where the player looks isn't held, so only the picked-up one counts.)"""
+        if self.held_id is None:
+            return None
+        f = self.forward()
+        expect = [s["eye"][i] + f[i] * self.hold_dist for i in range(3)]
         for c in s["cubes"]:
-            if math.dist(c["o"], s["eye"]) < 110 and c["o"][2] > s["o"][2] + 20:
+            if c["id"] == self.held_id and (math.dist(c["o"], expect) < 64 or (
+                    math.dist(c["o"], s["eye"]) < 110 and c["o"][2] > s["o"][2] + 20)):
                 return c
         return None
+
+    def let_go(self):
+        """Drops the held cube (use), checking it went; True if it did."""
+        for _ in range(2):
+            self.tap("use", 0.15)
+            time.sleep(1.2)
+            if self.holding(self.obs()) is None:
+                self.held_id = None
+                return True
+        return False
 
     def nearest_cube(self, s, p, within=1e9, skip=()):
         best = min((c for c in s["cubes"] if c["id"] not in skip),
@@ -282,11 +338,53 @@ class Game:
         self.con.send(f"-{key}")
 
     def look(self, pitch, yaw):
+        """Sets the view at once (also how turning works, a step at a time)."""
         self.pitch, self.yaw = pitch, yaw
         self.con.send(f"setang {pitch:.3f} {yaw:.3f} 0")
 
+    def turn(self, pitch, yaw):
+        """Turns the view to (pitch, yaw) at `turn_rate` degrees a second, so it can be seen
+        (at once with --fast)."""
+        rate = self.turn_rate
+        if math.isinf(rate):
+            self.look(pitch, yaw)
+            return
+        while True:
+            dy = (yaw - self.yaw + 180) % 360 - 180
+            dp = pitch - self.pitch
+            step = rate / 60
+            if abs(dy) <= step and abs(dp) <= step:
+                self.look(pitch, yaw)
+                return
+            k = min(1.0, step / max(abs(dy), abs(dp)))
+            self.look(self.pitch + dp * k, self.yaw + dy * k)
+            time.sleep(1 / 60)
+
+    def sync_view(self):
+        """Reads where the player is actually looking (getpos), so turns start from there."""
+        out = self.con.ask(["getpos"], 5) or ""
+        m = re.search(r"setang\s+([-\d.e]+)\s+([-\d.e]+)", out)
+        if m:
+            self.pitch, self.yaw = float(m.group(1)), float(m.group(2))
+
     def look_at(self, target, eye=None):
-        self.look(*angle_to(eye or self.obs()["eye"], target))
+        self.turn(*angle_to(eye or self.obs()["eye"], target))
+
+    def steer(self, yaw, dt):
+        """One tick of turning toward `yaw` (and level) while moving; the yaw error left."""
+        dy = (yaw - self.yaw + 180) % 360 - 180
+        step = self.turn_rate * min(dt, 0.1)
+        dp = -self.pitch
+        if abs(dy) > 0.5 or abs(dp) > 0.5:
+            self.look(self.pitch + max(-step, min(step, dp)), self.yaw + max(-step, min(step, dy)))
+        return abs(dy) - min(abs(dy), step)
+
+    def set_speed(self, v):
+        """Walking speed (cl_forwardspeed), for easing into a stop."""
+        v = round(max(MIN_SPEED, min(self.top_speed, v)) / 10) * 10
+        if v != getattr(self, "speed_now", None):
+            self.con.send(f"cl_forwardspeed {v}")
+            self.speed_now = v
 
     def show(self, text):
         """Puts `text` on screen (a game_text the harness creates)."""
@@ -322,46 +420,46 @@ class Game:
         return self.obs()
 
     def walk(self, points, tol=8.0, stop=True, timeout=None, on_jump="stop"):
-        """Walks through world points (xy) facing where it goes. Intermediate points are
-        passed within about a quarter voxel; the last within `tol`, coming to a stop if `stop`.
-        A jump (portal, linked door) ends the walk when `on_jump` is "stop". Raises Stuck if
-        no progress is made for 2 s."""
+        """Walks through world points (xy), turning smoothly toward each and walking on once
+        roughly facing it. Intermediate points are passed within about a quarter voxel; the
+        last within `tol`, easing into a stop if `stop`. A jump (portal, linked door) ends the
+        walk when `on_jump` is "stop". Raises Stuck if no progress is made for 2.5 s."""
         self.jumped = False
-        for k, p in enumerate(points):
-            last = k == len(points) - 1
-            reach = tol if last else 28.0
-            best, best_t = 1e9, time.time()
-            end = time.time() + (timeout or 10 + hdist(self.obs()["o"], p) / 100)
-            while True:
-                s = self.obs()
-                if self.jumped and on_jump == "stop":
-                    self.release(*MOVES)
-                    return s
-                d = hdist(s["o"], p)
-                sp = self.speed(s)
-                if d < reach:
-                    if not (last and stop) or sp <= 40:
-                        break
-                    self.release("forward")  # there: coast to a stop
-                    continue
-                if d < best - 2:
-                    best, best_t = d, time.time()
-                if time.time() - best_t > 2 or time.time() > end:
-                    self.release(*MOVES)
-                    raise Stuck(f"stuck at {fmt(s['o'])} walking to {fmt(p)}")
-                yaw = math.degrees(math.atan2(p[1] - s["o"][1], p[0] - s["o"][0]))
-                if abs((yaw - self.yaw + 180) % 360 - 180) > 3 or abs(self.pitch) > 1:
-                    self.look(0, yaw)
-                if last and stop and d < 56:
-                    self.release("forward")
-                    if sp < 50:
-                        self.tap("forward", min(0.12, 0.03 + d / 500))
-                else:
-                    self.hold("forward")
-        if stop:
+        tick = time.time()
+        try:
+            for k, p in enumerate(points):
+                last = k == len(points) - 1
+                reach = tol if last else 28.0
+                best, best_t = 1e9, time.time()
+                end = time.time() + (timeout or 10 + hdist(self.obs()["o"], p) / 100)
+                while True:
+                    s = self.obs()
+                    now = time.time()
+                    dt, tick = now - tick, now
+                    if self.jumped and on_jump == "stop":
+                        return s
+                    d = hdist(s["o"], p)
+                    if d < reach:
+                        if not (last and stop) or self.speed(s) <= 30:
+                            break
+                        self.release("forward")  # there: coast to a stop
+                        continue
+                    if d < best - 2:
+                        best, best_t = d, now
+                    if now - best_t > 2.5 or now > end:
+                        raise Stuck(f"stuck at {fmt(s['o'])} walking to {fmt(p)}")
+                    yaw = math.degrees(math.atan2(p[1] - s["o"][1], p[0] - s["o"][0]))
+                    off = self.steer(yaw, dt)
+                    # Slow for the stop at the end, and while turning a corner.
+                    self.set_speed(3.0 * d if last and stop else self.top_speed * (1 - off / 90))
+                    if off < 45:
+                        self.hold("forward")
+                    else:
+                        self.release("forward")
+        finally:
             self.release(*MOVES)
-            return self.settle()
-        return self.obs()
+            self.set_speed(self.top_speed)
+        return self.settle() if stop else self.obs()
 
     def walk_cells(self, cells, tol=8.0):
         """Walks the route's cells (each one step or a drop from the last), straight lines
@@ -428,8 +526,8 @@ class Game:
             time.sleep(0.5)
             s = self.obs()
             moved = [p for p in s["portals"] if before.get(p["id"]) != p]
-            if moved:
-                self.portal_ids[color] = moved[0]["id"]
+            if moved:  # the first shot can make both portal entities: take the one there
+                self.portal_ids[color] = min(moved, key=lambda p: math.dist(p["o"], target))["id"]
             if self.portal_on(color, face, s):
                 return True
         return False
@@ -438,7 +536,7 @@ class Game:
         face = leg["face"]
         if not self.jumped and face["dir"] != "-z":
             # A wall portal: walk into it.
-            self.look(0, yaw_of(DIRS[face["dir"]]))
+            self.turn(0, yaw_of(DIRS[face["dir"]]))
             self.hold("forward")
             end = time.time() + 5
             while not self.jumped and time.time() < end:
@@ -464,7 +562,12 @@ class Game:
             time.sleep(0.15)
             self.tap("use")
             time.sleep(0.4)
-            if self.holding(self.obs()):
+            s = self.obs()
+            now = next((c for c in s["cubes"] if c["id"] == cube["id"]), None)
+            # Picked up: it moved (lifted toward the view) and hangs in front of the eye.
+            if now is not None and math.dist(now["o"], cube["o"]) > 8 and math.dist(now["o"], s["eye"]) < 120:
+                self.held_id = now["id"]
+                self.hold_dist = math.dist(now["o"], s["eye"])
                 return True
         return False
 
@@ -498,9 +601,7 @@ class Game:
             self.shift_to(goal)
             self.look_at(look)
             time.sleep(0.2)
-        self.tap("use")
-        time.sleep(1.2)
-        return self.holding(self.obs()) is None
+        return self.let_go()
 
     def act_putdown(self, leg):
         target = self.floor(leg["at"])
@@ -519,7 +620,7 @@ class Game:
             c = self.world(face["centre"])
             return self.place_cube(c, 20, c)
         # Into a wall portal: walk at it until the cube goes through, then let go.
-        self.look(0, yaw_of(DIRS[face["dir"]]))
+        self.turn(0, yaw_of(DIRS[face["dir"]]))
         s = self.obs()
         cube = self.holding(s)
         if cube is None:
@@ -534,18 +635,22 @@ class Game:
             if now is not None and not went:
                 cube = now
         self.release("forward")
-        self.tap("use")
-        time.sleep(1.5)
-        return went
+        return self.let_go() and went
 
     def act_press(self, leg):
+        """Presses a pedestal button: close up, looking at its button (on top of the column,
+        about PEDESTAL_TOP over its base) rather than a guess at the cell."""
         p = self.world(leg["look"])
-        if hdist(self.obs()["o"], p) > 72:
-            self._approach(p, 56)
+        s = self.obs()
+        ped = min(s["pedestals"], key=lambda e: hdist(e["o"], p), default=None)
+        if ped is not None and hdist(ped["o"], p) < 96:
+            p = [ped["o"][0], ped["o"][1], ped["o"][2] + PEDESTAL_TOP]
+        if hdist(s["o"], p) > 64:
+            self._approach(p, 48)
         self.look_at(p)
-        time.sleep(0.15)
-        self.tap("use")
-        time.sleep(0.3)
+        time.sleep(0.2)
+        self.tap("use", 0.15)
+        time.sleep(0.4)
         return True
 
     def act_dash(self, leg):
@@ -566,7 +671,7 @@ class Game:
         time.sleep(0.15)
         self.tap("use")
         time.sleep(0.5)
-        self.look(-30, self.yaw + 90)
+        self.turn(-30, self.yaw + 90)
         time.sleep(0.3)
         self.tap("use")
         time.sleep(1.5)
@@ -577,7 +682,7 @@ class Game:
     def act_bounce(self, leg):
         to = self.floor(leg["to"])
         s = self.obs()
-        self.look(0, math.degrees(math.atan2(to[1] - s["o"][1], to[0] - s["o"][0])))
+        self.turn(0, math.degrees(math.atan2(to[1] - s["o"][1], to[0] - s["o"][0])))
         self.tap("jump")
         end = time.time() + 6
         while time.time() < end:
@@ -596,7 +701,7 @@ class Game:
         d = DIRS[leg["dir"]]
         take_off = self.floor(leg["run"][-1])
         to = self.floor(leg["to"])
-        self.look(0, yaw_of(d))
+        self.turn(0, yaw_of(d))
         self.hold("forward")
         jumped, end = False, time.time() + 8
         while time.time() < end:
@@ -611,21 +716,28 @@ class Game:
         return self.in_cell(self.wait_landed()["o"], leg["to"])
 
     def act_exit(self, leg):
-        self.look(0, yaw_of(tuple(-v for v in DIRS[leg["normal"]])))
+        """Out through the exit door: done at its linked door, or when the level restarts
+        (in preview, the exit corridor restarts the level, which stops the reports)."""
+        self.turn(0, yaw_of(tuple(-v for v in DIRS[leg["normal"]])))
         self.hold("forward")
         end = time.time() + 15
-        while not self.jumped and time.time() < end:
-            self.obs()
+        try:
+            while not self.jumped and time.time() < end:
+                self.obs(timeout=3)
+        except GameUnavailable:
+            self.held.discard("forward")
+            return True
         self.release("forward")
         return self.jumped
 
     # --- checking and putting right ----------------------------------------------------
 
-    def problems(self, after):
-        """How the game differs from what the route expects after a leg."""
+    def problems(self, after, slack=12):
+        """How the game differs from what the route expects after a leg. `slack`: how far
+        (units) the player may be outside their cell."""
         s = self.obs()
         out = []
-        if not self.in_cell(s["o"], after["player"]):
+        if not self.in_cell(s["o"], after["player"], slack):
             out.append(f"player at {fmt(s['o'])}, not in cell {after['player']}")
         for color, face in zip(COLORS, after["portals"]):
             if face and not self.portal_on(color, face, s):
@@ -672,6 +784,7 @@ class Game:
                                       f"{p[1] + 60 * math.sin(yaw):.1f}, {p[2] - 10:.1f})")
                         time.sleep(0.2)
                         self.tap("use")
+                        self.held_id = cube["id"]
                         used.add(cube["id"])
                 continue
             here = next((c for c in s["cubes"] if c["id"] not in used
@@ -734,8 +847,18 @@ def load_level(con, path, timeout=240):
     portal2.VMF.unlink(missing_ok=True)
     exported = con.ask(["puzzlemaker_export glados_check"], 30) or ""
     con.send("puzzlemaker_compile_and_preview")
-    if con.until(lambda l: "Host_NewGame on map" in l, timeout) is None:
-        raise GameUnavailable("the level didn't start (no map load after compile_and_preview)")
+    if con.until(lambda l: "launching map!" in l, timeout) is None:
+        raise GameUnavailable("the level didn't build (no \"launching map!\" after compile_and_preview)")
+    if con.until(lambda l: "END loading assets" in l, timeout) is None:
+        raise GameUnavailable("the level didn't load")
+    # Built from the console, the level first loads as a transition from the editor's map and
+    # comes up half started: unlit, fields unpowered, floor buttons that ignore cubes, the
+    # player left in the elevator. Restarting it gives the start Build & Play gives: the
+    # player in the entry corridor, the entry door opening.
+    time.sleep(2)
+    con.send("restart_level")
+    if con.until(lambda l: "END loading assets" in l, timeout) is None:
+        raise GameUnavailable("the level didn't restart")
     end = time.time() + timeout
     while time.time() < end:
         out = con.ask(["sv_cheats 1", "script_execute glados_play"], 10) or ""
@@ -746,18 +869,50 @@ def load_level(con, path, timeout=240):
 
 
 def open_editor(con, timeout=180):
-    """Back to the editor from a level, for loading the next one."""
-    con.send("puzzlemaker_show 1", "puzzlemaker_switch_session puzzlemaker/preview sp")
+    """Opens the editor (from the main menu or a level) and patches it for loading files."""
+    end = time.time() + timeout
+    while True:  # resent until the map starts loading: a busy game can drop them
+        con.send("puzzlemaker_show 1", "puzzlemaker_switch_session puzzlemaker/preview sp")
+        if con.until(lambda l: "Host_NewGame on map puzzlemaker/preview" in l, 10) is not None:
+            break
+        if time.time() > end:
+            raise GameUnavailable("the editor didn't start loading")
     if con.until(lambda l: "END loading assets" in l, timeout) is None:
-        raise GameUnavailable("the editor didn't reopen")
+        raise GameUnavailable("the editor didn't open")
     time.sleep(3)
     portal2.patch()
 
 
 def arrive(game, head):
-    """From the elevator, through its linked door, to the entry door's cell."""
+    """To the entry door's cell from the level's start, normally just outside the entry door
+    (see load_level). Failing that, fire the level's start relay, which puts the player there;
+    failing that, the elevator: through its linked door, or teleported to the triggers
+    outside it."""
     game.show("Arriving")
-    end = time.time() + 90
+    entry = game.floor(head["entry"]["cell"])
+    s = game.obs()
+    if hdist(s["o"], entry) < 4 * VOXEL and abs(s["o"][2] - entry[2]) < 64:
+        # The restarted level's start: just outside the entry door. The level's start relay
+        # opens it; after a restart that doesn't always happen, so open it as that relay does.
+        game.con.send("ent_fire @entrance_door_open_rl trigger")
+        game.sync_view()
+        for attempt in range(5):
+            try:
+                game.walk([entry], tol=12)
+                return
+            except Stuck:
+                if attempt == 4:
+                    raise
+                time.sleep(1.5)
+    out = game.con.ask(["script glados_start()"], 5) or ""
+    if "GLADOS_START" in out:
+        time.sleep(1.8)  # teleported after 0.5 s, the door opens after 1.5 s
+        game.last = None
+        game.obs()
+        game.sync_view()
+        game.walk([game.floor(head["entry"]["cell"])], tol=12)
+        return
+    end = time.time() + 25
     still = None
     while time.time() < end:  # the elevator ride: wait for it to stop
         s = game.obs()
@@ -767,14 +922,48 @@ def arrive(game, head):
                 break
         else:
             still = None
+    if not walk_out(game, 8):
+        points = {}
+        for l in (game.con.ask(["script glados_arrival()"], 5) or "").splitlines():
+            if l.startswith("GLADOS_ARRIVAL "):
+                _, name, xyz = l.split(" ", 2)
+                points.setdefault(name, []).append(json.loads(xyz))
+        door = points.get("@entrance_portal_elevator_side", [None])[0]
+        lift = next((v[0] for k, v in points.items() if "arrival_elevator-elevator_1" in k), None)
+        triggers = next((v for k, v in points.items() if "leaving_elevator_trigger" in k), [])
+        if door is None or not triggers:
+            raise Stuck("never left the elevator, and found no corridor to put the player in")
+        first = min(triggers, key=lambda t: hdist(t, lift or t))
+        print("  arrival: the elevator didn't take the player; "
+              f"teleporting to its corridor at {fmt(first)}", flush=True)
+        game.teleport(first)
+        game.look(0, math.degrees(math.atan2(door[1] - first[1], door[0] - first[0])))
+        if not walk_out(game, 15):
+            raise Stuck(f"never got through the elevator's linked door (stopped at {fmt(game.obs()['o'])})")
+    game.walk([game.floor(head["entry"]["cell"])], tol=12)
+
+
+def wait_for_cubes(game, head, timeout=15):
+    """Droppers drop their cubes a little after the puzzle starts: wait for a cube in every
+    cube's starting cell."""
+    end = time.time() + timeout
+    while time.time() < end:
+        s = game.obs()
+        if all(any(game.in_cell(c["o"], want["home"], slack=16) for c in s["cubes"])
+               for want in head["cubes"]):
+            return
+        time.sleep(0.3)
+
+
+def walk_out(game, seconds):
+    """Holds forward, keeping the heading, until the player goes through a linked door."""
     game.jumped = False
-    game.hold("forward")  # out of the elevator, keeping its heading, into the linked door
+    game.hold("forward")
+    end = time.time() + seconds
     while not game.jumped and time.time() < end:
         game.obs()
     game.release("forward")
-    if not game.jumped:
-        raise Stuck("never left the elevator")
-    game.walk([game.floor(head["entry"]["cell"])], tol=12)
+    return game.jumped
 
 
 def play(game, head, legs):
@@ -788,6 +977,7 @@ def play(game, head, legs):
     except Stuck as e:
         print(f"  arrival: {e}; teleporting in", flush=True)
         game.teleport(game.floor(head["entry"]["cell"]))
+    wait_for_cubes(game, head)
     for leg in legs:
         game.show(f"{leg['leg']}/{len(legs)}: {leg['text']}")
         ok, why = False, ""
@@ -799,7 +989,9 @@ def play(game, head, legs):
         finally:
             game.release_all()
         exit_leg = leg["action"] == "exit" or leg.get("escape")
-        problems = [] if exit_leg else game.problems(leg["after"])
+        # Lining up a cube or reaching for something can take the player half a cell over.
+        slack = 64 if leg["action"] in ("pickup", "putdown", "toss", "throw", "press", "knock") else 12
+        problems = [] if exit_leg else game.problems(leg["after"], slack)
         if ok and not problems:
             status = "ok"
         elif not problems and not why:
@@ -868,6 +1060,8 @@ def main():
     ap.add_argument("--port", type=int, help="console port of a game you started")
     ap.add_argument("--password", default="", help="its -netconpassword")
     ap.add_argument("--slow", type=float, default=1.0, help="host_timescale while playing")
+    ap.add_argument("--fast", action="store_true",
+                    help="snap the view instead of turning smoothly (for validation runs)")
     ap.add_argument("--spike", action="store_true", help="check the harness on the first level")
     ap.add_argument("--glados", help="glados.exe (default: target/release, else target/debug)")
     a = ap.parse_args()
@@ -877,27 +1071,27 @@ def main():
     pid = None
     summary = []
     try:
+        SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+        SCRIPT.write_text(VSCRIPT, encoding="ascii")
         if a.launch:
             port, password = free_port(), secrets.token_hex(8)
             pid = portal2.launch(portal2.Log(), saved,
                                  extra=["-netconport", str(port), "-netconpassword", password])
+            con = Console(port, password)
         else:
             proc = portal2.game_process()
             if proc is None or "-insecure" not in proc[1].split():
                 raise GameUnavailable("no game started with -insecure (or use --launch)")
             if not a.port:
                 raise GameUnavailable("pass --port (and --password) for a game you started")
-            port, password = a.port, a.password
-            portal2.patch()
-        SCRIPT.parent.mkdir(parents=True, exist_ok=True)
-        SCRIPT.write_text(VSCRIPT, encoding="ascii")
-        con = Console(port, password)
+            con = Console(a.port, a.password)
+            open_editor(con)  # from wherever the game is, e.g. its main menu
         for i, (path, head, legs) in enumerate(routes):
             if i:
                 open_editor(con)
             print(f"{path}: \"{head['title']}\", {len(legs)} legs", flush=True)
             exported = load_level(con, path)
-            game = Game(con, calibrate(head) or (0.0, 0.0, 0.0))
+            game = Game(con, calibrate(head) or (0.0, 0.0, 0.0), math.inf if a.fast else TURN_RATE)
             if a.slow != 1.0:
                 con.send(f"host_timescale {a.slow}")
             if a.spike:
