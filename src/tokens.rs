@@ -593,7 +593,10 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
     let size = [r.num(1, MAX_NUM)?, r.num(1, MAX_NUM)?, r.num(1, MAX_NUM)?];
     let [sx, sy, sz] = size;
     let mut b = Builder::new(TITLE, size);
-    let mut goo_tops = Vec::new();
+    // The bottom cell of each goo run: goo items sit on a floor (the editor rejects one on
+    // goo) and flood up to the same cells, because every goo cell is reached sideways or
+    // downward from an item on a floor.
+    let mut goo_floors = Vec::new();
     let mut prev_col: Option<Vec<(char, i32)>> = None;
     let mut rows: Vec<Vec<Vec<(char, i32)>>> = Vec::new();
     let is_geometry = |t: Option<&str>| {
@@ -674,13 +677,18 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
         for (x, runs) in row.iter().enumerate() {
             let x = x as i32;
             let mut z = 0;
+            let mut below = 's';
             for &(kind, n) in runs {
                 if kind != 's' {
                     b.carve([x, y, z], [x, y, z + n - 1]);
                 }
                 if kind == 'g' {
-                    goo_tops.push([x, y, z + n - 1]);
+                    if below != 's' {
+                        return Err(format!("goo over open air in column ({x}, {y})"));
+                    }
+                    goo_floors.push([x, y, z]);
                 }
+                below = kind;
                 z += n;
             }
         }
@@ -822,8 +830,8 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
             other => return r.fail(format!("unexpected {other:?}")),
         }
     }
-    for top in goo_tops {
-        b.goo(top);
+    for floor in goo_floors {
+        b.goo(floor);
     }
     for (sender, target) in wires {
         let receiver = match target {

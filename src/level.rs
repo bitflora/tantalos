@@ -689,6 +689,15 @@ impl Level {
                 }
             })
             .collect();
+        // Goo is placed on a floor (seen in-game: one on top of goo is invalid).
+        for it in self.items.iter().filter(|i| i.kind == ItemKind::Goo) {
+            if !self.solid(step(it.cell, Dir::NegZ)) {
+                out.push(format!(
+                    "item {} Goo at {:?} isn't on a floor",
+                    it.index, it.cell
+                ));
+            }
+        }
         out.extend(self.field_problems());
         out.extend(self.decode_problems.iter().cloned());
         out

@@ -416,6 +416,19 @@ impl Puzzle {
         self.prop("Title").unwrap_or("")
     }
 
+    /// The name the Puzzle Maker shows (it doesn't show the file name).
+    pub fn set_title(&mut self, title: &str) {
+        for s in &mut self.sections {
+            if let Section::Prop(k, v) = s {
+                if k == "Title" {
+                    *v = title.to_string();
+                    return;
+                }
+            }
+        }
+        self.sections.push(Section::Prop("Title".into(), title.into()));
+    }
+
     /// Interior size in voxels. Always consistent with `voxels.dims` (validated on parse).
     pub fn chamber_size(&self) -> [i32; 3] {
         self.voxels.dims.map(|d| d as i32 - 1)

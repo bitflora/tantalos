@@ -526,7 +526,8 @@ fn run_score(args: &[String]) -> Result<()> {
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     for ((i, _), (json, puzzle)) in lines.iter().zip(scored) {
         writeln!(out, "{json}")?;
-        if let (Some(dir), Some(p)) = (&p2c_dir, puzzle) {
+        if let (Some(dir), Some(mut p)) = (&p2c_dir, puzzle) {
+            p.set_title(&format!("glados sample {i}"));
             std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
         }
     }
