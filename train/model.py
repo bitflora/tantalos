@@ -5,6 +5,7 @@ plenty to start with and fits a 4 GB GPU with room to spare.
 """
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -40,15 +41,22 @@ class Block(nn.Module):
         self.resid_drop = nn.Dropout(cfg.dropout)
 
     def forward(self, x, cache=None):
-        """`cache` (a dict, for generation) keeps this layer's keys and values between calls."""
+        """`cache` (a dict, for generation) keeps this layer's keys and values between calls:
+        room for `cache["size"]` positions, allocated on the first call and filled in order.
+        (Growing them with torch.cat reallocated both every token; during training on the
+        4 GB laptop GPU that ran into system memory, and 64 samples took two minutes.)"""
         b, t, c = x.shape
         q, k, v = self.qkv(self.ln1(x)).split(c, dim=2)
         q, k, v = (z.view(b, t, self.n_head, c // self.n_head).transpose(1, 2) for z in (q, k, v))
         if cache is not None:
-            if cache:
-                k = torch.cat([cache["k"], k], dim=2)
-                v = torch.cat([cache["v"], v], dim=2)
-            cache["k"], cache["v"] = k, v
+            n = cache.get("n", 0)
+            if n == 0:
+                shape = (b, self.n_head, cache["size"], c // self.n_head)
+                cache["k"], cache["v"] = k.new_empty(shape), v.new_empty(shape)
+            cache["k"][:, :, n : n + t] = k
+            cache["v"][:, :, n : n + t] = v
+            cache["n"] = n = n + t
+            k, v = cache["k"][:, :, :n], cache["v"][:, :, :n]
         # New tokens after a cached prefix come one at a time and may see everything before.
         y = F.scaled_dot_product_attention(
             q,
@@ -119,19 +127,26 @@ class GPT(nn.Module):
     @torch.no_grad()
     def generate(self, prompts, max_new, stop, temperature=1.0, top_k=None):
         """Continue each prompt (list of id lists) until `stop` or `max_new` tokens.
-        Returns the new ids per prompt, without `stop`."""
+        Returns the new ids per prompt, without `stop`. On a GPU it runs in bfloat16, as
+        training does."""
         device = next(self.parameters()).device
+        amp = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if device.type == "cuda" and torch.cuda.is_bf16_supported()
+            else nullcontext()
+        )
         # Prompts of equal length run as one batch, so positions line up without padding.
         outs = [None] * len(prompts)
         by_len = {}
         for i, p in enumerate(prompts):
             by_len.setdefault(len(p), []).append(i)
         for n, rows in by_len.items():
-            caches = [{} for _ in self.blocks]
-            logits, _ = self(torch.tensor([prompts[i] for i in rows], device=device), caches=caches)
+            steps = min(max_new, self.cfg.block_size - n)
+            caches = [{"size": n + steps} for _ in self.blocks]
+            with amp:
+                logits, _ = self(torch.tensor([prompts[i] for i in rows], device=device), caches=caches)
             done = torch.zeros(len(rows), dtype=torch.bool, device=device)
             new = []
-            steps = min(max_new, self.cfg.block_size - n)
             for step in range(steps):
                 logits = logits[:, -1, :].float() / max(temperature, 1e-5)
                 if top_k:
@@ -143,7 +158,8 @@ class GPT(nn.Module):
                 new.append(nxt)
                 if done.all() or step == steps - 1:
                     break
-                logits, _ = self(nxt, caches=caches, start=n + step)
+                with amp:
+                    logits, _ = self(nxt, caches=caches, start=n + step)
             gen = torch.cat(new, dim=1).tolist() if new else [[] for _ in rows]
             for r, i in enumerate(rows):
                 seq = gen[r]

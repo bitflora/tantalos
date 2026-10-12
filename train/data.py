@@ -193,6 +193,10 @@ class Levels:
     def __len__(self):
         return len(self.conds)
 
+    def lengths(self):
+        """Level tokens in each record."""
+        return (self.offsets[1:] - self.offsets[:-1]).tolist()
+
     def sequence(self, i, drop):
         """Token ids and loss mask for record i. Each condition is hidden with a probability
         drawn uniformly from [0, `drop`] for this sequence, so both full and sparse prompts
@@ -205,7 +209,8 @@ class Levels:
         return ids, learn
 
     def batch(self, idx, drop, device):
-        """Inputs, targets (-100 = ignored), padded to the longest sequence in the batch."""
+        """Inputs, targets (-100 = ignored), padded to the longest sequence in the batch, and
+        the number of targets (counted here, so the caller needn't wait on the GPU for it)."""
         seqs = [self.sequence(i, drop) for i in idx]
         width = max(len(ids) for ids, _ in seqs) - 1
         x = torch.full((len(seqs), width), PAD, dtype=torch.long)
@@ -216,7 +221,8 @@ class Levels:
             target = torch.tensor(ids[1:])
             target[~torch.tensor(learn[1:])] = -100
             y[row, :n] = target
-        return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        targets = int((y != -100).sum())
+        return x.to(device, non_blocking=True), y.to(device, non_blocking=True), targets
 
 
 def load(paths, vocab, block_size, val_share=0.05, seed=0):

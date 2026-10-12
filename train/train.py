@@ -7,19 +7,29 @@
 run's weights. Every --eval-every steps: validation loss, then --score-n sampled levels run through
 `glados score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
 (lowest validation loss). Log: <out>/log.jsonl.
+
+Training batches hold levels of similar length (--bucket), so they pad little. On the GPU the
+process keeps to --gpu-mem: on Windows, outgrowing the free GPU memory doesn't fail, the driver
+pages to system memory instead and everything slows down.
 """
 
 import argparse
 import datetime
 import json
 import math
+import os
 import random
+import subprocess
 import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
 
-import torch
+# Hand back cached GPU memory nobody is using once 80% of the --gpu-mem cap is taken, rather
+# than all at once when it runs out. (Read when CUDA starts.)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.8")
+
+import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 import sample  # noqa: E402
@@ -38,6 +48,13 @@ def main():
     ap.add_argument("--embd", type=int, default=384)
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument(
+        "--bucket",
+        type=int,
+        default=32,
+        help="draw this many batches' worth of random levels at a time and batch them by length, "
+        "which cuts padding (0: each batch random)",
+    )
     ap.add_argument("--accum", type=int, default=1, help="gradient accumulation steps")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--min-lr", type=float, default=1e-4)
@@ -60,6 +77,13 @@ def main():
     ap.add_argument("--eval-batches", type=int, default=20)
     ap.add_argument("--score-n", type=int, default=32, help="levels sampled and scored per eval (0: off)")
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    ap.add_argument(
+        "--gpu-mem",
+        type=float,
+        default=None,
+        help="GB of GPU memory to keep to (default: what is free at the start less 0.5, "
+        "but at least 2.5; 0: no limit)",
+    )
     ap.add_argument("--resume", action="store_true", help="continue from <out>/last.pt")
     ap.add_argument("--init", default=None, help="start from this checkpoint's weights (new optimizer and schedule)")
     ap.add_argument("--seed", type=int, default=0)
@@ -81,6 +105,11 @@ def main():
         amp = torch.autocast("cuda", dtype=dtype)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        free, total = torch.cuda.mem_get_info()
+        cap = args.gpu_mem * 2**30 if args.gpu_mem is not None else max(free - 2**29, 2.5 * 2**30)
+        if cap > 0:
+            torch.cuda.set_per_process_memory_fraction(min(cap / total, 1.0))
+            print(f"GPU memory: keeping to {cap / 2**30:.1f} of {total / 2**30:.1f} GB ({free / 2**30:.1f} free)")
     else:
         dtype, amp = torch.float32, nullcontext()
     scaler = torch.amp.GradScaler("cuda", enabled=dtype == torch.float16)
@@ -130,12 +159,17 @@ def main():
         idx = [random.randrange(len(levels)) for _ in range(args.batch)]
         return levels.batch(idx, drop, device)
 
+    # A batch's loss is the mean over its targets. Sorted batches of long levels hold far more
+    # targets than batches of short ones, so scale each by its share of the average count:
+    # every target then weighs the same, as in random batches (whose counts vary little).
+    per_batch = args.batch * (len(train.level_ids) / max(len(train), 1) + 1)
+
     @torch.no_grad()
     def evaluate():
         model.eval()
         losses = []
         for _ in range(args.eval_batches):
-            x, y = batch(val, args.cond_drop)
+            x, y, _ = batch(val, args.cond_drop)
             with amp:
                 losses.append(model(x, y)[1].item())
         model.train()
@@ -158,6 +192,7 @@ def main():
 
     log = open(out / "log.jsonl", "a")
     model.train()
+    train_batches = batches(train, args.batch, args.bucket, args.cond_drop, device)
     t0, tokens = time.time(), 0
     def finished():
         return time.time() >= deadline if deadline else step >= args.iters
@@ -166,11 +201,12 @@ def main():
         for g in opt.param_groups:
             g["lr"] = lr_at(step)
         for _ in range(args.accum):
-            x, y = batch(train, args.cond_drop)
+            x, y, targets = next(train_batches)
             with amp:
                 _, loss = model(x, y)
-            scaler.scale(loss / args.accum).backward()
-            tokens += int((y != -100).sum())
+            weight = targets / per_batch if args.bucket > 1 else 1.0
+            scaler.scale(loss * weight / args.accum).backward()
+            tokens += targets
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)
@@ -191,7 +227,16 @@ def main():
                 model.eval()
                 lines = sample.generate(model, vocab, args.score_n, ["<verdict:solvable>"])
                 model.train()
-                entry["samples"] = sample.summarize(sample.score(lines, args.glados))
+                try:
+                    entry["samples"] = sample.summarize(sample.score(lines, args.glados))
+                except (OSError, ValueError, subprocess.CalledProcessError) as e:
+                    # Not worth the run: one died here when Windows couldn't start glados.
+                    print(f"scoring samples failed, carrying on: {e}")
+            if device == "cuda":
+                # Hand back what sampling took, and note the most held since the last eval.
+                torch.cuda.empty_cache()
+                entry["gpu_gb"] = round(torch.cuda.max_memory_reserved() / 2**30, 2)
+                torch.cuda.reset_peak_memory_stats()
             improved = val_loss < best
             best = min(best, val_loss)
             checkpoint(out / "last.pt", val_loss)
@@ -206,10 +251,29 @@ def main():
                 if s
                 else ""
             )
+            if "gpu_gb" in entry:
+                extra += f"  gpu {entry['gpu_gb']:.1f} GB"
             print(f"== step {step}: val {val_loss:.4f}{' (best)' if improved else ''}{extra}")
             t0, tokens = time.time(), 0
         if done:
             break
+
+
+def batches(levels, size, bucket, drop, device):
+    """Endless training batches: `bucket` batches' worth of random levels at a time, sorted by
+    length and dealt out as batches in random order, so a batch's levels are of similar length
+    and pad little. (In v3 data, targets fill 85% of a batch's positions this way, and 52% in
+    random batches.)"""
+    lengths = levels.lengths()
+    n = size * max(bucket, 1)
+    while True:
+        idx = [random.randrange(len(levels)) for _ in range(n)]
+        if bucket > 1:
+            idx.sort(key=lengths.__getitem__)
+        chunks = [idx[i : i + size] for i in range(0, n, size)]
+        random.shuffle(chunks)
+        for chunk in chunks:
+            yield levels.batch(chunk, drop, device)
 
 
 def until(text):
