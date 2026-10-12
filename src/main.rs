@@ -22,9 +22,12 @@ const USAGE: &str = "usage:
   glados dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
                                 labelled token sequences as JSONL, and vocab.txt beside it
                                 (default data/levels-<seed>.jsonl)
-  glados score [--budget N] [--p2c DIR] [FILE]
+  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [FILE]
                                 decode and solve one token sequence per line of FILE (or
-                                stdin); JSONL to stdout. --p2c writes the solvable ones";
+                                stdin); JSONL to stdout. --p2c writes the solvable ones,
+                                --p2c-all every one that parsed
+  glados editor <file.p2c|dir>...
+                                items the Puzzle Maker would mark invalid, one JSON line per file";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
         }
         Some("dataset") => run_dataset(&args[1..]),
         Some("score") => run_score(&args[1..]),
+        Some("editor") if args.len() > 1 => editor_check(&args[1..]),
         Some("roundtrip") if args.len() > 1 => {
             args[1..].iter().try_for_each(|f| roundtrip(Path::new(f)))
         }
@@ -464,74 +468,132 @@ fn run_dataset(args: &[String]) -> Result<()> {
 }
 
 fn run_score(args: &[String]) -> Result<()> {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, Write};
     let mut budget = 50_000;
     let mut p2c_dir = None;
+    let mut all = false;
     let mut rest = Vec::new();
     for (flag, value) in flags(args, &mut rest)? {
         match flag {
             "--budget" => budget = parse(flag, value)?,
             "--p2c" => p2c_dir = Some(PathBuf::from(value)),
+            "--p2c-all" => {
+                p2c_dir = Some(PathBuf::from(value));
+                all = true;
+            }
             _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
         }
     }
-    let input = match rest.as_slice() {
-        [] | ["-"] => {
-            let mut s = String::new();
-            std::io::stdin().read_to_string(&mut s)?;
-            s
-        }
-        [file] => std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?,
+    // Streamed: levels are read as threads need them and written, in order, as they're done.
+    let input: Box<dyn BufRead + Send> = match rest.as_slice() {
+        [] | ["-"] => Box::new(std::io::BufReader::new(std::io::stdin())),
+        [file] => Box::new(std::io::BufReader::new(
+            std::fs::File::open(file).map_err(|e| format!("{file}: {e}"))?,
+        )),
         _ => return Err(format!("score takes one input file\n{USAGE}").into()),
     };
-    let lines: Vec<(usize, &str)> = input
+    let lines = input
         .lines()
         .enumerate()
-        .map(|(i, l)| (i + 1, l.trim()))
-        .filter(|(_, l)| !l.is_empty())
-        .collect();
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let scored = dataset::par_map(&lines, threads, |&(i, line)| {
-        let n = line.split_whitespace().count();
-        match tokens::decode(line) {
-            Err(e) => (
-                format!(
-                    "{{\"line\":{i},\"n_tokens\":{n},\"verdict\":\"unparsed\",\"problem\":{}}}",
-                    dataset::json_str(&e)
-                ),
-                None,
-            ),
-            Ok(p) => {
-                let normal: Vec<&str> = line.split_whitespace().collect();
-                let encoded = tokens::encode(&p).map(|t| t.join(" "));
-                let canonical = encoded.as_ref().is_ok_and(|t| *t == normal.join(" "));
-                let tokens = encoded.map_or(String::new(), |t| {
-                    format!("\"tokens\":{},", dataset::json_str(&t))
-                });
-                let label = dataset::label(&p, budget, i as u64);
-                let keep = matches!(label, dataset::Label::Solvable { .. }).then_some(p);
-                (
-                    format!(
-                        "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}}}",
-                        label.json_fields()
-                    ),
-                    keep,
-                )
-            }
-        }
-    });
+        .map(|(i, l)| (i + 1, l))
+        .filter(|(_, l)| !l.as_ref().is_ok_and(|l| l.trim().is_empty()));
     if let Some(dir) = &p2c_dir {
         std::fs::create_dir_all(dir)?;
     }
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    for ((i, _), (json, puzzle)) in lines.iter().zip(scored) {
-        writeln!(out, "{json}")?;
-        if let (Some(dir), Some(mut p)) = (&p2c_dir, puzzle) {
-            p.set_title(&format!("glados sample {i}"));
-            std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
+    dataset::par_map_ordered(
+        lines,
+        threads,
+        |(i, line)| {
+            let line = line?;
+            let line = line.trim();
+            let n = line.split_whitespace().count();
+            Ok(match tokens::decode(line) {
+                Err(e) => (
+                    i,
+                    format!(
+                        "{{\"line\":{i},\"n_tokens\":{n},\"verdict\":\"unparsed\",\"problem\":{}}}",
+                        dataset::json_str(&e)
+                    ),
+                    None,
+                ),
+                Ok(p) => {
+                    let normal: Vec<&str> = line.split_whitespace().collect();
+                    let encoded = tokens::encode(&p).map(|t| t.join(" "));
+                    let canonical = encoded.as_ref().is_ok_and(|t| *t == normal.join(" "));
+                    let tokens = encoded.map_or(String::new(), |t| {
+                        format!("\"tokens\":{},", dataset::json_str(&t))
+                    });
+                    let label = dataset::label(&p, budget, i as u64);
+                    let keep =
+                        (all || matches!(label, dataset::Label::Solvable { .. })).then_some(p);
+                    (
+                        i,
+                        format!(
+                            "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}}}",
+                            label.json_fields()
+                        ),
+                        keep,
+                    )
+                }
+            })
+        },
+        |scored: std::io::Result<(usize, String, Option<Puzzle>)>| -> Result<()> {
+            let (i, json, puzzle) = scored?;
+            writeln!(out, "{json}")?;
+            if let (Some(dir), Some(mut p)) = (&p2c_dir, puzzle) {
+                p.set_title(&format!("glados sample {i}"));
+                std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
+            }
+            Ok(())
+        },
+    )?;
+    out.flush()?;
+    Ok(())
+}
+
+fn editor_check(args: &[String]) -> Result<()> {
+    let mut files = Vec::new();
+    for a in args {
+        let p = PathBuf::from(a);
+        if p.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(&p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|f| f.extension().is_some_and(|x| x == "p2c"))
+                .collect();
+            found.sort();
+            files.extend(found);
+        } else {
+            files.push(p);
         }
     }
-    out.flush()?;
+    for f in files {
+        let (_, puzzle) = load(&f)?;
+        let flags = glados::editor::editor_flags(&Level::from_puzzle(&puzzle));
+        let items: Vec<String> = flags
+            .iter()
+            .map(|fl| {
+                format!(
+                    "{{\"name\":\"{}\",\"pos\":[{},{},{}],\"rules\":[{}]}}",
+                    fl.name,
+                    fl.pos[0],
+                    fl.pos[1],
+                    fl.pos[2],
+                    fl.rules
+                        .iter()
+                        .map(|r| format!("\"{r}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect();
+        println!(
+            "{{\"file\":{},\"flags\":[{}]}}",
+            dataset::json_str(&f.display().to_string()),
+            items.join(",")
+        );
+    }
     Ok(())
 }
 

@@ -220,11 +220,17 @@ fn dataset_is_distinct_and_deterministic() {
 
 #[test]
 fn goo_items_sit_on_the_floor_of_their_run() {
-    // A two-deep goo column beside a one-deep pit: every goo item rests on solid ground.
+    // A two-deep goo column beside a one-deep pit: the goo item rests on solid ground and
+    // floods the same cells.
+    let goo_problems = |line: &str| -> Vec<String> {
+        let level = Level::from_puzzle(&decode(line).unwrap());
+        level.mount_problems().into_iter().filter(|p| p.contains("goo")).collect()
+    };
     let line = "size 3 1 4 s1 o3 | s1 g1 o2 | g2 o2 | / entry 0 0 1 +x exit 0 0 2 +x";
-    let p = decode(line).unwrap();
-    let level = Level::from_puzzle(&p);
-    assert_eq!(level.mount_problems(), Vec::<String>::new());
+    assert_eq!(goo_problems(line), Vec::<String>::new());
+    let level = Level::from_puzzle(&decode(line).unwrap());
     assert!(level.goo([2, 0, 0]) && level.goo([2, 0, 1]) && level.goo([1, 0, 1]));
-    assert!(decode("size 2 1 4 s1 o3 | o1 g1 o2 | / entry 0 0 1 +x exit 0 0 2 +x").is_err());
+    // Goo over open air has no floor to stand on.
+    let floating = "size 2 1 4 s1 o3 | o1 g1 o2 | / entry 0 0 1 +x exit 0 0 2 +x";
+    assert!(!goo_problems(floating).is_empty());
 }

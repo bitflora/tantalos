@@ -33,7 +33,7 @@ import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
 import sample  # noqa: E402
-from data import Vocab, load  # noqa: E402
+from data import Away, Vocab, load  # noqa: E402
 from model import GPT, Config  # noqa: E402
 
 
@@ -85,6 +85,15 @@ def main():
         "but at least 2.5; 0: no limit)",
     )
     ap.add_argument("--resume", action="store_true", help="continue from <out>/last.pt")
+    ap.add_argument(
+        "--away",
+        nargs="*",
+        default=[],
+        help="game-rejected levels (data/ingame/invalid.jsonl): push down the tokens that placed "
+        "the rejected items when asked for a solvable level (unlikelihood)",
+    )
+    ap.add_argument("--away-weight", type=float, default=0.5, help="weight of the --away loss")
+    ap.add_argument("--away-batch", type=int, default=8, help="rejected levels per step")
     ap.add_argument("--init", default=None, help="start from this checkpoint's weights (new optimizer and schedule)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cpu", action="store_true")
@@ -122,6 +131,12 @@ def main():
         f"data: {len(train)} train, {len(val)} val, {skipped} too long for block {args.block}; "
         f"vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s"
     )
+
+    away = Away(args.away, vocab, args.block) if args.away else None
+    if away is not None:
+        print(f"away: {len(away)} game-rejected levels with placements to push away from")
+        if not len(away):
+            away = None
 
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout)
     init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
@@ -207,6 +222,14 @@ def main():
             weight = targets / per_batch if args.bucket > 1 else 1.0
             scaler.scale(loss * weight / args.accum).backward()
             tokens += targets
+        if away is not None:
+            ax, ay = away.batch(args.away_batch, device)
+            with amp:
+                logits, _ = model(ax)
+            mask = ay != -100
+            p = logits.float().softmax(-1).gather(-1, ay.clamp(min=0).unsqueeze(-1)).squeeze(-1)
+            away_loss = -torch.log((1 - p[mask]).clamp(min=1e-6)).mean()
+            scaler.scale(args.away_weight * away_loss).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)
@@ -216,7 +239,8 @@ def main():
 
         if step % 50 == 0:
             dt = time.time() - t0
-            print(f"step {step:>6}  loss {loss.item():.4f}  lr {lr_at(step):.2e}  {tokens / dt:,.0f} tok/s")
+            extra = f"  away {away_loss.item():.4f}" if away is not None else ""
+            print(f"step {step:>6}  loss {loss.item():.4f}{extra}  lr {lr_at(step):.2e}  {tokens / dt:,.0f} tok/s")
             t0, tokens = time.time(), 0
 
         done = finished()

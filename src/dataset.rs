@@ -9,7 +9,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
 
 use crate::generator::Genome;
@@ -187,32 +187,67 @@ pub fn par_map<T: Sync, R: Send>(
     threads: usize,
     f: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let (f, next) = (&f, &next);
-    let mut out: Vec<Option<R>> = items.iter().map(|_| None).collect();
+    let mut out = Vec::with_capacity(items.len());
+    let done = par_map_ordered(items.iter(), threads, f, |r| {
+        out.push(r);
+        Ok::<(), std::convert::Infallible>(())
+    });
+    match done {
+        Ok(()) => out,
+        Err(never) => match never {},
+    }
+}
+
+/// Maps `f` over `items` on `threads` threads and hands each result to `emit` in input order,
+/// as soon as it and everything before it are done. Threads take one item at a time, so a slow
+/// item holds up only its own thread, and `items` is read as threads need it, so the input
+/// needn't fit in memory. If `emit` fails, threads stop after their current item and the error
+/// is returned.
+pub fn par_map_ordered<I, R, E>(
+    items: I,
+    threads: usize,
+    f: impl Fn(I::Item) -> R + Sync,
+    mut emit: impl FnMut(R) -> Result<(), E>,
+) -> Result<(), E>
+where
+    I: Iterator + Send,
+    I::Item: Send,
+    R: Send,
+{
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let source = std::sync::Mutex::new(items.enumerate());
+    let stop = AtomicBool::new(false);
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads.clamp(1, items.len().max(1)))
-            .map(|_| {
-                scope.spawn(move || {
-                    let mut done = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(item) = items.get(i) else { break };
-                        done.push((i, f(item)));
+        for _ in 0..threads.max(1) {
+            let (tx, source, stop, f) = (tx.clone(), &source, &stop, &f);
+            scope.spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Some((i, item)) = source.lock().expect("input poisoned").next() else {
+                        break;
+                    };
+                    if tx.send((i, f(item))).is_err() {
+                        break;
                     }
-                    done
-                })
-            })
-            .collect();
-        for h in handles {
-            for (i, r) in h.join().expect("worker thread panicked") {
-                out[i] = Some(r);
+                }
+            });
+        }
+        drop(tx);
+        // Results that arrived ahead of an earlier one still being worked on.
+        let mut waiting = std::collections::HashMap::new();
+        let mut next = 0;
+        for (i, r) in rx {
+            waiting.insert(i, r);
+            while let Some(r) = waiting.remove(&next) {
+                next += 1;
+                if let Err(e) = emit(r) {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(e);
+                }
             }
         }
-    });
-    out.into_iter()
-        .map(|r| r.expect("every item was mapped"))
-        .collect()
+        Ok(())
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -411,5 +446,54 @@ struct StopOnDrop<'a>(&'a AtomicBool);
 impl Drop for StopOnDrop<'_> {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn par_map_keeps_input_order_with_uneven_work() {
+        let items: Vec<u64> = (0..200).collect();
+        let slow = |&x: &u64| {
+            if x % 17 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            x * x
+        };
+        let expected: Vec<u64> = items.iter().map(slow).collect();
+        for threads in [1, 3, 8] {
+            assert_eq!(par_map(&items, threads, slow), expected);
+        }
+        assert!(par_map(&[] as &[u64], 4, slow).is_empty());
+    }
+
+    #[test]
+    fn par_map_ordered_stops_when_emit_fails() {
+        let taken = std::sync::atomic::AtomicUsize::new(0);
+        let mut seen = Vec::new();
+        let result = par_map_ordered(
+            0..1_000_000u64,
+            4,
+            |x| {
+                taken.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                x
+            },
+            |x| {
+                seen.push(x);
+                if x == 10 {
+                    Err("full")
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result, Err("full"));
+        assert_eq!(seen, (0..=10).collect::<Vec<_>>());
+        assert!(
+            taken.into_inner() < 1_000_000,
+            "threads kept going after the error"
+        );
     }
 }

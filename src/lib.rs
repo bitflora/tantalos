@@ -11,6 +11,7 @@
 
 pub mod builder;
 pub mod dataset;
+pub mod editor;
 pub mod evolve;
 pub mod fixtures;
 pub mod gel;

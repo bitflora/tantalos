@@ -139,6 +139,97 @@ def conditions(record):
     return out
 
 
+# Item keywords in the level tokens, by the name Portal 2 logs for an invalid item
+# (`INVALID ITEM: <TargetName> (x, y, z)`, see src/editor.rs). A cube is written as its dropper.
+GAME_NAMES = {
+    "doorentry": ["entry"],
+    "doorexit": ["exit"],
+    "button": ["button", "pedestal"],
+    "cubedropper": ["dropper"],
+    "cube": ["dropper"],
+    "target": ["glass", "grating"],
+    "barrierhazard": ["fizzler", "laserfield"],
+    "turret": ["turret"],
+    "paintsplat": ["gel"],
+    "paintdropper": ["gel"],
+}
+# Tokens after the keyword that give each item's cells: one cell, or a box (two cells).
+BOX_ITEMS = ("glass", "grating")
+
+
+def item_spans(level, game_items):
+    """Positions (in `level`, a token list) of the coordinates of the items the game marked
+    invalid: the tokens that placed them. Items not found (goo is written as geometry; cube and
+    dropper positions differ) are skipped."""
+    out = []
+    for item in game_items:
+        words = GAME_NAMES.get(item.get("name"), [])
+        pos = list(item.get("pos", []))
+        for i, t in enumerate(level):
+            if t not in words or i + 4 > len(level):
+                continue
+            try:
+                cell = [int(v) for v in level[i + 1 : i + 4]]
+            except ValueError:
+                continue
+            if t in BOX_ITEMS and i + 7 <= len(level):
+                try:
+                    hi = [int(v) for v in level[i + 4 : i + 7]]
+                except ValueError:
+                    continue
+                inside = all(min(a, b) <= p <= max(a, b) for a, b, p in zip(cell, hi, pos))
+                span = range(i + 1, i + 7)
+            else:
+                # A dropper's cube sits on the floor below it: same column.
+                inside = cell == pos or (item.get("name") == "cube" and cell[:2] == pos[:2])
+                span = range(i + 1, i + 4)
+            if inside:
+                out.extend(span)
+                break
+    return sorted(set(out))
+
+
+class Away:
+    """Levels the game rejected, prompted as `<verdict:solvable>`, with the positions whose
+    tokens placed a rejected item: training pushes those tokens' probability down
+    (unlikelihood), so the model moves away from the placements the game refuses."""
+
+    def __init__(self, paths, vocab, block_size):
+        self.seqs = []
+        groups = groups_in(vocab)
+        prompt = [BOS] + vocab.encode(slots(["<verdict:solvable>"], groups)) + [SEP]
+        for p in paths:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    level = r["tokens"].split()
+                    spans = item_spans(level, r.get("game_items", []))
+                    if not spans or any(t not in vocab.stoi for t in level):
+                        continue
+                    ids = prompt + vocab.encode(level)
+                    if len(ids) > block_size:
+                        continue
+                    # Predicting ids[k] happens at input position k - 1.
+                    self.seqs.append((ids, [len(prompt) + s - 1 for s in spans]))
+
+    def __len__(self):
+        return len(self.seqs)
+
+    def batch(self, size, device):
+        """Inputs, the token to push away at each position (-100 = none), padded."""
+        picks = [self.seqs[random.randrange(len(self.seqs))] for _ in range(size)]
+        width = max(len(ids) for ids, _ in picks) - 1
+        x = torch.full((size, width), PAD, dtype=torch.long)
+        y = torch.full((size, width), -100, dtype=torch.long)
+        for row, (ids, at) in enumerate(picks):
+            x[row, : len(ids) - 1] = torch.tensor(ids[:-1])
+            for k in at:
+                y[row, k] = ids[k + 1]
+        return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+
+
 def groups_in(vocab):
     """The condition groups a vocabulary (a checkpoint's) has tokens for, in slot order."""
     return [g for g in GROUPS if ANY[g] in vocab.stoi]
