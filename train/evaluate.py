@@ -420,6 +420,10 @@ def main():
     (out / "report.md").write_text(text, encoding="utf-8")
     print(text)
     print(f"wrote {out / 'report.md'}, eval.json and samples.jsonl")
+    if not args.out:
+        import record
+
+        record.safely(Path(args.checkpoint).parent)
 
 
 if __name__ == "__main__":

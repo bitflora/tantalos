@@ -19,9 +19,13 @@
 #
 # Then, unless AWAY=0, a second phase trains away from every level the game has rejected:
 # starting from the best weights, for AWAY_MINUTES (default 15), with those levels repeated
-# AWAY_REPEAT times (default 5) as invalid and the tokens that placed each rejected item pushed
-# down when the model is asked for a solvable level (train.py --away). Its result, in
-# $OUT/away, is evaluated and checked in the game the same way: that's the run's final model.
+# AWAY_REPEAT times (default 5) as invalid. AWAY_LOSS=1 also pushes down the tokens that
+# placed each rejected item (train.py --away); off by default, because on 2026-10-12 it made
+# the model stop writing real coordinates (0% of levels parsed): most rejections are two items
+# colliding in otherwise normal places, so it pushed down normal placements. The result, in
+# $OUT/away, is evaluated and checked in the game the same way. It is the run's final model
+# unless its share of solvable levels is more than 3 points below the first phase's; then
+# $OUT/away/WORSE is written and loop.sh carries on from $OUT/best.pt.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=$1
@@ -87,13 +91,18 @@ if [ "${AWAY:-1}" = 1 ] && [ -s data/ingame/invalid.jsonl ]; then
     $PY -u train/train.py --data "${files[@]}" "${reps[@]}" --vocab "$DATA/vocab.txt" \
         --out "$OUT/away" --block 640 --until "$away_until" --eval-every 1000 --score-n 64 "$@" \
         --init "$OUT/best.pt" --lr "${AWAY_LR:-1e-4}" --min-lr 1e-5 --warmup 100 \
-        --away data/ingame/invalid.jsonl > "$OUT/away/train.log" 2>&1
+        ${AWAY_LOSS:+--away data/ingame/invalid.jsonl} > "$OUT/away/train.log" 2>&1
     log "training away finished: $(grep '^==' "$OUT/away/train.log" | tail -1)"
     $PY -u train/evaluate.py "$OUT/away/best.pt" --data "${files[@]}" > "$OUT/away/evaluate.log" 2>&1
     log "evaluation written to $OUT/away/eval/report.md"
     ingame "$OUT/away/eval" "$OUT/away/ingame.log"
+    solvable() { grep -A2 '^| parsed' "$1/report.md" | tail -1 | cut -d'|' -f4 | tr -dc '0-9'; }
     for d in "$OUT/eval" "$OUT/away/eval"; do
-        log "$d: solvable $(grep -A2 '^| parsed' "$d/report.md" | tail -1 | cut -d'|' -f4)," \
+        log "$d: solvable $(solvable "$d")%," \
             "$(grep -m1 'Game-valid, of levels' "$d/ingame/report.md" 2>/dev/null || echo 'no in-game check')"
     done
+    if [ "$(solvable "$OUT/away/eval")" -lt $(( $(solvable "$OUT/eval") - 3 )) ]; then
+        touch "$OUT/away/WORSE"
+        log "training away made it worse: keeping $OUT/best.pt as the final model"
+    fi
 fi

@@ -1,2 +1,5 @@
 # Round-trip tests compare .p2c bytes exactly; never let git rewrite line endings.
 *.p2c -text
+
+# Shell scripts run under bash, which chokes on CRLF.
+*.sh text eol=lf

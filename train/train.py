@@ -6,7 +6,8 @@
 --until 07:45 trains until a clock time instead of for --iters steps; --init starts from another
 run's weights. Every --eval-every steps: validation loss, then --score-n sampled levels run through
 `glados score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
-(lowest validation loss). Log: <out>/log.jsonl.
+(lowest validation loss). Log: <out>/log.jsonl. The run gets a row in train/runs.csv
+(train/record.py), with --note as its notes.
 
 Training batches hold levels of similar length (--bucket), so they pad little. On the GPU the
 process keeps to --gpu-mem: on Windows, outgrowing the free GPU memory doesn't fail, the driver
@@ -32,6 +33,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0
 import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
+import record  # noqa: E402
 import sample  # noqa: E402
 from data import Away, Vocab, load  # noqa: E402
 from model import GPT, Config  # noqa: E402
@@ -90,13 +92,20 @@ def main():
         nargs="*",
         default=[],
         help="game-rejected levels (data/ingame/invalid.jsonl): push down the tokens that placed "
-        "the rejected items when asked for a solvable level (unlikelihood)",
+        "the rejected items when asked for a solvable level (unlikelihood). Experimental: at "
+        "--away-weight 5 it made the model stop writing real coordinates within 500 steps",
     )
-    ap.add_argument("--away-weight", type=float, default=0.5, help="weight of the --away loss")
+    ap.add_argument(
+        "--away-weight",
+        type=float,
+        default=5.0,
+        help="how many ordinary training targets each pushed-away token counts as",
+    )
     ap.add_argument("--away-batch", type=int, default=8, help="rejected levels per step")
     ap.add_argument("--init", default=None, help="start from this checkpoint's weights (new optimizer and schedule)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--note", default=None, help="what this run is for, for train/runs.csv")
     args = ap.parse_args()
 
     start = time.time()
@@ -106,6 +115,8 @@ def main():
     keep_awake()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    if not (args.resume and (out / "run.json").exists()):
+        record.write_meta(out, args.note)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
@@ -137,6 +148,10 @@ def main():
         print(f"away: {len(away)} game-rejected levels with placements to push away from")
         if not len(away):
             away = None
+    # Coordinates are numbers: the away loss compares a rejected one only with other numbers.
+    numbers = [vocab.stoi[t] for t in vocab.itos if t.isdigit()]
+    number_of = torch.full((len(vocab),), -1, dtype=torch.long)
+    number_of[numbers] = torch.arange(len(numbers))
 
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout)
     init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
@@ -223,13 +238,22 @@ def main():
             scaler.scale(loss * weight / args.accum).backward()
             tokens += targets
         if away is not None:
-            ax, ay = away.batch(args.away_batch, device)
+            ax, ay = away.batch(args.away_batch, args.cond_drop, device)
             with amp:
                 logits, _ = model(ax)
             mask = ay != -100
-            p = logits.float().softmax(-1).gather(-1, ay.clamp(min=0).unsqueeze(-1)).squeeze(-1)
-            away_loss = -torch.log((1 - p[mask]).clamp(min=1e-6)).mean()
-            scaler.scale(args.away_weight * away_loss).backward()
+            nums = torch.tensor(numbers, device=logits.device)
+            sub = logits[mask].float()[:, nums].softmax(-1)
+            which = number_of.to(logits.device)[ay[mask]]
+            keep = which >= 0
+            p = sub[keep].gather(-1, which[keep].unsqueeze(-1)).squeeze(-1)
+            pushed = -torch.log((1 - p).clamp(min=1e-6))
+            away_loss = pushed.mean()
+            # Each pushed token counts as --away-weight ordinary targets. (Averaged over a few
+            # tokens instead, each weighed ~100 ordinary ones and the model stopped writing real
+            # coordinates altogether.)
+            scale = args.away_weight / max(targets * args.accum, 1)
+            scaler.scale(scale * pushed.sum()).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)
@@ -281,6 +305,8 @@ def main():
             t0, tokens = time.time(), 0
         if done:
             break
+    log.close()
+    record.safely(out)
 
 
 def batches(levels, size, bucket, drop, device):

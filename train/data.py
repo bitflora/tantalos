@@ -190,14 +190,18 @@ def item_spans(level, game_items):
 
 
 class Away:
-    """Levels the game rejected, prompted as `<verdict:solvable>`, with the positions whose
-    tokens placed a rejected item: training pushes those tokens' probability down
-    (unlikelihood), so the model moves away from the placements the game refuses."""
+    """Levels the game rejected, prompted with their own conditions but `<verdict:solvable>`
+    (hidden at random like training prompts), with the positions whose tokens placed a
+    rejected item. Training pushes those coordinates down among the numbers that could go
+    there (unlikelihood), so the model puts the item somewhere else rather than nowhere.
+
+    A first version pushed against all tokens under one fixed `<verdict:solvable>` prompt;
+    the model learned to stop writing coordinates under that prompt (0% of its levels parsed)."""
 
     def __init__(self, paths, vocab, block_size):
         self.seqs = []
-        groups = groups_in(vocab)
-        prompt = [BOS] + vocab.encode(slots(["<verdict:solvable>"], groups)) + [SEP]
+        self.groups = groups_in(vocab)
+        self.any_ids = vocab.encode([ANY[g] for g in self.groups])
         for p in paths:
             with open(p, encoding="utf-8") as f:
                 for line in f:
@@ -208,22 +212,31 @@ class Away:
                     spans = item_spans(level, r.get("game_items", []))
                     if not spans or any(t not in vocab.stoi for t in level):
                         continue
-                    ids = prompt + vocab.encode(level)
-                    if len(ids) > block_size:
+                    if 2 + len(self.groups) + len(level) > block_size:
                         continue
-                    # Predicting ids[k] happens at input position k - 1.
-                    self.seqs.append((ids, [len(prompt) + s - 1 for s in spans]))
+                    conds = [c for c in conditions(r) if not c.startswith("<verdict:")]
+                    conds = slots(["<verdict:solvable>"] + conds, self.groups)
+                    self.seqs.append((vocab.encode(conds), vocab.encode(level), spans))
 
     def __len__(self):
         return len(self.seqs)
 
-    def batch(self, size, device):
-        """Inputs, the token to push away at each position (-100 = none), padded."""
+    def batch(self, size, drop, device):
+        """Inputs, the token to push away at each position (-100 = none), padded. The verdict
+        always stays; other conditions are hidden with a probability drawn from [0, `drop`]."""
         picks = [self.seqs[random.randrange(len(self.seqs))] for _ in range(size)]
-        width = max(len(ids) for ids, _ in picks) - 1
+        seqs = []
+        for conds, level, spans in picks:
+            p = random.uniform(0, drop)
+            shown = [c if i == 0 or random.random() >= p else a
+                     for i, (c, a) in enumerate(zip(conds, self.any_ids))]
+            prompt = [BOS] + shown + [SEP]
+            # Predicting level[s] happens at input position len(prompt) + s - 1.
+            seqs.append((prompt + level, [len(prompt) + s - 1 for s in spans]))
+        width = max(len(ids) for ids, _ in seqs) - 1
         x = torch.full((size, width), PAD, dtype=torch.long)
         y = torch.full((size, width), -100, dtype=torch.long)
-        for row, (ids, at) in enumerate(picks):
+        for row, (ids, at) in enumerate(seqs):
             x[row, : len(ids) - 1] = torch.tensor(ids[:-1])
             for k in at:
                 y[row, k] = ids[k + 1]
