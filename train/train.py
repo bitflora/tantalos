@@ -6,7 +6,8 @@
 --until 07:45 trains until a clock time instead of for --iters steps; --init starts from another
 run's weights. Every --eval-every steps: validation loss, then --score-n sampled levels run through
 `glados score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
-(lowest validation loss). Log: <out>/log.jsonl.
+(lowest validation loss). Log: <out>/log.jsonl. The run gets a row in train/runs.csv
+(train/record.py), with --note as its notes.
 
 Training batches hold levels of similar length (--bucket), so they pad little. On the GPU the
 process keeps to --gpu-mem: on Windows, outgrowing the free GPU memory doesn't fail, the driver
@@ -32,6 +33,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0
 import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent))
+import record  # noqa: E402
 import sample  # noqa: E402
 from data import Away, Vocab, load  # noqa: E402
 from model import GPT, Config  # noqa: E402
@@ -103,6 +105,7 @@ def main():
     ap.add_argument("--init", default=None, help="start from this checkpoint's weights (new optimizer and schedule)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--note", default=None, help="what this run is for, for train/runs.csv")
     args = ap.parse_args()
 
     start = time.time()
@@ -112,6 +115,8 @@ def main():
     keep_awake()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    if not (args.resume and (out / "run.json").exists()):
+        record.write_meta(out, args.note)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
@@ -300,6 +305,8 @@ def main():
             t0, tokens = time.time(), 0
         if done:
             break
+    log.close()
+    record.safely(out)
 
 
 def batches(levels, size, bucket, drop, device):

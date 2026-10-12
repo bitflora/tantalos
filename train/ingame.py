@@ -167,6 +167,10 @@ def main():
     if a.dir and (Path(a.dir) / "report.md").exists():
         with open(Path(a.dir) / "report.md", "a", encoding="utf-8") as f:
             f.write("\n" + text)
+    if a.dir and not a.out and Path(a.dir).name == "eval":
+        import record
+
+        record.safely(Path(a.dir).parent)
 
 
 if __name__ == "__main__":

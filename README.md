@@ -48,6 +48,9 @@ fell more than 3 points. An unlikelihood loss on the tokens that placed each rej
 (`AWAY_LOSS=1`, `train.py --away`) is off: on the first overnight run it taught the model to
 stop writing real coordinates (0% of its levels parsed), because most rejections are two
 items colliding in normal places, so it pushed normal placements down.
+Every training run has a row in `train/runs.csv`: its settings, losses, evaluation and in-game
+results, and notes. `train.py`, `evaluate.py` and `ingame.py` fill it in as they finish;
+`train.py --note "..."` or `train/record.py RUN --note "..."` sets the notes.
 `train.py --until 07:40` trains to a clock time, with the learning-rate schedule spread over the
 time left, and `--init CKPT` starts from another run's weights. While training it asks Windows
 not to sleep; a closed lid still sleeps. On this laptop the GPU throttles at about 87 °C, and
