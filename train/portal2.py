@@ -4,30 +4,32 @@ The editor refuses to export a puzzle with misplaced items and logs each one as
 `INVALID ITEM:  <TargetName> ( x , y , z )` (x y z = the item's VoxelPos). There is no console
 command that loads a file in the retail game: `puzzlemaker_load_dev` calls a stub. `patch`
 rewrites one byte in the running game so it calls the loader the My Chambers list uses, and
-sets the editor's active flag, which `puzzlemaker_export` checks. Commands reach the game
-through `portal2.exe -hijack`, and its console output through `con_logfile`.
+sets the editor's active flag, which `puzzlemaker_export` checks. Commands go in and console
+output comes back over the game's TCP console (-netconport). (`portal2.exe -hijack` per
+command was slow, and popped up "did not accept the request to load a savegame" whenever the
+game was too busy to answer its window message in time, stalling until it was dismissed.)
 
 Memory is only patched in a game started with -insecure (VAC off for that session), and the
 patch refuses any client.dll that doesn't match the build it was written for (Jan 2025).
 
     python train/portal2.py check out/ingame/sample/p2c --out results.jsonl --launch
+    python train/portal2.py check DIR --out results.jsonl --port PORT --password PW
     python train/portal2.py patch [--undo]       # a game you started with -insecure
 
-`--launch` starts the game (refusing if it's already running), opens the editor, patches it,
+A game you start yourself needs `-insecure -netconport PORT -netconpassword PW` in its launch
+options. `--launch` starts the game (refusing if it's already running), opens the editor, patches it,
 checks, quits, and puts back the editor autosaves it overwrote. Exits 3 if the game couldn't
 be used, so callers can carry on without it.
 """
-import argparse, ctypes, ctypes.wintypes as wt, json, os, re, shutil, subprocess, sys, time
+import argparse, collections, ctypes, ctypes.wintypes as wt, itertools, json, re, secrets, shutil, socket, subprocess, sys, time
 from pathlib import Path
 
 GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Portal 2")
 EXE = GAME / "portal2.exe"
-LOGNAME = "glados_console.log"
-LOG = GAME / "portal2" / LOGNAME
-CFG = GAME / "portal2" / "cfg" / "glados_step.cfg"
 STAGE = GAME / "portal2" / "puzzles" / "glados_check"
 VMF = GAME / "sdk_content" / "maps" / "glados_check.vmf"
 PREVIEW = GAME / "portal2" / "maps" / "puzzlemaker" / "preview.bsp"
+CANARY = Path(__file__).resolve().parent.parent / "fixtures" / "ingame" / "canary_invalid.p2c"
 INVALID = re.compile(r"INVALID ITEM:\s+(\S+)\s+\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)")
 UNAVAILABLE = 3
 
@@ -66,41 +68,86 @@ def alive(pid):
     return code.value == 259  # STILL_ACTIVE
 
 
-def send(cmds, pid=None):
-    """Run console commands in the running game (via a cfg, so paths need no escaping). With
-    no game window, `-hijack` would start a new (VAC-secured) game, so `pid` must be alive."""
-    if pid is not None and not alive(pid):
-        raise GameUnavailable("the game exited")
-    CFG.write_text("\n".join(cmds) + "\n", encoding="ascii")
-    subprocess.run([str(EXE), "-hijack", "+exec", CFG.stem],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+class Console:
+    """The game's TCP console (-netconport): command lines in, everything it prints out."""
 
+    acks = itertools.count(1)
 
-class Log:
-    """Reads the console log forward from where it was when created."""
-
-    def __init__(self):
-        self.pos = LOG.stat().st_size if LOG.exists() else 0
-
-    def until(self, marker, timeout, poke=None):
-        """Text logged since the last read, up to `marker`, or None on timeout. `poke` is
-        called every few seconds while waiting (to resend a command the game missed)."""
+    def __init__(self, port, password, timeout=60):
         end = time.time() + timeout
-        next_poke = time.time()
-        while time.time() < end:
-            if poke and time.time() >= next_poke:
-                poke()
-                next_poke = time.time() + 5
-            if LOG.exists():
-                with open(LOG, "rb") as f:
-                    f.seek(self.pos)
-                    text = f.read().decode("utf-8", "replace")
-                i = text.find(marker)
-                if i >= 0:
-                    self.pos += len(text[: i + len(marker)].encode("utf-8"))
-                    return text[:i]
-            time.sleep(0.05)
-        return None
+        while True:
+            try:
+                self.sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+                break
+            except OSError:
+                if time.time() > end:
+                    raise GameUnavailable(f"nothing listening on console port {port}")
+                time.sleep(1)
+        self.sock.settimeout(0.02)
+        self.buf = ""
+        self.lines = []
+        if password:
+            self.send(f"PASS {password}")
+        # A game still starting up can take a while to answer, or drop what it was sent.
+        while self.ask(["echo glados_hello"], 5) is None:
+            if time.time() > end:
+                raise GameUnavailable("the console didn't answer (wrong password?)")
+
+    def send(self, *cmds):
+        assert not any("\n" in c for c in cmds)
+        try:
+            self.sock.sendall(("\n".join(cmds) + "\n").encode("utf-8"))
+        except OSError as e:
+            raise GameUnavailable(f"the console went away ({e})")
+
+    def _read(self):
+        try:
+            data = self.sock.recv(1 << 16)
+        except socket.timeout:
+            return
+        except OSError as e:
+            raise GameUnavailable(f"the console went away ({e})")
+        if not data:
+            raise GameUnavailable("the game closed its console")
+        self.buf += data.decode("utf-8", "replace")
+        *done, self.buf = self.buf.split("\n")
+        self.lines += [l.rstrip("\r") for l in done]
+
+    def until(self, pred, timeout):
+        """Lines printed up to the first one `pred` accepts: (lines before it, that line), or
+        None on timeout. Lines are consumed either way."""
+        end = time.time() + timeout
+        seen = []
+        while True:
+            while self.lines:
+                line = self.lines.pop(0)
+                if pred(line):
+                    return seen, line
+                seen.append(line)
+            if time.time() > end:
+                return None
+            self._read()
+
+    def ask(self, cmds, timeout=5):
+        """Runs commands and returns what they printed, or None on timeout."""
+        tag = f"glados_ack_{next(Console.acks)}"
+        self.send(*cmds, f"echo {tag}")
+        got = self.until(lambda l: l.strip() == tag, timeout)
+        return None if got is None else "\n".join(got[0])
+
+    def drain(self):
+        self._read()
+        lines, self.lines = self.lines, []
+        return lines
+
+    def close(self):
+        self.sock.close()
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 # --- the patch -----------------------------------------------------------------------------
@@ -196,88 +243,104 @@ def autosaves():
     return [p for p in (GAME / "portal2" / "puzzles").rglob("autosave.*") if STAGE not in p.parents]
 
 
-def launch(log, saved, timeout=180, extra=()):
-    """Start the game, open the editor and patch it. Returns the game's pid. `extra`: more
-    command-line options (e.g. `-netconport` for train/play.py)."""
+def launch(saved, timeout=180, extra=()):
+    """Start the game with a TCP console on a free port and a random password, open the
+    editor and patch it. Returns (pid, Console). `extra`: more command-line options."""
     if game_process() is not None:
         raise GameUnavailable("Portal 2 is already running (maybe being played); not interrupting it")
     if not PREVIEW.exists():
         raise GameUnavailable(f"{PREVIEW} is missing: build any puzzle in the editor once")
+    port, password = free_port(), secrets.token_hex(8)
     subprocess.Popen([str(EXE), "-game", "portal2", "-steam", "-insecure", "-novid", "-windowed",
-                      "-w", "1280", "-h", "800", *extra, "+con_logfile", LOGNAME], cwd=GAME)
-    pid = None
+                      "-w", "1280", "-h", "800", "-netconport", str(port), "-netconpassword", password,
+                      *extra], cwd=GAME)
+    pid = con = None
     try:
-        # Before the window exists, -hijack would start a second game instead of forwarding.
-        end = time.time() + timeout
-        while time.time() < end and not _window_up():
-            time.sleep(1)
+        con = Console(port, password, timeout)
         proc = game_process()
         if proc is None or "-insecure" not in proc[1].split():
             raise GameUnavailable("the game didn't start (or not with -insecure)")
         pid = proc[0]
-        tag = f"GLADOS_{os.getpid()}_UP"
-        if log.until(tag, timeout, poke=lambda: send([f"echo {tag}"], pid)) is None:
-            raise GameUnavailable("the game didn't answer console commands")
-        # A game still starting up can answer the echo and then drop these, so resend them
-        # until the map starts loading.
-        open_editor = ["puzzlemaker_show 1", "puzzlemaker_switch_session puzzlemaker/preview sp"]
-        if log.until("Host_NewGame on map puzzlemaker/preview", timeout,
-                     poke=lambda: send(open_editor, pid)) is None:
-            raise GameUnavailable("the editor didn't start loading")
-        if log.until("END loading assets", timeout) is None:
-            raise GameUnavailable("the editor didn't open")
-        time.sleep(3)
-        patch()
+        open_editor(con, timeout)
     except BaseException:
+        if pid is None:
+            pid = (game_process() or (None,))[0]
         if pid is not None:
-            quit_game(saved, pid)
+            quit_game(saved, pid, con)
         raise
-    return pid
+    return pid, con
 
 
-def _window_up():
-    proc = game_process()
-    if proc is None:
-        return False
-    out = subprocess.run(["powershell", "-NoProfile", "-Command",
-                          f"(Get-Process -Id {proc[0]}).MainWindowHandle"], capture_output=True, text=True)
-    return out.stdout.strip() not in ("", "0")
+def open_editor(con, timeout=180):
+    """Opens the editor (from the main menu or a level) and patches it for loading files."""
+    end = time.time() + timeout
+    while True:  # resent until the map starts loading: a game still starting up can drop them
+        con.send("puzzlemaker_show 1", "puzzlemaker_switch_session puzzlemaker/preview sp")
+        if con.until(lambda l: "Host_NewGame on map puzzlemaker/preview" in l, 10) is not None:
+            break
+        if time.time() > end:
+            raise GameUnavailable("the editor didn't start loading")
+    if con.until(lambda l: "END loading assets" in l, timeout) is None:
+        raise GameUnavailable("the editor didn't open")
+    time.sleep(3)
+    patch()
 
 
-def quit_game(saved, pid, timeout=60):
+def quit_game(saved, pid, con=None, timeout=60):
+    """Quits a game this started (over `con`, else by ending the process) and tidies up."""
     if alive(pid):
-        send(["quit"], pid)
+        try:
+            if con is None:
+                raise GameUnavailable("no console")
+            con.send("quit")
+        except (GameUnavailable, OSError):
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
         end = time.time() + timeout
         while time.time() < end and alive(pid):
             time.sleep(1)
+        if alive(pid):
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+    if con is not None:
+        con.close()
     for p in autosaves():
         if p not in saved:
             p.unlink()
     for p, data in saved.items():
         p.write_bytes(data)
     VMF.unlink(missing_ok=True)
-    CFG.unlink(missing_ok=True)
     shutil.rmtree(STAGE, ignore_errors=True)
 
 
 # --- checking ------------------------------------------------------------------------------
 
-def check_one(path, n, log, pid, timeout=20):
+def check_one(path, n, con, pid, timeout=20, settle=0.1):
     STAGE.mkdir(parents=True, exist_ok=True)
     staged = STAGE / f"check{n % 2}.p2c"  # alternate names so a stale load can't pass as fresh
     shutil.copyfile(path, staged)
     VMF.unlink(missing_ok=True)
-    tag = f"GLADOS_{os.getpid()}_{n}"
+    # A tag unique to this attempt marks the end of each step's output, so a late answer to an
+    # attempt that timed out can't pass for this one's. The editor marks misplaced items while
+    # it draws, so the export waits `settle` seconds after the load: straight after it (even a
+    # few `wait` frames after), the export passes every level as valid. 50 ms was enough in
+    # tests, 100 ms with the game behind other windows; check() watches for it not being enough.
+    tag = f"glados_check_{next(Console.acks)}"
+    texts = {}
     for stage, cmd in (("load", f'puzzlemaker_load_dev "{staged.as_posix()}"'),
                        ("export", "puzzlemaker_export glados_check")):
-        send([cmd, f"echo {tag}_{stage}"], pid)
-        text = log.until(f"{tag}_{stage}", timeout)
-        if text is None:
+        if stage == "export":
+            time.sleep(settle)
+        try:
+            con.send(cmd, f"echo {tag}_{stage}")
+            got = con.until(lambda l: l.strip() == f"{tag}_{stage}", timeout)
+        except GameUnavailable:  # the console closed: the game is going down
+            end = time.time() + 10
+            while time.time() < end and alive(pid):
+                time.sleep(0.5)
+            got = None
+        if got is None:
             return {"file": str(path), "verdict": "crash" if not alive(pid) else "timeout", "stage": stage}
-        if stage == "load":
-            loaded = text
-        else:
-            exported = text
+        texts[stage] = "\n".join(got[0])
+    loaded, exported = texts["load"], texts["export"]
     items = [{"name": m[0], "pos": [int(m[1]), int(m[2]), int(m[3])]} for m in INVALID.findall(exported)]
     size = re.search(r"chamber size: \((\d+),(\d+),(\d+)\)", exported)
     pm = lambda t: [l.split("]", 1)[1].strip() for l in t.splitlines() if "PUZZLEMAKER]" in l]
@@ -294,57 +357,102 @@ def check_one(path, n, log, pid, timeout=20):
             "load_messages": pm(loaded), "export_messages": pm(exported)}
 
 
-def check(files, out_path, launch_game=False, timeout=20, progress=print, restart_every=500,
-          max_crashes=10):
+def check(files, out_path, launch_game=False, timeout=20, progress=print, restart_every=100,
+          max_crashes=10, port=None, password="", canary_every=50, max_bad=3):
     """Check .p2c files, appending one JSON line each to out_path (resumable). With
-    launch_game, the game is restarted every `restart_every` levels (it slows down as it runs)
-    and after a crash; a level that crashed it is recorded as "crash". Raises GameUnavailable
-    if the game can't be used."""
+    launch_game, the game is restarted every `restart_every` levels and after a crash (exports
+    slow from ~0.15 s to ~0.6 s over the first 150 levels of a session, and neither
+    puzzlemaker_new_chamber nor reopening the editor helps; a restart takes ~17 s); a level that crashed it is recorded as "crash". Otherwise it uses the
+    game already running, on console `port`, with the editor open. Raises GameUnavailable if
+    the game can't be used.
+
+    The editor only marks misplaced items as it draws, so exported too soon after loading (see
+    check_one) every level passes as valid, and a session can get stuck that way. So CANARY
+    (a level the editor must call invalid) is checked first and then every `canary_every`
+    levels. Results are only written
+    once a canary after them has passed; if it fails, the game is restarted and those levels
+    are checked again."""
     out_path = Path(out_path)
     done = set()
     if out_path.exists():
         done = {json.loads(l)["file"] for l in out_path.read_text().splitlines() if l.strip()}
-    todo = [f for f in files if str(f) not in done]
-    progress(f"{len(todo)} to check ({len(done)} already in {out_path})")
+    todo = collections.deque(f for f in files if str(f) not in done)
+    total = len(todo)
+    progress(f"{total} to check ({len(done)} already in {out_path})")
     if not todo:
         return
     saved = {p: p.read_bytes() for p in autosaves()}
     start = time.time()
-    i = crashes = 0
+    written = crashes = bad = 0
+    seq = itertools.count(1)  # numbers every check_one, so the staged name always alternates
     with open(out_path, "a", encoding="utf-8") as out:
-        while i < len(todo):
-            log = Log()
+
+        def write(rows):
+            nonlocal written
+            for r in rows:
+                out.write(json.dumps(r) + "\n")
+                written += 1
+                if written % 100 == 0 or written == total:
+                    progress(f"[{written}/{total} {time.time() - start:6.0f}s]")
+            out.flush()
+
+        while todo:
             if launch_game:
-                pid = launch(log, saved)
+                pid, con = launch(saved)
             else:
                 proc = game_process()
                 if proc is None:
                     raise GameUnavailable("Portal 2 isn't running")
+                if not port:
+                    raise GameUnavailable("pass the console port (and password) of the game you started")
                 pid = proc[0]
                 patch()
+                con = Console(port, password)
             try:
-                first = i
-                while i < len(todo) and not (launch_game and i - first >= restart_every):
-                    r = check_one(todo[i], i + 1, log, pid, timeout)
+                def one(path):
+                    r = check_one(path, next(seq), con, pid, timeout)
                     if r["verdict"] == "timeout":  # alive but silent: give it one more go
-                        r = check_one(todo[i], i + 1, log, pid, timeout)
+                        r = check_one(path, next(seq), con, pid, timeout)
                     if r["verdict"] == "timeout":
-                        raise GameUnavailable(f"the game stopped answering at {todo[i]}")
-                    out.write(json.dumps(r) + "\n")
-                    out.flush()
-                    i += 1
-                    if i % 100 == 0 or i == len(todo):
-                        progress(f"[{i}/{len(todo)} {time.time() - start:6.0f}s]")
+                        raise GameUnavailable(f"the game stopped answering at {path}")
+                    return r
+
+                def canary_flagged():
+                    return one(CANARY)["verdict"] == "invalid"
+
+                checked = 0
+                pending = []
+                healthy = canary_flagged()
+                while healthy and todo and not (launch_game and checked >= restart_every):
+                    path = todo.popleft()
+                    r = one(path)
+                    checked += 1
                     if r["verdict"] == "crash":
                         crashes += 1
-                        progress(f"the game crashed on {todo[i - 1]} ({crashes} so far)")
+                        progress(f"the game crashed on {path} ({crashes} so far)")
+                        write([r])  # the levels before it go round again: no canary after them
+                        todo.extendleft(reversed([Path(x["file"]) for x in pending]))
+                        pending = []
                         if not launch_game or crashes > max_crashes:
                             raise GameUnavailable("the game crashed")
                         break
+                    pending.append(r)
+                    if len(pending) >= canary_every or not todo or (launch_game and checked >= restart_every):
+                        healthy = canary_flagged()
+                        if healthy:
+                            write(pending)
+                            pending = []
+                if not healthy:
+                    todo.extendleft(reversed([Path(x["file"]) for x in pending]))
+                    bad += 1
+                    progress(f"the editor stopped flagging invalid items; restarting ({bad} so far)")
+                    if not launch_game or bad > max_bad:
+                        raise GameUnavailable("the editor isn't flagging invalid items (the canary passed as valid)")
             finally:
                 if launch_game:
-                    quit_game(saved, pid)
+                    quit_game(saved, pid, con)
                 else:
+                    con.close()
                     VMF.unlink(missing_ok=True)
 
 
@@ -360,12 +468,15 @@ def main():
     c.add_argument("--out", required=True)
     c.add_argument("--launch", action="store_true", help="start and quit the game too")
     c.add_argument("--timeout", type=float, default=20)
+    c.add_argument("--port", type=int, help="console port (-netconport) of a game you started")
+    c.add_argument("--password", default="", help="its -netconpassword")
     p = sub.add_parser("patch", help="patch a game already running with -insecure")
     p.add_argument("--undo", action="store_true")
     a = ap.parse_args()
     try:
         if a.cmd == "check":
-            check(p2c_files(a.files), a.out, a.launch, a.timeout, progress=lambda s: print(s, flush=True))
+            check(p2c_files(a.files), a.out, a.launch, a.timeout, progress=lambda s: print(s, flush=True),
+                  port=a.port, password=a.password)
         else:
             patch(a.undo)
             print("unpatched" if a.undo else "patched")

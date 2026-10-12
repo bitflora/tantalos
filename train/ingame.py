@@ -90,7 +90,10 @@ def main():
     ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados.exe"))
     ap.add_argument("--store", default=str(ROOT / "data" / "ingame"))
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--no-launch", action="store_true", help="use a game you started with -insecure")
+    ap.add_argument("--no-launch", action="store_true",
+                    help="use a game you started with -insecure -netconport PORT -netconpassword PW")
+    ap.add_argument("--port", type=int, help="with --no-launch: its -netconport")
+    ap.add_argument("--password", default="", help="with --no-launch: its -netconpassword")
     a = ap.parse_args()
     if not a.dir and not a.samples:
         ap.error("give an evaluation directory or --samples")
@@ -127,7 +130,7 @@ def main():
     report_path = out / "report.md"
     try:
         portal2.check(files, results_path, launch_game=not a.no_launch,
-                      progress=lambda s: print(s, flush=True))
+                      progress=lambda s: print(s, flush=True), port=a.port, password=a.password)
     except portal2.GameUnavailable as e:
         text = f"## In-game editor check\n\nSkipped: Portal 2 unavailable ({e}).\n"
         report_path.write_text(text, encoding="utf-8")

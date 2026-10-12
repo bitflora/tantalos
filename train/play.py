@@ -20,12 +20,12 @@ the end unless --keep. For a game you started yourself, add
 --password. --spike checks the console, VScript, coordinates, movement and the commands the
 player uses on the first level, and prints what it found instead of playing.
 """
-import argparse, json, math, re, secrets, socket, subprocess, sys, time
+import argparse, json, math, re, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import portal2  # noqa: E402
-from portal2 import GameUnavailable  # noqa: E402
+from portal2 import Console, GameUnavailable, open_editor  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 VOXEL = 128.0
@@ -106,83 +106,6 @@ printl("GLADOS_SCRIPT loaded")
 
 class Stuck(Exception):
     """A move that didn't get where it was going."""
-
-
-# --- the console ---------------------------------------------------------------------------
-
-class Console:
-    """The game's TCP console (-netconport): command lines in, everything it prints out."""
-
-    acks = 0
-
-    def __init__(self, port, password, timeout=60):
-        end = time.time() + timeout
-        while True:
-            try:
-                self.sock = socket.create_connection(("127.0.0.1", port), timeout=2)
-                break
-            except OSError:
-                if time.time() > end:
-                    raise GameUnavailable(f"nothing listening on console port {port}")
-                time.sleep(1)
-        self.sock.settimeout(0.02)
-        self.buf = ""
-        self.lines = []
-        if password:
-            self.send(f"PASS {password}")
-        if self.ask(["echo glados_hello"], 15) is None:
-            raise GameUnavailable("the console didn't answer (wrong password?)")
-
-    def send(self, *cmds):
-        assert not any("\n" in c for c in cmds)
-        self.sock.sendall(("\n".join(cmds) + "\n").encode("utf-8"))
-
-    def _read(self):
-        try:
-            data = self.sock.recv(1 << 16)
-        except socket.timeout:
-            return
-        except OSError as e:
-            raise GameUnavailable(f"the console went away ({e})")
-        if not data:
-            raise GameUnavailable("the game closed its console")
-        self.buf += data.decode("utf-8", "replace")
-        *done, self.buf = self.buf.split("\n")
-        self.lines += [l.rstrip("\r") for l in done]
-
-    def until(self, pred, timeout):
-        """Lines printed up to the first one `pred` accepts: (lines before it, that line), or
-        None on timeout. Lines are consumed either way."""
-        end = time.time() + timeout
-        seen = []
-        while True:
-            while self.lines:
-                line = self.lines.pop(0)
-                if pred(line):
-                    return seen, line
-                seen.append(line)
-            if time.time() > end:
-                return None
-            self._read()
-
-    def ask(self, cmds, timeout=5):
-        """Runs commands and returns what they printed, or None on timeout."""
-        Console.acks += 1
-        tag = f"glados_ack_{Console.acks}"
-        self.send(*cmds, f"echo {tag}")
-        got = self.until(lambda l: l.strip() == tag, timeout)
-        return None if got is None else "\n".join(got[0])
-
-    def drain(self):
-        self._read()
-        lines, self.lines = self.lines, []
-        return lines
-
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
 
 
 # --- geometry ------------------------------------------------------------------------------
@@ -868,21 +791,6 @@ def load_level(con, path, timeout=240):
     raise GameUnavailable("the level didn't finish loading")
 
 
-def open_editor(con, timeout=180):
-    """Opens the editor (from the main menu or a level) and patches it for loading files."""
-    end = time.time() + timeout
-    while True:  # resent until the map starts loading: a busy game can drop them
-        con.send("puzzlemaker_show 1", "puzzlemaker_switch_session puzzlemaker/preview sp")
-        if con.until(lambda l: "Host_NewGame on map puzzlemaker/preview" in l, 10) is not None:
-            break
-        if time.time() > end:
-            raise GameUnavailable("the editor didn't start loading")
-    if con.until(lambda l: "END loading assets" in l, timeout) is None:
-        raise GameUnavailable("the editor didn't open")
-    time.sleep(3)
-    portal2.patch()
-
-
 def arrive(game, head):
     """To the entry door's cell from the level's start, normally just outside the entry door
     (see load_level). Failing that, fire the level's start relay, which puts the player there;
@@ -1068,16 +976,13 @@ def main():
     exe = glados_exe(a.glados)
     routes = [(p, *route(exe, p)) for p in a.levels]  # refuse unplayable levels up front
     saved = {p: p.read_bytes() for p in portal2.autosaves()}
-    pid = None
+    pid = con = None
     summary = []
     try:
         SCRIPT.parent.mkdir(parents=True, exist_ok=True)
         SCRIPT.write_text(VSCRIPT, encoding="ascii")
         if a.launch:
-            port, password = free_port(), secrets.token_hex(8)
-            pid = portal2.launch(portal2.Log(), saved,
-                                 extra=["-netconport", str(port), "-netconpassword", password])
-            con = Console(port, password)
+            pid, con = portal2.launch(saved)
         else:
             proc = portal2.game_process()
             if proc is None or "-insecure" not in proc[1].split():
@@ -1106,7 +1011,7 @@ def main():
     finally:
         SCRIPT.unlink(missing_ok=True)
         if pid is not None and not a.keep:
-            portal2.quit_game(saved, pid)
+            portal2.quit_game(saved, pid, con)
         elif pid is None:
             portal2.VMF.unlink(missing_ok=True)
     for path, results in summary:

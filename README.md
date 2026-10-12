@@ -308,12 +308,18 @@ on a floor and not in another item's cell; it used to put goo at the top of ever
 which the editor rejects (all goo flags in the sample, and v2-4's).
 
 **In-game check** (`train/portal2.py`, `train/ingame.py`): starts Portal 2 with `-insecure`
-(VAC off for that session), opens the editor from the console, and patches one byte in
+(VAC off for that session) and drives it over its TCP console (`-netconport`, random
+`-netconpassword`; a `-hijack` process per command was slower, and popped up "did not accept
+the request to load a savegame" when the game was busy). It opens the editor from the console,
+and patches one byte in
 `client.dll` in memory so `puzzlemaker_load_dev <path>` calls the loader the My Chambers list
 uses (the retail command is a stub), plus the editor's active flag that
 `puzzlemaker_export` checks. Export then logs `INVALID ITEM:  <name> ( x , y , z )` for every
-misplaced item and refuses, or writes a VMF. About 0.5–1 s per level; the game slows as it
-runs, so it restarts every 500 levels, and after a crash (the level is recorded as `crash`).
+misplaced item and refuses, or writes a VMF. The editor only marks misplaced items as it
+draws, so each export waits 0.1 s after its load (sooner, and every level passes as valid), and
+a level it must reject is checked first and every 50 levels, restarting the game and
+rechecking if it passes. Exports slow down over a session, so the game restarts every 100
+levels (and after a crash; the level is recorded as `crash`): about 0.4 s per level.
 It refuses to touch a game that is already running or wasn't started with `-insecure`, refuses
 a `client.dll` other than the Jan 2025 build, and puts back the editor autosaves it overwrites.
 `retrain.sh` runs `train/ingame.py` after evaluating: it checks every sample our checker passes
@@ -337,8 +343,7 @@ levels, and checks the walks are legal steps or drops and the shots clear.
 for watching: it loads the level into the editor (as the in-game check does), builds it with
 `puzzlemaker_compile_and_preview`, walks out of the elevator, and plays each step with `setang`
 (a perfect mouse) and +forward, +jump, +attack, +attack2 and +use, steering by positions a small
-VScript prints each tick. Commands go over the game's TCP console (`-netconport`, with a random
-`-netconpassword`) rather than a `-hijack` process per command. Each step is checked (player
+VScript prints each tick. Commands go over the game's TCP console, as for the in-game check. Each step is checked (player
 cell, portals, cubes); one that didn't work is put right by teleporting (`setpos`, a cube's
 `SetOrigin`, `portal_place`) and reported as recovered. `--spike` checks the console, VScript,
 coordinates, movement and these commands instead of playing. **Not yet run in the game**: it
