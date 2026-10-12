@@ -47,7 +47,7 @@ while [ $(( $(date +%s) + (MINUTES + OVERHEAD) * 60 )) -le "$end" ]; do
     else
         log "loop $n failed; see $dir.log"
     fi
-    if [ -f "$dir/away/best.pt" ]; then
+    if [ -f "$dir/away/best.pt" ] && [ ! -f "$dir/away/WORSE" ]; then
         init=$dir/away/best.pt
     elif [ -f "$dir/best.pt" ]; then
         init=$dir/best.pt

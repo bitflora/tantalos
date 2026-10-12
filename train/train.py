@@ -90,9 +90,15 @@ def main():
         nargs="*",
         default=[],
         help="game-rejected levels (data/ingame/invalid.jsonl): push down the tokens that placed "
-        "the rejected items when asked for a solvable level (unlikelihood)",
+        "the rejected items when asked for a solvable level (unlikelihood). Experimental: at "
+        "--away-weight 5 it made the model stop writing real coordinates within 500 steps",
     )
-    ap.add_argument("--away-weight", type=float, default=0.5, help="weight of the --away loss")
+    ap.add_argument(
+        "--away-weight",
+        type=float,
+        default=5.0,
+        help="how many ordinary training targets each pushed-away token counts as",
+    )
     ap.add_argument("--away-batch", type=int, default=8, help="rejected levels per step")
     ap.add_argument("--init", default=None, help="start from this checkpoint's weights (new optimizer and schedule)")
     ap.add_argument("--seed", type=int, default=0)
@@ -137,6 +143,10 @@ def main():
         print(f"away: {len(away)} game-rejected levels with placements to push away from")
         if not len(away):
             away = None
+    # Coordinates are numbers: the away loss compares a rejected one only with other numbers.
+    numbers = [vocab.stoi[t] for t in vocab.itos if t.isdigit()]
+    number_of = torch.full((len(vocab),), -1, dtype=torch.long)
+    number_of[numbers] = torch.arange(len(numbers))
 
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout)
     init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
@@ -223,13 +233,22 @@ def main():
             scaler.scale(loss * weight / args.accum).backward()
             tokens += targets
         if away is not None:
-            ax, ay = away.batch(args.away_batch, device)
+            ax, ay = away.batch(args.away_batch, args.cond_drop, device)
             with amp:
                 logits, _ = model(ax)
             mask = ay != -100
-            p = logits.float().softmax(-1).gather(-1, ay.clamp(min=0).unsqueeze(-1)).squeeze(-1)
-            away_loss = -torch.log((1 - p[mask]).clamp(min=1e-6)).mean()
-            scaler.scale(args.away_weight * away_loss).backward()
+            nums = torch.tensor(numbers, device=logits.device)
+            sub = logits[mask].float()[:, nums].softmax(-1)
+            which = number_of.to(logits.device)[ay[mask]]
+            keep = which >= 0
+            p = sub[keep].gather(-1, which[keep].unsqueeze(-1)).squeeze(-1)
+            pushed = -torch.log((1 - p).clamp(min=1e-6))
+            away_loss = pushed.mean()
+            # Each pushed token counts as --away-weight ordinary targets. (Averaged over a few
+            # tokens instead, each weighed ~100 ordinary ones and the model stopped writing real
+            # coordinates altogether.)
+            scale = args.away_weight / max(targets * args.accum, 1)
+            scaler.scale(scale * pushed.sum()).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)

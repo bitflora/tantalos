@@ -42,10 +42,12 @@ AWAY_MINUTES=15 bash train/retrain.sh runs/v4 "+1 hour"   # train, evaluate, che
 Every `retrain.sh` run checks the samples our solver passes in Portal 2's editor
 (`train/ingame.py`; the game must not already be running) and adds the levels the game rejects
 to `data/ingame/invalid.jsonl`. It then trains away from all of them for `AWAY_MINUTES`: they
-are trained on as invalid, repeated, and the tokens that placed each rejected item are pushed
-down when the model is asked for a solvable level (`train.py --away`, an unlikelihood loss).
-That model is evaluated and checked in the game too, and is the run's final model
-(`<out>/away/best.pt`).
+are trained on as invalid, repeated `AWAY_REPEAT` times. That model is evaluated and checked
+in the game too, and is the run's final model (`<out>/away/best.pt`) unless its solvable share
+fell more than 3 points. An unlikelihood loss on the tokens that placed each rejected item
+(`AWAY_LOSS=1`, `train.py --away`) is off: on the first overnight run it taught the model to
+stop writing real coordinates (0% of its levels parsed), because most rejections are two
+items colliding in normal places, so it pushed normal placements down.
 `train.py --until 07:40` trains to a clock time, with the learning-rate schedule spread over the
 time left, and `--init CKPT` starts from another run's weights. While training it asks Windows
 not to sleep; a closed lid still sleeps. On this laptop the GPU throttles at about 87 °C, and
