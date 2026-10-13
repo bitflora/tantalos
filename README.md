@@ -157,7 +157,8 @@ successors in reused buffers, from per-region lists of edges, targets and button
 data that labels levels about 15 times faster than hashing and cloning `State`s did, with
 identical results (checked state by state against the old code).
 
-- **Turrets** shoot within a cone. Regions split where the set of turrets that can shoot
+- **Turrets** shoot within a cone around the way they look, which is their `Facing` + 180°
+  (the Puzzle Maker's turret instance turns the npc round; checked in the game). Regions split where the set of turrets that can shoot
   changes, so walking out of a turret's sight is a move. Conservative rules never go where a
   live turret can shoot; liberal ones run through but do nothing else there. A turret is knocked
   over from its own cell or one beside it, by a cube landing on it, or by a portal opening in

@@ -352,8 +352,9 @@ impl Builder {
         self.add("ITEM_GOO", cell, Dir::PosZ, &[], &[])
     }
 
-    /// A turret on the floor of `cell`, facing `yaw` degrees (0 = +x, 90 = +y). Copies the
-    /// style map's turrets: no properties, the yaw in `Facing`.
+    /// A turret on the floor of `cell` with `Facing` yaw `yaw` degrees (0 = +x, 90 = +y); in
+    /// the game it looks the opposite way (`Turret::look_yaw`). Copies the style map's
+    /// turrets: no properties, the yaw in `Facing`.
     pub fn turret(&mut self, cell: Cell, yaw: i32) -> i32 {
         let t = self.add("ITEM_TURRET", cell, Dir::PosZ, &[], &[]);
         self.items[t as usize].set("Facing", format!("0 {yaw} 0"));

@@ -1,9 +1,9 @@
 //! Where turrets can shoot (plan.md tier 2).
 //!
 //! Rules (ASSUMPTIONS until measured in-game):
-//! - A turret sees and shoots within `half_angle` degrees either side of its facing
-//!   (horizontally) and `range` voxels, from 0.5 voxel above its floor to the middle of the
-//!   player's cell.
+//! - A turret sees and shoots within `half_angle` degrees either side of the way it looks
+//!   (`Turret::look_yaw`: its .p2c Facing + 180°, checked in the game) horizontally and `range`
+//!   voxels, from 0.5 voxel above its floor to the middle of the player's cell.
 //! - Solid voxels and glass stop bullets; grating does only if `grating_blocks`. Fizzlers and
 //!   laser fields don't.
 //! - Standing anywhere a live turret can shoot is deadly. A turret is out for good once
@@ -46,7 +46,7 @@ fn sees(level: &Level, sight: TurretSight, t: &Turret, c: Cell) -> bool {
     if dist > sight.range || flat == 0.0 {
         return false;
     }
-    let yaw = t.yaw.to_radians();
+    let yaw = t.look_yaw().to_radians();
     let cos = (v[0] * yaw.cos() + v[1] * yaw.sin()) / flat;
     if cos < sight.half_angle.to_radians().cos() - 1e-9 {
         return false;

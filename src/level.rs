@@ -218,8 +218,19 @@ impl PlacedItem {
 pub struct Turret {
     pub item: i32,
     pub cell: Cell,
-    /// Degrees; 0 faces +x, 90 faces +y.
+    /// The item's `Facing` yaw in degrees (0 = +x, 90 = +y), as in the .p2c and the tokens.
+    /// The turret looks the other way: see `look_yaw`.
     pub yaw: f64,
+}
+
+impl Turret {
+    /// Where the turret looks and shoots, in degrees. The Puzzle Maker's turret instance
+    /// (sdk_content/maps/instances/p2editor/turret.vmf) turns its npc 180° from the item's
+    /// Facing; checked in the game 2026-10-13: Facing 0 shoots a player 3 cells towards -x and
+    /// ignores one towards +x.
+    pub fn look_yaw(&self) -> f64 {
+        self.yaw + 180.0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

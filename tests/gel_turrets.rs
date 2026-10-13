@@ -53,7 +53,7 @@ fn a_turret_facing_the_entry_blocks_it() {
     b.carve([0, 0, 1], [7, 2, 3]);
     b.entry([0, 1, 1], Dir::PosX);
     b.exit([7, 1, 1], Dir::NegX);
-    b.turret([5, 1, 1], 180);
+    b.turret([5, 1, 1], 0); // looks -x (Facing + 180)
     let p = b.build();
     assert!(plan(&p, Mode::Conservative).is_none());
     // Glass between them stops the bullets; going round it is still in the line of fire.
@@ -61,7 +61,7 @@ fn a_turret_facing_the_entry_blocks_it() {
     b.carve([0, 0, 1], [7, 2, 3]);
     b.entry([0, 1, 1], Dir::PosX);
     b.exit([3, 0, 1], Dir::PosY);
-    b.turret([5, 1, 1], 180);
+    b.turret([5, 1, 1], 0); // looks -x (Facing + 180)
     b.glass([4, 0, 1], Dir::PosX, Dir::PosY, 0, 2, 2, false);
     assert!(plan(&b.build(), Mode::Conservative).is_some());
 }
@@ -74,7 +74,7 @@ fn cubes_and_portals_knock_turrets_over() {
     b.paint([0, 0, 1], [0, 2, 3], Dir::NegX, true);
     b.entry([0, 1, 1], Dir::PosX);
     b.exit([7, 1, 1], Dir::NegX);
-    b.turret([5, 1, 1], 0);
+    b.turret([5, 1, 1], 180); // looks +x, away from the player
     let p = b.build();
     let level = Level::from_puzzle(&p);
     let graph = RegionGraph::build(&level);

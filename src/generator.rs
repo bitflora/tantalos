@@ -72,7 +72,8 @@ pub enum Feature {
     /// A one-voxel slab at height `z` over the box: a floor above, open space below. Columns
     /// without two open voxels both above and below it are left out.
     Balcony { min: [i32; 2], max: [i32; 2], z: i32 },
-    /// A turret on this column's floor facing `facing` × 45° (0 = +x).
+    /// A turret on this column's floor with `Facing` `facing` × 45° (0 = +x; it looks the
+    /// opposite way, see `Turret::look_yaw`).
     Turret { at: [i32; 2], facing: i32 },
     /// Gel poured onto this column's floor from the ceiling above. `kind`: 0 repulsion,
     /// 1 propulsion, 2 conversion, 3 water. It pours from the start unless a button drives it.

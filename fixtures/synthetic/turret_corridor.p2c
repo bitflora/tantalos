@@ -236,7 +236,7 @@
 			"VoxelPos"		"2 1 1"
 			"LocalPos"		"0 0 0"
 			"Angles"		"0 0 0"
-			"Facing"		"0 0 0"
+			"Facing"		"0 180 0"
 			"ConnectionVisiblity"		"0"
 		}
 	}

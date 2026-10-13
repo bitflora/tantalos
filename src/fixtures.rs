@@ -238,7 +238,7 @@ pub fn turret_corridor() -> Puzzle {
     b.carve([0, 0, 1], [7, 2, 3]);
     b.entry([0, 1, 1], Dir::PosX);
     b.exit([7, 1, 1], Dir::NegX);
-    b.turret([2, 1, 1], 0);
+    b.turret([2, 1, 1], 180); // looks +x (Facing + 180)
     b.build()
 }
 
