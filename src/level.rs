@@ -660,6 +660,13 @@ impl Level {
     /// Mounted items whose cell isn't open or that have nothing solid behind them, items the
     /// editor would mark misplaced (`editor`), and barriers that couldn't be decoded.
     pub fn mount_problems(&self) -> Vec<String> {
+        self.mount_problems_with(true)
+    }
+
+    /// `mount_problems`, optionally without our model of the editor's rules: for levels the
+    /// game's own editor already accepted (published Workshop puzzles), where its flags are
+    /// only false positives.
+    pub fn mount_problems_with(&self, editor_rules: bool) -> Vec<String> {
         let mut out: Vec<String> = self
             .items
             .iter()
@@ -690,7 +697,9 @@ impl Level {
             })
             .collect();
         // What the Puzzle Maker itself would refuse (misplaced items it shows in red).
-        out.extend(crate::editor::editor_problems(self));
+        if editor_rules {
+            out.extend(crate::editor::editor_problems(self));
+        }
         out.extend(self.decode_problems.iter().cloned());
         out
     }

@@ -22,10 +22,12 @@ const USAGE: &str = "usage:
   glados dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
                                 labelled token sequences as JSONL, and vocab.txt beside it
                                 (default data/levels-<seed>.jsonl)
-  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [FILE]
+  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [FILE]
                                 decode and solve one token sequence per line of FILE (or
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
-                                --p2c-all every one that parsed
+                                --p2c-all every one that parsed. --editor-rules off: don't
+                                call levels invalid for our model of the editor's rules
+                                (for levels the game's editor accepted, e.g. the Workshop)
   glados editor <file.p2c|dir>...
                                 items the Puzzle Maker would mark invalid, one JSON line per file
   glados route <file.p2c>       the conservative plan made concrete for playing it in the game:
@@ -485,10 +487,18 @@ fn run_score(args: &[String]) -> Result<()> {
     let mut budget = 50_000;
     let mut p2c_dir = None;
     let mut all = false;
+    let mut editor_rules = true;
     let mut rest = Vec::new();
     for (flag, value) in flags(args, &mut rest)? {
         match flag {
             "--budget" => budget = parse(flag, value)?,
+            "--editor-rules" => {
+                editor_rules = match value {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("--editor-rules: on or off, not {value}").into()),
+                }
+            }
             "--p2c" => p2c_dir = Some(PathBuf::from(value)),
             "--p2c-all" => {
                 p2c_dir = Some(PathBuf::from(value));
@@ -538,7 +548,7 @@ fn run_score(args: &[String]) -> Result<()> {
                     let tokens = encoded.map_or(String::new(), |t| {
                         format!("\"tokens\":{},", dataset::json_str(&t))
                     });
-                    let label = dataset::label(&p, budget, i as u64);
+                    let label = dataset::label_with(&p, budget, i as u64, editor_rules);
                     let keep =
                         (all || matches!(label, dataset::Label::Solvable { .. })).then_some(p);
                     (

@@ -108,8 +108,13 @@ impl Label {
 /// Judges `puzzle` in both modes and, if it's solvable, measures it. `seed` drives the random
 /// players in the metrics.
 pub fn label(puzzle: &Puzzle, budget: usize, seed: u64) -> Label {
+    label_with(puzzle, budget, seed, true)
+}
+
+/// `label`, optionally skipping our editor rules (see `Level::mount_problems_with`).
+pub fn label_with(puzzle: &Puzzle, budget: usize, seed: u64, editor_rules: bool) -> Label {
     let level = Level::from_puzzle(puzzle);
-    let problems = level.mount_problems();
+    let problems = level.mount_problems_with(editor_rules);
     if !problems.is_empty() {
         return Label::Invalid(problems.join("; "));
     }
