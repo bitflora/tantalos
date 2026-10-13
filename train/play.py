@@ -219,14 +219,36 @@ class Game:
         return None
 
     def let_go(self):
-        """Drops the held cube (use), checking it went; True if it did."""
+        """Drops the held cube (use), checking it went; True if it did. Where the cube ends up
+        doesn't tell (one let go onto a button rests about where a held one hangs, and pressing
+        use again would pick it back up), so glance up: a held cube follows the view."""
         for _ in range(2):
             self.tap("use", 0.15)
-            time.sleep(1.2)
-            if self.holding(self.obs()) is None:
+            time.sleep(1.0)
+            if self.held_id is None:
+                return True
+            before = next((c for c in self.obs()["cubes"] if c["id"] == self.held_id), None)
+            if before is None:  # gone (fizzled, dissolved): not held any more
+                self.held_id = None
+                return True
+            if not self.follows_view(self.held_id):
                 self.held_id = None
                 return True
         return False
+
+    def follows_view(self, cube_id):
+        """Whether the player holds this cube: glance up and see if it comes along (where a
+        cube is doesn't tell; a held one can hang just where a loose one lies)."""
+        before = next((c for c in self.obs()["cubes"] if c["id"] == cube_id), None)
+        if before is None:
+            return False
+        pitch, yaw = self.pitch, self.yaw
+        self.look(pitch - 30, yaw)
+        time.sleep(0.4)
+        after = next((c for c in self.obs()["cubes"] if c["id"] == cube_id), None)
+        self.look(pitch, yaw)
+        time.sleep(0.4)  # a held cube swings back down
+        return after is not None and math.dist(after["o"], before["o"]) >= 12
 
     def nearest_cube(self, s, p, within=1e9, skip=()):
         best = min((c for c in s["cubes"] if c["id"] not in skip),
@@ -494,10 +516,12 @@ class Game:
             time.sleep(0.4)
             s = self.obs()
             now = next((c for c in s["cubes"] if c["id"] == cube["id"]), None)
-            # Picked up: it moved (lifted toward the view) and hangs in front of the eye.
-            if now is not None and math.dist(now["o"], cube["o"]) > 8 and math.dist(now["o"], s["eye"]) < 120:
+            # Picked up: it comes along when the view moves. (Moving a little isn't enough: a
+            # cube just dropped, or bumped by the player, moves on its own.)
+            if now is not None and self.follows_view(now["id"]):
+                now = next((c for c in self.obs()["cubes"] if c["id"] == cube["id"]), now)
                 self.held_id = now["id"]
-                self.hold_dist = math.dist(now["o"], s["eye"])
+                self.hold_dist = math.dist(now["o"], self.obs()["eye"])
                 return True
         return False
 
@@ -535,7 +559,31 @@ class Game:
 
     def act_putdown(self, leg):
         target = self.floor(leg["at"])
-        return self.place_cube(target, 14 if leg["button"] else 40, self.world(leg["look"]))
+        return self.set_down(target, 14 if leg["button"] else 40)
+
+    def set_down(self, target, tol, height=36.0):
+        """Puts the held cube down on `target` (a floor point) from a held cube's reach away,
+        facing it and looking down only so far that the cube hangs `height` over it. (Lining
+        it up by looking at the target itself walks the player onto it, looking steeply down,
+        and a cube held against the player that way won't let go.)"""
+        for _ in range(8):
+            s = self.obs()
+            cube = self.holding(s)
+            if cube is None:
+                return False
+            if hdist(cube["o"], target) < tol:
+                break
+            d = hdist(s["o"], target)
+            if d > 16:
+                u = ((target[0] - s["o"][0]) / d, (target[1] - s["o"][1]) / d)
+            else:  # on top of it: back off the way we're facing
+                u = (math.cos(math.radians(self.yaw)), math.sin(math.radians(self.yaw)))
+            dz = s["eye"][2] - (target[2] + height)
+            reach = math.sqrt(max(self.hold_dist ** 2 - dz ** 2, 1.0))
+            self.turn(math.degrees(math.atan2(dz, reach)), math.degrees(math.atan2(u[1], u[0])))
+            self.shift_to([target[0] - u[0] * reach, target[1] - u[1] * reach])
+            time.sleep(0.2)
+        return self.let_go()
 
     def act_toss(self, leg):
         edge, d = leg["edge"], DIRS[leg["dir"]]
