@@ -19,6 +19,9 @@ the end unless --keep. For a game you started yourself, add
 `-insecure -netconport PORT -netconpassword PW` to its launch options and pass --port and
 --password. --spike checks the console, VScript, coordinates, movement and the commands the
 player uses on the first level, and prints what it found instead of playing.
+
+Keep the game window focused while it plays: in the background, a level built from the console
+never starts (unlit, entry door shut, droppers holding their cubes), and arrival gets stuck.
 """
 import argparse, json, math, re, subprocess, sys, time
 from pathlib import Path
@@ -106,6 +109,10 @@ printl("GLADOS_SCRIPT loaded")
 
 class Stuck(Exception):
     """A move that didn't get where it was going."""
+
+
+class InvalidLevel(Exception):
+    """A level the editor won't build."""
 
 
 # --- geometry ------------------------------------------------------------------------------
@@ -580,10 +587,11 @@ class Game:
         self.act_press(leg)
         start = time.time()
         self.walk_cells(leg["path"], tol=24)
-        if leg["escape"]:
-            self.act_exit({"normal": self.exit_normal})
         took = time.time() - start
         print(f"    dash took {took:.1f} s of {leg['seconds']} s", flush=True)
+        if leg["escape"]:
+            # The timer only has to last to the door; what counts is getting out.
+            return self.act_exit({"normal": self.exit_normal})
         return took <= leg["seconds"]
 
     def act_knock(self, leg):
@@ -651,6 +659,11 @@ class Game:
             self.held.discard("forward")
             return True
         self.release("forward")
+        if self.jumped:
+            # Out: leave before the elevator ends the level. A preview built from the console
+            # has no editor session to go back to, so the level change shuts the server down
+            # and leaves a modal "Disconnected" dialog that blocks reopening the editor.
+            self.con.send("disconnect")
         return self.jumped
 
     # --- checking and putting right ----------------------------------------------------
@@ -674,7 +687,10 @@ class Game:
                 continue
             here = next((c for c in free if self.in_cell(c["o"], want, slack=16)), None)
             if here is None:
-                out.append(f"no cube in cell {want}")
+                f = self.floor(want)
+                near = min(free, key=lambda c: math.dist(c["o"], f), default=None)
+                out.append(f"no cube in cell {want}" + (
+                    "" if near is None else f" (nearest at {fmt(near['o'])}, cell floor {fmt(f)})"))
             else:
                 free.remove(here)
         return out
@@ -769,6 +785,11 @@ def load_level(con, path, timeout=240):
         raise GameUnavailable(f"the editor didn't load {path}: {out[-300:]}")
     portal2.VMF.unlink(missing_ok=True)
     exported = con.ask(["puzzlemaker_export glados_check"], 30) or ""
+    invalid = [l.split("INVALID ITEM:", 1)[1].strip() for l in exported.splitlines() if "INVALID ITEM:" in l]
+    if invalid:
+        # Building it would only stop at a modal "Build Failed" dialog, which blocks the editor
+        # until someone clicks it.
+        raise InvalidLevel("the editor marks items invalid: " + "; ".join(invalid))
     con.send("puzzlemaker_compile_and_preview")
     if con.until(lambda l: "launching map!" in l, timeout) is None:
         raise GameUnavailable("the level didn't build (no \"launching map!\" after compile_and_preview)")
@@ -902,6 +923,8 @@ def play(game, head, legs):
         problems = [] if exit_leg else game.problems(leg["after"], slack)
         if ok and not problems:
             status = "ok"
+        elif exit_leg and not ok:
+            status = "failed"  # didn't get out of the level
         elif not problems and not why:
             status = "unconfirmed"  # the action couldn't see it work; nothing to put right
         elif exit_leg:
@@ -995,7 +1018,11 @@ def main():
             if i:
                 open_editor(con)
             print(f"{path}: \"{head['title']}\", {len(legs)} legs", flush=True)
-            exported = load_level(con, path)
+            try:
+                exported = load_level(con, path)
+            except InvalidLevel as e:
+                print(f"{path}: invalid in the editor: {e}", flush=True)
+                continue
             game = Game(con, calibrate(head) or (0.0, 0.0, 0.0), math.inf if a.fast else TURN_RATE)
             if a.slow != 1.0:
                 con.send(f"host_timescale {a.slow}")
