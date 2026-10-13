@@ -219,6 +219,18 @@ Rough estimates, assuming ~30k cached context + ~2k new input + ~1–3k output p
 
 **Hardware:** gaming PC runs Portal 2 + OBS (NVENC encode) easily. ~6 Mbps upload for 1080p60. Harness is light (API calls). LLM cost >> hardware cost.
 
+## TODO: raise Workshop yield
+
+Support these, in rough order of how many top-rated puzzles they block (1,798-puzzle crawl, 2026-10-12):
+- **Lasers**: emitters, catchers, relays (`laseremit`, `lasercatch`, `laserrelay`), and reflection cubes redirecting them.
+- **Panels**: angled panels (`angledPanel`, `angledClearPanel`) and flip panels (`flipPanel`).
+- **Buttons wired to cube droppers**: currently rejected as "wired to cubedropperN". Needs a
+  `> dropper N` target in the tokens and a solver rule for re-dropping.
+- **Wall-mounted gel droppers**: currently rejected as "gel dropper not on a ceiling". Gel
+  sprayed sideways, not just poured onto the floor below.
+
+Each one needs a token in src/tokens.rs, decoding in src/level.rs, solver support, and a matching rule in tools/workshop/convert.py.
+
 ### Phases (add after phase 5)
 | Phase | Work | Est. |
 |---|---|---|
