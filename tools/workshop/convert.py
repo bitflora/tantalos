@@ -10,12 +10,22 @@ Puzzle Maker's compiler leaves the puzzle readable in the map:
 - Every item instance is named <kind><item index>, e.g. `button23-proxy`, `barrierhazard8_brush`.
   Logic entities in an instance keep the instance's angles, so they give the item's rotation;
   the item's cell is floor((anchor origin + its up) / 128) for a suitable anchor entity.
-- Buttons drive items through their instance's func_instance_io_proxy outputs.
+- Buttons, laser catchers and relays drive items through their instance's
+  func_instance_io_proxy outputs (a funnel's inputs 3 and 4 reverse it).
 - Goo, glass and grating aren't instances: they're water, window and grate brushes.
+- Lasers, bridges and funnels: the prop's origin is 16 units into the wall, its forward the way
+  it fires or projects (a bridge's walkable side is its up); catchers likewise face out of the
+  wall. `_center` models are centred, others offset (toward wherever the origin is off the
+  face's middle). Faith plates: the plate's arm and its trigger_catapult's launch target (an
+  info_target, or a helper trigger launching straight up). Panels and stairs: their arms and
+  steps, with the instance's angles (local +x: tilt / rising direction) and their branches'
+  InitialValue. Pistons: the platform's func_movelinear and its level counters. Rails: the
+  track's func_movelinear (movedir, movedistance) from its model's cell. Loose cubes: `cube<N>`
+  instances' prop_weighted_cube (CubeType).
 
-Only what the token format can say is recovered. Anything else (angled panels, lasers, light
-bridges, faith plates, loose cubes, BEEmod items, ...) makes the map unsupported, with the reason.
-Checked against compiled maps of known .p2c files: see tools/workshop/README.md.
+Only what the token format can say is recovered: BEEmod items and the like make the map
+unsupported, with the reason. Checked against compiled maps of known .p2c files: see
+tools/workshop/README.md.
 """
 import argparse
 import collections
@@ -38,12 +48,15 @@ UP = (0, 0, 1)
 DOWN = (0, 0, -1)
 
 # Instances that are puzzle items we can express.
-ITEMS = {"doorentry", "doorexit", "button", "cubedropper", "barrierhazard", "paintdropper", "turret"}
+ITEMS = {"doorentry", "doorexit", "button", "cubedropper", "barrierhazard", "paintdropper", "turret",
+         "cube", "laseremit", "lasercatch", "laserrelay", "catapult", "bridge", "tbeam",
+         "angledPanel", "angledClearPanel", "flipPanel", "stairs", "pistonlift", "raillift"}
 # Instances the compiler adds around every chamber, or that only decorate (antlines, signs).
 DECOR = {
     "InstanceAuto", "arrival_sign_", "departure_sign_", "elevator_", "environment_act", "relay_spawn_",
     "observationroom", "indicator_panel", "indicator_toggle", "entrance_airlock_door",
     "entrance_airlock_door_", "exit_airlock_door", "exit_airlock_door_", "placement_helper",
+    "target",  # a faith plate target's marker; the plate's trigger names the real one
 }
 INSTANCE = re.compile(r"@?([A-Za-z_]+?)(\d+)(?=[-_]|$)")
 LOGIC = {"logic_relay", "logic_branch", "logic_auto", "logic_case", "math_counter", "func_instance_io_proxy",
@@ -106,12 +119,16 @@ class Entity:
 
     def outputs(self):
         """(output, target entity name) for each I/O connection."""
+        return [(k, t) for k, t, _ in self.connections()]
+
+    def connections(self):
+        """(output, target entity name, input) for each I/O connection."""
         out = []
         for k, v in self.kv:
             sep = "\x1b" if "\x1b" in v else ","
             parts = v.split(sep)
             if k.startswith("On") and len(parts) >= 2:
-                out.append((k, parts[0]))
+                out.append((k, parts[0], parts[1]))
         return out
 
 
@@ -319,6 +336,9 @@ def convert(bsp):
     def is_open(c):
         return not leaf([CELL * v + CELL / 2 for v in c]) & CONTENTS_SOLID
 
+    # The later items now: their backs block the flood.
+    later = later_items(bsp, ents, by_kind, [], blocked, is_open)
+
     open_cells = set()
 
     def flood(start):
@@ -393,7 +413,7 @@ def convert(bsp):
         toks_gels.append((dropper, PAINT_KINDS[ptype], on))
         item_cells.append(dropper)
 
-    toks_droppers = []
+    toks_droppers, dropper_insts = [], []
     for inst in by_kind["cubedropper"]:
         if inst.up() != DOWN:
             raise Unsupported(f"{inst.name}: cube dropper not on a ceiling")
@@ -401,13 +421,20 @@ def convert(bsp):
         kind = int(inst.one("math_counter", "-counter_cube_type").d.get("startvalue", "0"))
         if not 0 <= kind < len(CUBE_KINDS):
             raise Unsupported(f"{inst.name}: cube type {kind}")
-        toks_droppers.append((cell, CUBE_KINDS[kind]))
+        # Auto drop off: the dropper only drops when its inputs first come on.
+        auto = inst.direct("logic_relay", "-@relay_spawn_on_entrance") or inst.direct(
+            "logic_relay", "relay_spawn_on_entrance")
+        wait = any(e.d.get("StartDisabled", "0") == "1" for e in auto)
+        toks_droppers.append((cell, CUBE_KINDS[kind], wait))
+        dropper_insts.append(inst)
         item_cells.append(cell)
+
+    dropper_index = {inst.index: i for i, inst in enumerate(dropper_insts)}
 
     def targets(inst):
         out = []
         for proxy in inst.direct("func_instance_io_proxy", "-proxy"):
-            for _, target in proxy.outputs():
+            for _, target, input_ in proxy.connections():
                 m = INSTANCE.match(target)
                 if not m:
                     raise Unsupported(f"{inst.name}: wired to {target}")
@@ -420,6 +447,13 @@ def convert(bsp):
                     t = ("field", field_index[idx])
                 elif kind == "paintdropper" and idx in gel_index:
                     t = ("gel", gel_index[idx])
+                elif kind == "cubedropper" and idx in dropper_index:
+                    t = ("dropper", dropper_index[idx])
+                elif kind == "tbeam" and input_ in ("ProxyRelay3", "ProxyRelay4") \
+                        and (kind, idx) in later["targets"]:
+                    t = ("polarity", later["targets"][(kind, idx)][1])
+                elif (kind, idx) in later["targets"]:
+                    t = later["targets"][(kind, idx)]
                 else:
                     raise Unsupported(f"{inst.name}: wired to {kind}{idx}")
                 if t not in out:
@@ -457,17 +491,41 @@ def convert(bsp):
         t = inst.one("npc_portal_turret_floor", "-turret")
         if rotate(t.angles(), (0, 0, 1)) != UP:
             raise Unsupported(f"{inst.name}: turret not upright")
-        # The .p2c's Facing (what Level reads) is the npc's yaw + 180.
+        # The .p2c's Facing (what Level reads) is the npc's yaw + 180, to the nearest 45° the
+        # tokens can say (well inside the solver's sight cones).
         yaw = (t.angles()[1] + 180) % 360
         f = round(yaw / 45)
-        if abs(yaw - 45 * f) > 0.5:
-            raise Unsupported(f"{inst.name}: turret yaw {yaw}")
         cell = cell_of(add(t.origin(), UP))
         toks_turrets.append((cell, f % 8))
         item_cells.append(cell)
 
     for c in item_cells:
         flood(c)
+    later_cells = [c for c in later["cells"]]
+    for c in later_cells:
+        if c not in open_cells and is_open(c) and c not in later["embedded"]:
+            flood(c)
+    open_cells -= later["embedded"]
+    # Faith plate targets: in an open cell. A plate throwing straight up throws no higher than
+    # the open column over it; one with no room over it is no use, and left out.
+    keep = []
+    for word, fields, sender in later["items"]:
+        if word == "plate":
+            c, t = fields[0], fields[2]
+            if (t, c) in later["vertical"]:
+                top = c
+                while add(top, UP) in open_cells and top[2] < t[2]:
+                    top = add(top, UP)
+                if top == c:
+                    continue
+                fields = [c, fields[1], top, fields[3]]
+            elif t not in open_cells:
+                near = [add(t, d) for d in DIRS if add(t, d) in open_cells]
+                if not near:
+                    raise Unsupported(f"faith plate target {t} isn't in the chamber")
+                fields = [c, fields[1], near[0], fields[3]]
+        keep.append((word, fields, sender))
+    later["items"] = keep
 
     # Gel lands on the floor under its dropper.
     gels = []
@@ -550,12 +608,17 @@ def convert(bsp):
             out += [f"{k}{n}" for k, n in runs] + ["|"]
         out.append("/")
 
+    panel_white = later["white"]
     for c in sorted(open_cells):
         for d in DIRS:
             if add(c, d) in open_cells:
                 continue
-            mat = world.surface(c, d)
-            if mat and "white" in mat:
+            if (c, d) in panel_white:
+                white = panel_white[(c, d)]
+            else:
+                mat = world.surface(c, d)
+                white = bool(mat and "white" in mat)
+            if white:
                 out += ["white", DIR_TOKEN[d]] + loc(c) + loc(c)
 
     out += ["entry"] + loc(entry) + [DIR_TOKEN[entry_n]]
@@ -581,8 +644,8 @@ def convert(bsp):
         out += [kind] + loc(anchor) + [DIR_TOKEN[n], DIR_TOKEN[along], str(length), "on" if on else "off"]
     for c, kind, on in gels:
         out += ["gel"] + loc(c) + ["+z", kind, "stream", "on" if on else "off"]
-    for c, kind in toks_droppers:
-        out += ["dropper"] + loc(c) + [kind]
+    for c, kind, wait in toks_droppers:
+        out += ["dropper"] + loc(c) + [kind] + (["wait"] if wait else [])
 
     def wires(ts):
         w = []
@@ -596,7 +659,246 @@ def convert(bsp):
         out += ["pedestal"] + loc(c) + [timer] + wires(ts)
     for c, f in toks_turrets:
         out += ["turret"] + loc(c) + [str(f)]
+    for word, fields, sender in later["items"]:
+        toks = [word]
+        for f in fields:
+            toks += loc(f) if isinstance(f, tuple) and len(f) == 3 and not isinstance(f[0], str) \
+                else [f] if isinstance(f, str) else [str(f)]
+        out += toks
+        if sender is not None:
+            out += wires(targets(sender))
     return " ".join(out)
+
+
+def dir_of(angles, v=(1, 0, 0), what="item"):
+    d = rotate(angles, v)
+    if d is None:
+        raise Unsupported(f"{what}: rotation isn't axis-aligned")
+    return d
+
+
+def model_face_material(bsp, ent, normal):
+    """Material of the outermost side facing `normal` of a brush entity's model."""
+    m = ent.d.get("model", "")
+    if not m.startswith("*"):
+        return None
+    all_brushes = bsp.brushes()
+    o = ent.origin()
+    best = None
+    for i in bsp.model_brushes(int(m[1:])):
+        _, sides = all_brushes[i]
+        for n, dist, mat in sides:
+            if all(abs(n[a] - normal[a]) < 0.01 for a in range(3)):
+                along = dist + sum(normal[a] * o[a] for a in range(3))
+                if not mat.lower().startswith("tools/") and (best is None or along > best[0]):
+                    best = (along, mat.lower())
+    return best[1] if best else None
+
+
+def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
+    """The items added to the tokens after turrets: their tokens (word, fields: cells as 3-tuples,
+    words, numbers; and the instance whose wires follow), the wire targets they are (kind, index)
+    -> (target word, position), their cells to flood from, and white faces they decide."""
+    by_name = {e.name: e for e in ents}
+    items, targets, cells, white, embedded = [], {}, [], {}, set()
+
+    def branch(inst, suffix="-branch_toggle", default="1"):
+        es = inst.direct("logic_branch", suffix)
+        return (es[0].d.get("InitialValue", default) if es else default) == "1"
+
+    def embed(c, d, depth=1):
+        """The item's back: don't flood into the hole it sits in, which is solid in the
+        Puzzle Maker's voxels."""
+        blocked.add((c, d))
+        for k in range(1, depth + 1):
+            embedded.add(add(c, d, k))
+
+    def section(word, rows, target=None):
+        rows.sort(key=lambda r: [str(x) for x in r[0]])
+        for i, (fields, inst, sends) in enumerate(rows):
+            items.append((word, fields, inst if sends else None))
+            if target:
+                targets[(inst.kind, inst.index)] = (target, i)
+
+    def off_centre(origin, cell, n):
+        """The side of the face (against n) the origin sits toward, or "center"."""
+        centre = [CELL * cell[a] + CELL / 2 - n[a] * CELL / 2 for a in range(3)]
+        dev = [origin[a] - centre[a] for a in range(3)]
+        a = max((a for a in range(3) if not n[a]), key=lambda a: abs(dev[a]))
+        if abs(dev[a]) < 16:
+            return "center"
+        d = [0, 0, 0]
+        d[a] = 1 if dev[a] > 0 else -1
+        return DIR_TOKEN[tuple(d)]
+
+    rows = []
+    for inst in by_kind["cube"]:
+        e = inst.one("prop_weighted_cube", "-cube")
+        kind = int(e.d.get("CubeType", "0"))
+        if not 0 <= kind < len(CUBE_KINDS):
+            raise Unsupported(f"{inst.name}: cube type {kind}")
+        c = cell_of(e.origin())
+        rows.append(([c, CUBE_KINDS[kind]], inst, False))
+        cells.append(c)
+    section("cube", rows)
+
+    for word, kind, cls, suffix in [("laser", "laseremit", "env_portal_laser", "-laser"),
+                                    ("catcher", "lasercatch", "prop_laser_catcher", "-laser_catcher"),
+                                    ("relay", "laserrelay", "prop_laser_relay", "-relay")]:
+        rows = []
+        for inst in by_kind[kind]:
+            e = inst.one(cls, suffix)
+            if word == "relay":
+                n = dir_of(e.angles(), (0, 0, 1), inst.name)
+                c = cell_of(add(e.origin(), n, 8))
+            else:
+                n = dir_of(e.angles(), (1, 0, 0), inst.name)
+                c = cell_of(add(e.origin(), n, 32))
+            offset = "center" if "center" in e.d.get("model", "") or word == "relay"                 else off_centre(e.origin(), c, n)
+            fields = [c, DIR_TOKEN[n], offset]
+            if word == "laser":
+                fields.append("on" if branch(inst) else "off")
+            rows.append((fields, inst, word != "laser"))
+            cells.append(c)
+            embed(c, tuple(-v for v in n))
+        section(word, rows, "laser" if word == "laser" else None)
+
+    rows, vertical = [], []
+    for inst in by_kind["catapult"]:
+        arm = inst.one("prop_dynamic", "-catapult_arm")
+        n = inst.up()
+        c = inst.anchor_cell(arm, n)
+        trig = inst.one("trigger_catapult", "-trigger")
+        tgt = by_name.get(trig.d.get("launchTarget", ""))
+        if tgt is None:
+            raise Unsupported(f"{inst.name}: no launch target")
+        tn = UP
+        if tgt.cls == "trigger_catapult":
+            # Straight up: as high as the helper's speed throws (`convert` keeps it inside).
+            v = float(tgt.d.get("playerSpeed", "0"))
+            apex = tgt.origin()[2] + v * v / (2 * 600)
+            t = (c[0], c[1], math.floor(apex / CELL))
+            vertical.append((t, c))
+        else:
+            # The target lies on a surface: the cell on its open side, against the surface.
+            o = tgt.origin()
+            t, tn = cell_of(add(o, UP)), UP
+            for a in range(3):
+                if abs(o[a] / CELL - round(o[a] / CELL)) < 0.01:
+                    for sgn in (1, -1):
+                        d = tuple(sgn if i == a else 0 for i in range(3))
+                        c2 = cell_of(add(o, d))
+                        if is_open(c2) and not is_open(cell_of(add(o, d, -1))):
+                            t, tn = c2, d
+        rows.append(([c, DIR_TOKEN[n], t, DIR_TOKEN[tn]], inst, False))
+        cells += [c, t]
+        embed(c, tuple(-v for v in n))
+    section("plate", rows)
+
+    for word, kind, cls, suffix in [("bridge", "bridge", "prop_wall_projector", "-bridge"),
+                                    ("funnel", "tbeam", "prop_tractor_beam", "-tbeam")]:
+        rows = []
+        for inst in by_kind[kind]:
+            e = inst.one(cls, suffix)
+            n = dir_of(e.angles(), (1, 0, 0), inst.name)
+            c = cell_of(add(e.origin(), n, 32))
+            if word == "bridge":
+                side = dir_of(e.angles(), (0, 0, 1), inst.name)
+                fields = [c, DIR_TOKEN[n], DIR_TOKEN[side], "on" if branch(inst) else "off"]
+            else:
+                fields = [c, DIR_TOKEN[n], "on" if branch(inst) else "off"]
+                if branch(inst, "-branch_toggle_polarity", "0"):
+                    fields.append("rev")
+            rows.append((fields, inst, False))
+            cells.append(c)
+            embed(c, tuple(-v for v in n))
+        section(word, rows, word)
+
+    for word, kind in [("panel", "angledPanel"), ("glasspanel", "angledClearPanel")]:
+        rows = []
+        for inst in by_kind[kind]:
+            arms = inst.one("prop_dynamic", "-model_arms")
+            n, tilt = inst.up(), dir_of(inst.angles(), (1, 0, 0), inst.name)
+            c = cell_of(add(arms.origin(), n, 8))
+            m = re.match(r"ramp_(\d+)_deg_open", arms.d.get("DefaultAnim", "ramp_45_deg_open"))
+            angle = int(m.group(1)) if m else 45
+            if angle not in (30, 45, 60, 90):
+                raise Unsupported(f"{inst.name}: angle {angle}")
+            face = (c, tuple(-v for v in n))
+            if word == "panel":
+                tops = [e for e in inst.ents if e.cls == "func_brush" and "panel_top" in e.name]
+                mat = model_face_material(bsp, tops[0], n) if tops else None
+                white[face] = bool(mat and "white" in mat)
+            else:
+                white[face] = False
+            rows.append(([c, DIR_TOKEN[n], DIR_TOKEN[tilt], str(angle // 15),
+                          "on" if branch(inst) else "off"], inst, False))
+            cells.append(c)
+            embed(c, tuple(-v for v in n))
+        section(word, rows, word)
+
+    rows = []
+    for inst in by_kind["flipPanel"]:
+        door = inst.one("func_door_rotating", "-flipping_panel")
+        n = inst.up()
+        c = cell_of(add(door.origin(), n, 20))
+        mat = model_face_material(bsp, door, n)
+        flipped = branch(inst, default="0")
+        # The face's own whiteness is the side out at the start.
+        white[(c, tuple(-v for v in n))] = bool(mat and "white" in mat) != flipped
+        rows.append(([c, DIR_TOKEN[n]], inst, False))
+        cells.append(c)
+        embed(c, tuple(-v for v in n))
+    section("flip", rows, "flip")
+
+    rows = []
+    for inst in by_kind["stairs"]:
+        step1 = inst.one("func_brush", "-brush_step_1")
+        if inst.up() != UP:
+            raise Unsupported(f"{inst.name}: stairs on a wall or ceiling")
+        d = dir_of(inst.angles(), (1, 0, 0), inst.name)
+        c = cell_of(add(step1.origin(), UP, 8))
+        rows.append(([c, DIR_TOKEN[d], "on" if branch(inst) else "off"], inst, False))
+        cells += [c, add(c, d)]
+        embed(c, DOWN)
+        embed(add(c, d), DOWN)
+    section("stairs", rows, "stairs")
+
+    rows = []
+    for inst in by_kind["pistonlift"]:
+        lift = inst.one("func_movelinear", "-lift_platform")
+        n = inst.up()
+        c = cell_of(add(lift.origin(), n, 4))
+        level = lambda suffix, dflt: int(float(next(
+            (e.d.get("startvalue", dflt) for e in inst.direct("math_counter", suffix)), dflt)))
+        lo, hi = level("-counter_bottom_level", "0"), level("-counter_top_level", "1")
+        if not (0 <= lo < hi <= 4):
+            raise Unsupported(f"{inst.name}: levels {lo}..{hi}")
+        up = branch(inst, "-branch_starting_state", "0")
+        rows.append(([c, DIR_TOKEN[n], str(lo), str(hi), "on" if up else "off"], inst, False))
+        cells += [add(c, n, k) for k in range(lo, hi + (n == UP))]
+        embed(c, tuple(-v for v in n), 2)
+    section("piston", rows, "piston")
+
+    rows = []
+    for inst in by_kind["raillift"]:
+        track = inst.one("func_movelinear", "-track_lift_movelinear")
+        model = inst.one("prop_dynamic", "-track_lift_model")
+        d = dir_of(vec(track.d.get("movedir", "0 0 0")), (1, 0, 0), inst.name)
+        n = round(float(track.d.get("movedistance", "0")) / CELL)
+        start = cell_of(add(model.origin(), UP, 4))
+        end = add(start, d, n)
+        oscillate = bool(inst.direct("logic_branch", "-branch_active"))
+        if oscillate:
+            mode = "osc"
+        else:
+            mode = "on" if branch(inst, "-branch", "0") else "off"
+        rows.append(([start, end, mode], inst, False))
+        cells += [add(start, d, k) for k in range(n + 1)]
+    section("rail", rows, "rail")
+
+    return {"items": items, "targets": targets, "cells": cells, "white": white,
+            "embedded": embedded, "vertical": vertical}
 
 
 def main():

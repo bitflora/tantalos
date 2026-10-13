@@ -166,22 +166,62 @@ fn solve(path: &Path) -> Result<()> {
         model.hazards.len(),
         model.portals.classes.len()
     );
+    if !model.beams.is_empty() {
+        let spots: Vec<String> = model
+            .beams
+            .spots
+            .iter()
+            .enumerate()
+            .map(|(k, s)| format!("{:?} {:?}", model.spot_cell(k), s.dir))
+            .collect();
+        println!(
+            "  lasers: {} emitters, {} receivers, {} rays, spots: {}",
+            model.beams.emitters.len(),
+            model.beams.receivers.len(),
+            model.beams.rays.len(),
+            spots.join(", ")
+        );
+    }
+    if !model.devices.is_empty() {
+        println!("  device bits: {:?}", model.devices.bits);
+    }
+    if !model.complete {
+        println!("  (some devices or laser spots couldn't be modelled)");
+    }
     for c in &model.portals.classes {
         let seen: String = (0..model.graph.regions.len())
             .filter(|&r| c.seen_from(r))
             .map(RegionGraph::label)
             .collect();
         let region = |r: Option<usize>| r.map_or('-', RegionGraph::label);
+        let landing = c.flat.landings.first().map(|&(_, l)| l);
+        let mut extra = String::new();
+        if !c.flat.dives.is_empty() {
+            extra += &format!(", dives {:?}", c.flat.dives);
+        }
+        if c.deployed.is_some() {
+            extra += ", on a panel";
+        }
+        if !c.needs.is_always() {
+            extra += ", flips";
+        }
+        if !c.ends.is_empty() || !c.routes.is_empty() {
+            extra += &format!(", projections in {:?} out {:?}", c.ends, c.routes);
+        }
+        if c.beam_end || c.beam_out.is_some() {
+            extra += ", laser";
+        }
         println!(
-            "    {}: {}; enter from {}, land in {}{}, seen from {}",
+            "    {}: {}; enter from {}, land in {}{}, seen from {}{}",
             c.id,
             portals::describe(c),
-            region(c.entry),
-            region(c.landing.map(|l| l.region)),
-            c.landing
+            region(c.flat.entry),
+            region(landing.map(|l| l.region)),
+            landing
                 .and_then(|l| l.button)
                 .map_or(String::new(), |b| format!(" on button {b}")),
-            seen
+            seen,
+            extra
         );
     }
     match &judgement {
@@ -197,9 +237,17 @@ fn solve(path: &Path) -> Result<()> {
             }
             _ => println!("  SOLVABLE, but metrics ran out of state budget"),
         },
-        Judgement::Unsolvable => println!("  UNSOLVABLE (even with liberal rules)"),
+        Judgement::Unsolvable => {
+            println!("  UNSOLVABLE (even with liberal rules)");
+            print_reach(&liberal);
+        }
         Judgement::Uncertain(None) => {
-            println!("  UNCERTAIN (state budget {DEFAULT_MAX_STATES} hit)")
+            if liberal.complete {
+                println!("  UNCERTAIN (state budget {DEFAULT_MAX_STATES} hit)");
+            } else {
+                println!("  UNCERTAIN (not everything could be modelled)");
+            }
+            print_reach(&liberal);
         }
         Judgement::Uncertain(Some(plan)) => {
             println!(
@@ -214,6 +262,27 @@ fn solve(path: &Path) -> Result<()> {
     println!("  judged and measured in {:.1?}", start.elapsed());
     println!();
     Ok(())
+}
+
+/// Where the player can get to under liberal rules, for seeing why a level isn't solved.
+fn print_reach(model: &glados::solver::Model) {
+    let space = model.explore(DEFAULT_MAX_STATES);
+    let mut seen = vec![false; model.graph.regions.len()];
+    for i in 0..space.len() {
+        if let Some(r) = space.region(i) {
+            seen[r] = true;
+        }
+    }
+    let reached: String = (0..seen.len())
+        .filter(|&r| seen[r])
+        .map(RegionGraph::label)
+        .collect();
+    println!(
+        "  liberal rules reach regions {reached} in {} states{}; the exit is in {}",
+        space.len(),
+        if space.complete { "" } else { " (budget hit)" },
+        RegionGraph::label(model.exit_region)
+    );
 }
 
 fn print_route(path: &Path) -> Result<()> {

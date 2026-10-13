@@ -106,7 +106,7 @@ fn worked_example_face_classes() {
         .portals
         .classes
         .iter()
-        .map(|c| (c.entry, c.landing, c.faces.len()))
+        .map(|c| (c.flat.entry, c.flat.landings.first().map(|&(_, l)| l), c.faces.len()))
         .collect();
     got.sort();
     let mut want = vec![
@@ -238,11 +238,23 @@ fn real_files_are_rejected_with_reasons() {
             .unwrap()
     };
     let style = load("fixtures/real/1500854111.p2c");
-    assert!(style.contains(&Problem::Unsupported("ITEM_TBEAM (item 62)".into())));
+    assert!(style.contains(&Problem::Unsupported("ITEM_AUTOPORTAL (item 18, 19)".into())));
     assert!(style.iter().all(|p| matches!(p, Problem::Unsupported(_))));
-    // Its turrets and gel are understood.
+    // Every Puzzle Maker item in it is understood; only BEEmod's aren't.
     let text = format!("{style:?}");
-    for item in ["ITEM_TURRET", "ITEM_PAINT_SPLAT", "ITEM_DROPPER_PAINT"] {
+    for item in [
+        "ITEM_TURRET",
+        "ITEM_PAINT_SPLAT",
+        "ITEM_DROPPER_PAINT",
+        "ITEM_TBEAM",
+        "ITEM_LIGHT_BRIDGE",
+        "ITEM_CATAPULT",
+        "ITEM_LASER",
+        "ITEM_PANEL_STAIRS",
+        "ITEM_PISTON_PLATFORM",
+        "ITEM_RAIL_PLATFORM",
+        "ITEM_CUBE",
+    ] {
         assert!(!text.contains(item), "{text}");
     }
     let skybox = load("fixtures/real/1501698868.p2c");

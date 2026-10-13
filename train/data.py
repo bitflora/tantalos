@@ -29,6 +29,11 @@ PAD, BOS, SEP, EOS = range(4)
 
 LEN_BUCKETS = [(0, 0), (1, 2), (3, 4), (5, 7), (8, 11), (12, 10**9)]
 FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo", "turret", "gel", "wall", "balcony"]
+# Items added later, as `<name:yes|no>` groups after all the others: an emitter (`laser`),
+# a catcher or relay (`receiver`), faith plates, bridges, funnels, angled panels (any kind),
+# flip panels, stairs, pistons, rails, and cubes placed without a dropper.
+LATER_FEATURES = ["laser", "receiver", "plate", "bridge", "funnel", "panel", "flip", "stairs",
+                  "piston", "rail", "loosecube"]
 # Floor area (width x depth): small, medium, large, extra large.
 SIZE_BUCKETS = [("s", 49), ("m", 100), ("l", 144), ("xl", 10**9)]
 # Difficulty: the solution's chain depth (steps that each need an earlier one; glados metrics).
@@ -49,8 +54,20 @@ MECHANICS = [
     "leap",
     "conversion",
     "gel_portal",
+    "redirect",
+    "powered",
+    "plate_use",
+    "fling",
+    "bridge_use",
+    "funnel_use",
+    "stairs_use",
+    "platform_use",
+    "panel_use",
+    "projection_portal",
 ]
-MECH_GROUPS = MECHANICS[1:]
+MECH_GROUPS = MECHANICS[1:14]
+# Mechanics added with the later items: their groups come after all the others.
+LATER_MECH_GROUPS = MECHANICS[14:]
 
 # One group per condition; a sequence carries at most one token from each.
 GROUPS = {
@@ -62,6 +79,8 @@ GROUPS = {
     "size": [f"<size:{name}>" for name, _ in SIZE_BUCKETS],
     "diff": [f"<diff:{i}>" for i in range(len(DIFF_BUCKETS))],
     **{m: [f"<{m}:no>", f"<{m}:yes>"] for m in MECH_GROUPS},
+    **{f: [f"<{f}:no>", f"<{f}:yes>"] for f in LATER_FEATURES},
+    **{m: [f"<{m}:no>", f"<{m}:yes>"] for m in LATER_MECH_GROUPS},
 }
 # "Not specified", and the value of a group that doesn't apply (plan length of an unsolvable level).
 ANY = {group: f"<{group}:?>" for group in GROUPS}
@@ -119,7 +138,8 @@ def conditions(record):
             for i, m in enumerate(MECHANICS):
                 if m in GROUPS:
                     out.append(GROUPS[m][(bits >> i) & 1])
-    cubes = level.count("dropper")
+    loose = loose_cubes(level)
+    cubes = level.count("dropper") + loose
     out.append(GROUPS["cubes"][min(cubes, 2)])
     has = set(level)
     wall, balcony = shapes(level)
@@ -136,7 +156,23 @@ def conditions(record):
     if len(level) > 3 and level[0] == "size" and level[1].isdigit() and level[2].isdigit():
         area = int(level[1]) * int(level[2])
         out.append(GROUPS["size"][next(i for i, (_, hi) in enumerate(SIZE_BUCKETS) if area <= hi)])
+    words = {
+        "laser": ["laser"], "receiver": ["catcher", "relay"], "plate": ["plate"],
+        "bridge": ["bridge"], "funnel": ["funnel"], "panel": ["panel", "glasspanel"],
+        "flip": ["flip"], "stairs": ["stairs"], "piston": ["piston"], "rail": ["rail"],
+    }
+    for f in LATER_FEATURES:
+        # Items, not wire targets (`> laser 0`).
+        present = loose > 0 if f == "loosecube" else any(
+            t in words[f] and (i == 0 or level[i - 1] != ">") for i, t in enumerate(level))
+        out.append(GROUPS[f][int(present)])
     return out
+
+
+def loose_cubes(level):
+    """Cubes placed without a dropper: `cube x y z K` (not a `cube` button)."""
+    return sum(1 for i, t in enumerate(level)
+               if t == "cube" and i + 3 < len(level) and all(v.isdigit() for v in level[i + 1:i + 4]))
 
 
 # Item keywords in the level tokens, by the name Portal 2 logs for an invalid item
@@ -146,12 +182,24 @@ GAME_NAMES = {
     "doorexit": ["exit"],
     "button": ["button", "pedestal"],
     "cubedropper": ["dropper"],
-    "cube": ["dropper"],
+    "cube": ["dropper", "cube"],
     "target": ["glass", "grating"],
     "barrierhazard": ["fizzler", "laserfield"],
     "turret": ["turret"],
     "paintsplat": ["gel"],
     "paintdropper": ["gel"],
+    "laseremit": ["laser"],
+    "lasercatch": ["catcher"],
+    "laserrelay": ["relay"],
+    "catapult": ["plate"],
+    "bridge": ["bridge"],
+    "tbeam": ["funnel"],
+    "angledPanel": ["panel"],
+    "angledClearPanel": ["glasspanel"],
+    "flipPanel": ["flip"],
+    "stairs": ["stairs"],
+    "pistonlift": ["piston"],
+    "raillift": ["rail"],
 }
 # Tokens after the keyword that give each item's cells: one cell, or a box (two cells).
 BOX_ITEMS = ("glass", "grating")

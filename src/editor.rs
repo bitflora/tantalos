@@ -12,7 +12,9 @@
 //! pedestal) are left to the in-game check. Turrets and gel (added later) follow
 //! editoritems.txt where it says something (turrets can't anchor on goo, splats can; the paint
 //! dropper's embedded voxels are commented out) and are otherwise assumed to collide with
-//! fields like floor buttons, until in-game checks say otherwise.
+//! fields like floor buttons, until in-game checks say otherwise. So are the items added after
+//! them (lasers, faith plates, bridges, funnels, panels, stairs, pistons, rails), which also
+//! can't anchor on goo, and two of which can't share a cell.
 
 use crate::geom::{rotate, step, Cell, Dir};
 use crate::level::{BarrierKind, ItemKind, Level, PlacedItem};
@@ -42,6 +44,18 @@ pub fn target_name(kind: &ItemKind) -> Option<&'static str> {
         ItemKind::Turret => "turret",
         ItemKind::PaintSplat => "paintsplat",
         ItemKind::PaintDropper => "paintdropper",
+        ItemKind::LaserEmitter => "laseremit",
+        ItemKind::LaserCatcher => "lasercatch",
+        ItemKind::LaserRelay => "laserrelay",
+        ItemKind::FaithPlate => "catapult",
+        ItemKind::LightBridge => "bridge",
+        ItemKind::Funnel => "tbeam",
+        ItemKind::AngledPanel => "angledPanel",
+        ItemKind::GlassPanel => "angledClearPanel",
+        ItemKind::FlipPanel => "flipPanel",
+        ItemKind::Stairs => "stairs",
+        ItemKind::Piston => "pistonlift",
+        ItemKind::Rail => "raillift",
         _ => return None,
     })
 }
@@ -107,12 +121,24 @@ fn pedestal_side(item: &PlacedItem) -> Option<Dir> {
 /// next to face `f`.
 fn hit_by_field(item: &PlacedItem, f: Dir) -> bool {
     match item.kind {
-        // Turrets and gel: not checked in-game yet; assumed to collide like a floor button.
+        // Turrets, gel and later items: not checked in-game yet; assumed to collide like a
+        // floor button.
         ItemKind::FloorButton
         | ItemKind::CubeDropper
         | ItemKind::Turret
         | ItemKind::PaintSplat
-        | ItemKind::PaintDropper => true,
+        | ItemKind::PaintDropper
+        | ItemKind::LaserEmitter
+        | ItemKind::LaserCatcher
+        | ItemKind::LaserRelay
+        | ItemKind::FaithPlate
+        | ItemKind::LightBridge
+        | ItemKind::Funnel
+        | ItemKind::AngledPanel
+        | ItemKind::GlassPanel
+        | ItemKind::FlipPanel
+        | ItemKind::Stairs
+        | ItemKind::Piston => true,
         // Unless the field runs across the door's front.
         ItemKind::EntryDoor | ItemKind::ExitDoor => item.normal != Some(f),
         ItemKind::PedestalButton => pedestal_side(item) == Some(f),
@@ -152,11 +178,77 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
             | ItemKind::ExitDoor
             | ItemKind::Turret
             | ItemKind::PaintDropper
+            | ItemKind::LaserEmitter
+            | ItemKind::LaserCatcher
+            | ItemKind::LaserRelay
+            | ItemKind::FaithPlate
+            | ItemKind::LightBridge
+            | ItemKind::Funnel
+            | ItemKind::AngledPanel
+            | ItemKind::GlassPanel
+            | ItemKind::FlipPanel
+            | ItemKind::Stairs
+            | ItemKind::Piston
                 if goo_items.contains(&it.cell) =>
             {
                 flags.add(it, "in-goo")
             }
             _ => {}
+        }
+    }
+
+    // Later items each take their cell (stairs two): two can't share one, nor stand where a
+    // door, button, dropper or turret does. Items mounted on different faces of a cell (a
+    // laser on a wall over a floor panel) aren't told apart; ASSUMPTION until checked in-game.
+    let mut taken: HashMap<Cell, usize> = HashMap::new();
+    for (i, it) in level.items.iter().enumerate() {
+        let cells: Vec<Cell> = match it.kind {
+            ItemKind::Stairs => match level.stairs.iter().find(|s| s.item == it.index) {
+                Some(s) => vec![s.cell, step(s.cell, s.dir)],
+                None => vec![it.cell],
+            },
+            ItemKind::LaserEmitter
+            | ItemKind::LaserCatcher
+            | ItemKind::LaserRelay
+            | ItemKind::FaithPlate
+            | ItemKind::LightBridge
+            | ItemKind::Funnel
+            | ItemKind::AngledPanel
+            | ItemKind::GlassPanel
+            | ItemKind::FlipPanel
+            | ItemKind::Piston
+            | ItemKind::EntryDoor
+            | ItemKind::ExitDoor
+            | ItemKind::FloorButton
+            | ItemKind::PedestalButton
+            | ItemKind::CubeDropper
+            | ItemKind::Turret => vec![it.cell],
+            _ => continue,
+        };
+        for c in cells {
+            match taken.get(&c) {
+                Some(&j) if j != i => {
+                    let later = |k: &ItemKind| {
+                        !matches!(
+                            k,
+                            ItemKind::EntryDoor
+                                | ItemKind::ExitDoor
+                                | ItemKind::FloorButton
+                                | ItemKind::PedestalButton
+                                | ItemKind::CubeDropper
+                                | ItemKind::Turret
+                        )
+                    };
+                    // Older pairs are the existing rules' business.
+                    if later(&it.kind) || later(&level.items[j].kind) {
+                        flags.pair(&level.items[j], it, "shared-cell");
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    taken.insert(c, i);
+                }
+            }
         }
     }
 

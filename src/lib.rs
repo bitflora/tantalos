@@ -9,9 +9,13 @@
 //! output (`dataset`).
 //! Turrets (`turrets`) and gel (`gel`): where turrets shoot, where paint lands, and gel moves.
 //! Plans made concrete for playing them in the game (`route`).
+//! Devices that change the geometry as the level is played: bridges, funnels, panels, stairs,
+//! pistons, rails (`dynamics`); laser beams (`lasers`); flings and faith plates (`flings`).
 
 pub mod builder;
 pub mod dataset;
+pub mod dynamics;
+pub mod flings;
 pub mod editor;
 pub mod evolve;
 pub mod fixtures;
@@ -19,6 +23,7 @@ pub mod gel;
 pub mod generator;
 pub mod geom;
 pub mod kv;
+pub mod lasers;
 pub mod level;
 pub mod metrics;
 pub mod p2c;

@@ -38,7 +38,7 @@ pub struct Metrics {
     /// Gels the level can't be solved without.
     pub necessary_gels: usize,
     /// Bits of `MECHANICS`: what the plan does.
-    pub mechanics: u16,
+    pub mechanics: u32,
     /// Longest chain of plan steps that each need an earlier one (see `chain_depth`).
     pub chain_depth: f64,
     /// Voxels the player covers between region centres, portal jumps included.
@@ -49,8 +49,9 @@ pub struct Metrics {
     pub backtrack: f64,
 }
 
-/// What a plan can do, for `Metrics::mechanics`.
-pub const MECHANICS: [&str; 14] = [
+/// What a plan can do, for `Metrics::mechanics`. Later ones were added with the devices; new
+/// ones go at the end, as training conditions follow this order.
+pub const MECHANICS: [&str; 24] = [
     "portal trip",
     "cube through a portal",
     "cube on a button",
@@ -65,6 +66,16 @@ pub const MECHANICS: [&str; 14] = [
     "leap on propulsion gel",
     "portal on conversion gel",
     "gel through a portal",
+    "laser redirected by a cube",
+    "laser powers a receiver",
+    "faith plate",
+    "fling",
+    "light bridge",
+    "funnel ride",
+    "stairs",
+    "moving platform",
+    "angled or flip panel",
+    "projection through a portal",
 ];
 
 pub const RANDOM_TRIALS: usize = 200;
@@ -157,10 +168,10 @@ pub fn effort(plan: &[Action]) -> f64 {
         .map(|a| match a {
             Action::Fire { .. } | Action::Dash { .. } | Action::Knock { .. } => 1.0,
             Action::Move {
-                kind: Move::Bounce | Move::Leap,
+                kind: Move::Bounce | Move::Leap | Move::Plate | Move::Funnel,
                 ..
             } => 1.0,
-            Action::Enter { .. } | Action::Throw { .. } => 2.0,
+            Action::Enter { .. } | Action::Throw { .. } | Action::Dive { .. } => 2.0,
             Action::Press { .. } => 0.0,
             _ => 0.5,
         })
@@ -313,6 +324,7 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
         let driven = model.hazard_inputs(h).iter().any(|&i| match i {
             Signal::Floor(b) => button_needed[b],
             Signal::Pedestal(p) => pedestal_needed[p],
+            Signal::Laser(_) => false,
         });
         let shapes = driven || {
             model.hazard_enabled[h] = false;
@@ -342,17 +354,59 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
         model.gel_enabled[g] = true;
     }
 
-    let mut mechanics = 0u16;
+    let mut mechanics = 0u32;
+    let kinds = model.device_kinds();
     for (i, a) in plan.iter().enumerate() {
-        if path[i + 1].down & !path[i].down != 0 {
+        let (before, after) = (&path[i], &path[i + 1]);
+        if after.down & !before.down != 0 {
             mechanics |= 1 << 9;
         }
-        if model.redirected(&path[i + 1]) {
+        if model.redirected(after) {
             mechanics |= 1 << 13;
+        }
+        if after.lit & !before.lit != 0 {
+            mechanics |= 1 << 15;
+        }
+        // Standing somewhere only a device makes: on a bridge, a platform or a piston.
+        let needs = model.graph.regions[after.region.min(model.graph.regions.len() - 1)].cond.on;
+        if !after.escaped && needs & kinds.bridges != 0 {
+            mechanics |= 1 << 18;
+        }
+        let platform = model.on_platform.get(after.region).copied().unwrap_or(false);
+        if !after.escaped && (needs & kinds.platforms != 0 || platform) {
+            mechanics |= 1 << 21;
+        }
+        if after.dev & kinds.routed != 0 {
+            mechanics |= 1 << 23;
         }
         let mut set = |bit: usize| mechanics |= 1 << bit;
         match *a {
             Action::Enter { .. } => set(0),
+            Action::Dive { .. } => {
+                set(0);
+                set(17);
+            }
+            Action::PutDown {
+                at: CubeLoc::Spot(_),
+            } => set(14),
+            Action::Move {
+                kind: Move::Plate, ..
+            } => set(16),
+            Action::Move {
+                kind: Move::Funnel, ..
+            } => set(19),
+            Action::Move {
+                kind: Move::Stairs, ..
+            } => set(20),
+            Action::Move {
+                kind: Move::Ride, ..
+            } => set(21),
+            Action::Fire { class, .. }
+                if model.portals.classes[class].deployed.is_some()
+                    || !model.portals.classes[class].needs.is_always() =>
+            {
+                set(22)
+            }
             Action::Throw { to, .. } => {
                 set(1);
                 if matches!(to, CubeLoc::OnButton(_)) {
@@ -398,7 +452,12 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
         min_len: plan.len(),
         portal_trips: plan
             .iter()
-            .filter(|a| matches!(a, Action::Enter { .. } | Action::Throw { .. }))
+            .filter(|a| {
+                matches!(
+                    a,
+                    Action::Enter { .. } | Action::Throw { .. } | Action::Dive { .. }
+                )
+            })
             .count(),
         plan,
         shortest_plans,
@@ -476,7 +535,7 @@ pub fn chain_depth(model: &Model, plan: &[Action], path: &[State]) -> f64 {
     }
     let weight = |a: &Action| match a {
         Action::Move {
-            kind: Move::Bounce | Move::Leap,
+            kind: Move::Bounce | Move::Leap | Move::Plate | Move::Funnel,
             ..
         } => 1.0,
         Action::Move { .. } | Action::PickUp { .. } | Action::PutDown { .. } => 0.5,
@@ -511,16 +570,19 @@ fn distances(model: &Model, path: &[State]) -> (f64, f64, f64) {
     let exit = at(model.exit_cell);
 
     let (mut travel, mut backtrack) = (0.0, 0.0);
+    let pos = |s: &State| centre.get(s.region).copied().unwrap_or(exit);
     for w in path.windows(2) {
-        let (a, b) = (centre[w[0].region], centre[w[1].region]);
+        let (a, b) = (pos(&w[0]), pos(&w[1]));
         travel += dist(a, b);
         backtrack += (dist(b, exit) - dist(a, exit)).max(0.0);
     }
     let last = path.last().unwrap();
+    let here = centre.get(last.region).copied().unwrap_or(exit);
     let place = |l: CubeLoc| match l {
-        CubeLoc::Held => centre[last.region],
+        CubeLoc::Held | CubeLoc::Gone => here,
         CubeLoc::Loose(r) => centre[r],
         CubeLoc::OnButton(b) => at(model.buttons[b].cell),
+        CubeLoc::Spot(k) => at(model.spot_cell(k)),
     };
     let cube_travel = last
         .cubes

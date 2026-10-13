@@ -468,7 +468,12 @@ class Game:
 
     def act_fire(self, leg):
         color, face = leg["color"], leg["face"]
-        target = self.world(face["centre"])
+        # A deployed angled panel sticks out of its face: aim at its middle.
+        target = self.world(leg["aim"] if leg.get("aim") else face["centre"])
+        # From over a ledge's edge, to look down past it: shuffle there first.
+        eye = self.world(leg["eye"])
+        if hdist(self.obs()["o"], eye) > 10:
+            self.shift_to(eye)
         for _ in range(2):
             s = self.settle()
             self.look_at(target, s["eye"])
@@ -480,7 +485,9 @@ class Game:
             moved = [p for p in s["portals"] if before.get(p["id"]) != p]
             if moved:  # the first shot can make both portal entities: take the one there
                 self.portal_ids[color] = min(moved, key=lambda p: math.dist(p["o"], target))["id"]
-            if self.portal_on(color, face, s):
+            if self.portal_on(color, face, s) or (leg.get("aim") and any(
+                    math.dist(p["o"], target) < 64 for p in s["portals"]
+                    if self.portal_ids.get(color) in (None, p["id"]))):
                 return True
         return False
 
@@ -694,6 +701,78 @@ class Game:
         self.release("forward")
         return self.in_cell(self.wait_landed()["o"], leg["to"])
 
+    def act_plate(self, leg):
+        """Steps onto the faith plate and waits to come down where it throws."""
+        try:
+            self.walk([self.floor(leg["plate"])], tol=16, stop=False, timeout=6, on_jump="ignore")
+        except Stuck:
+            pass  # thrown before getting to its middle
+        time.sleep(0.5)
+        return self.in_cell(self.wait_landed(timeout=10)["o"], leg["to"])
+
+    def act_climb(self, leg):
+        self.walk_cells(leg["path"], tol=16)
+        return self.in_cell(self.obs()["o"], leg["path"][-1])
+
+    def act_funnel(self, leg):
+        """Steps into the funnel, floats along it to its last cell on the way, then steps
+        out toward `out`."""
+        via = leg["via"]
+        try:
+            self.walk([self.floor(via[0])], tol=24, stop=False, timeout=6, on_jump="ignore")
+        except Stuck:
+            pass  # caught by the funnel before getting there
+        last = self.world([via[-1][0] + 0.5, via[-1][1] + 0.5, via[-1][2] + 0.3])
+        end = time.time() + 30
+        while time.time() < end:
+            if math.dist(self.obs()["o"], last) < 48:
+                break
+            time.sleep(0.05)
+        try:
+            self.walk([self.floor(leg["out"])], tol=24, timeout=8, on_jump="ignore")
+        except Stuck:
+            pass
+        return self.in_cell(self.wait_landed()["o"], leg["to"])
+
+    def act_ride(self, leg):
+        """Waits on the platform until it has carried the player to its other stop."""
+        end = time.time() + 20
+        while time.time() < end:
+            if self.in_cell(self.obs()["o"], leg["to"]):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def act_dive(self, leg):
+        """Off the ledge (with a running jump if the portal is two cells out), steering into
+        the floor portal, and out of the other one at speed."""
+        d = DIRS[leg["dir"]]
+        edge = self.floor(leg["edge"])
+        portal = self.floor(leg["face"]["cell"])
+        self.turn(0, yaw_of(d))
+        # Back up to the far side of the edge cell for a run-up.
+        self.shift_to([edge[0] - d[0] * 40, edge[1] - d[1] * 40])
+        self.hold("forward")
+        jumped, end = False, time.time() + 10
+        try:
+            while time.time() < end and not self.jumped:
+                s = self.obs()
+                ahead = (s["o"][0] - edge[0]) * d[0] + (s["o"][1] - edge[1]) * d[1]
+                if leg["out"] > 1 and not jumped and ahead > 40:
+                    self.tap("jump")
+                    jumped = True
+                # Over the portal: stop pushing, let it fall in.
+                if hdist(s["o"], portal) < 24:
+                    self.release("forward")
+                elif s["o"][2] < edge[2] - 32:
+                    yaw = math.degrees(math.atan2(portal[1] - s["o"][1], portal[0] - s["o"][0]))
+                    self.look(0, yaw)
+                    self.hold("forward")
+        finally:
+            self.release("forward")
+        went = self.jumped
+        return went and self.in_cell(self.wait_landed(timeout=10)["o"], leg["landing"])
+
     def act_exit(self, leg):
         """Out through the exit door: done at its linked door, or when the level restarts
         (in preview, the exit corridor restarts the level, which stops the reports)."""
@@ -729,6 +808,8 @@ class Game:
         held = self.holding(s)
         free = [c for c in s["cubes"] if held is None or c["id"] != held["id"]]
         for want in after["cubes"]:
+            if want == "gone":
+                continue
             if want is None:
                 if held is None:
                     out.append("not holding the cube")
@@ -761,6 +842,8 @@ class Game:
         held = self.holding(s)
         used = {held["id"]} if held else set()
         for want in after["cubes"]:
+            if want == "gone":
+                continue
             if want is None:
                 if held is None:
                     cube = self.nearest_cube(s, s["eye"], skip=used)
@@ -965,9 +1048,14 @@ def play(game, head, legs):
             why = str(e)
         finally:
             game.release_all()
+        if leg["walk"] and leg["after"]["player"] != leg["walk"][-1] and leg["action"] in (
+                "press", "putdown", "fire", "pickup", "toss", "throw", "knock"):
+            time.sleep(2.0)  # a device carried the player: let it get there
+            game.wait_landed()
         exit_leg = leg["action"] == "exit" or leg.get("escape")
         # Lining up a cube or reaching for something can take the player half a cell over.
-        slack = 64 if leg["action"] in ("pickup", "putdown", "toss", "throw", "press", "knock") else 12
+        slack = 64 if leg["action"] in ("pickup", "putdown", "toss", "throw", "press", "knock",
+                                        "funnel", "plate", "dive", "ride") else 12
         problems = [] if exit_leg else game.problems(leg["after"], slack)
         if ok and not problems:
             status = "ok"

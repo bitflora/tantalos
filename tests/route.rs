@@ -3,30 +3,30 @@
 use glados::fixtures;
 use glados::generator::Genome;
 use glados::geom::{step, Cell, Dir};
+use glados::dynamics::Devices;
 use glados::level::Level;
-use glados::portals::{shots, Sight};
+use glados::regions::Geo;
+use glados::portals::{shots_from, Sight};
 use glados::rng::Rng;
 use glados::route::{route, Act, Route};
 use glados::solver::{Mode, Model, Verdict, DEFAULT_MAX_STATES};
 
-/// One step on level ground, or off a ledge and down to where the fall ends.
-fn legal_step(level: &Level, a: Cell, b: Cell) -> bool {
+/// One step on level ground, or off a ledge and down to where a fall can end (devices in any
+/// state).
+fn legal_step(geo: Geo, a: Cell, b: Cell) -> bool {
+    let level = geo.level;
     Dir::HORIZONTAL.iter().any(|&d| {
         let n = step(a, d);
         level.face(a, d).barrier.is_none()
             && !level.solid(n)
-            && if level.standable(n) {
-                n == b
-            } else {
-                level.fall(n) == Some(b)
-            }
+            && (n == b && geo.stand(n).is_some() || geo.falls(n).iter().any(|f| f.cell == b))
     })
 }
 
-fn legal_walk(level: &Level, from: Cell, cells: &[Cell]) -> bool {
+fn legal_walk(geo: Geo, from: Cell, cells: &[Cell]) -> bool {
     let mut at = from;
     cells.iter().all(|&c| {
-        let ok = level.standable(c) && legal_step(level, at, c);
+        let ok = geo.stand(c).is_some() && legal_step(geo, at, c);
         at = c;
         ok
     })
@@ -34,6 +34,8 @@ fn legal_walk(level: &Level, from: Cell, cells: &[Cell]) -> bool {
 
 /// What a route must do beyond matching the plan, which `route` checks itself.
 fn check(name: &str, level: &Level, r: &Route) {
+    let devices = Devices::build(level).unwrap();
+    let geo = Geo::new(level, &devices.dyn_);
     // Line of sight as the conservative rules see it, fizzlers aside (`route` checks those).
     let sight = Sight {
         blocking_hazards: 0,
@@ -46,27 +48,43 @@ fn check(name: &str, level: &Level, r: &Route) {
     for (i, leg) in r.legs.iter().enumerate() {
         let at = format!("{name} leg {}: {}", i + 1, leg.text);
         assert!(
-            legal_walk(level, player, &leg.walk),
+            legal_walk(geo, player, &leg.walk),
             "{at}: walk {:?} from {player:?}",
             leg.walk
         );
         let end = leg.walk.last().copied().unwrap_or(player);
         match &leg.act {
             Act::Walk => assert_eq!(leg.after.player, end, "{at}"),
-            Act::Fire { face, eye, .. } => {
-                assert_eq!(*eye, end, "{at}");
+            Act::Fire {
+                face, cell, eye, ..
+            } => {
+                assert_eq!(*cell, end, "{at}");
                 assert!(
-                    shots(level, *eye, *face, sight).next().is_some(),
+                    shots_from(level, *cell, *eye, *face, sight).next().is_some(),
                     "{at}: no shot"
                 );
             }
             Act::Enter { face, out, .. } => {
                 assert_eq!(face.0, end, "{at}: not in front of the portal");
-                assert_eq!(Some(leg.after.player), level.fall(out.0), "{at}");
+                let lands = geo.falls(out.0).iter().any(|f| f.cell == leg.after.player);
+                assert!(lands || !devices.is_empty(), "{at}");
             }
             Act::Throw { out, .. } => assert_eq!(leg.after.player, end, "{at}: {out:?}"),
             Act::Dash { path, .. } => {
-                assert!(legal_walk(level, end, path), "{at}: dash {path:?}");
+                assert!(legal_walk(geo, end, path), "{at}: dash {path:?}");
+            }
+            Act::Plate { from, to, .. } | Act::Ride { from, to } => {
+                assert_eq!(*from, end, "{at}");
+                assert_eq!(leg.after.player, *to, "{at}");
+            }
+            Act::Funnel { enter, to, .. } => {
+                assert_eq!(*enter, end, "{at}");
+                assert_eq!(leg.after.player, *to, "{at}");
+            }
+            Act::Climb { path } => assert_eq!(path.last(), Some(&leg.after.player), "{at}"),
+            Act::Dive { edge, landing, .. } => {
+                assert_eq!(*edge, end, "{at}");
+                assert_eq!(leg.after.player, *landing, "{at}");
             }
             Act::Exit { cell, .. } => {
                 assert_eq!(*cell, level.exit().unwrap().cell, "{at}");
@@ -87,7 +105,7 @@ fn check(name: &str, level: &Level, r: &Route) {
             | Act::Press { .. }
             | Act::Knock { .. } => assert_eq!(leg.after.player, end, "{at}"),
         }
-        assert!(level.standable(leg.after.player), "{at}");
+        assert!(geo.stand(leg.after.player).is_some(), "{at}");
         player = leg.after.player;
     }
     let escaped = matches!(

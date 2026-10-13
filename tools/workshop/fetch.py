@@ -5,7 +5,7 @@
     python tools/workshop/fetch.py build                  # convert+solve: out/workshop/levels.jsonl
 
 `list` reads the Workshop's public browse pages (top rated by default), singleplayer only and
-without the item tags the tokens can't express, then keeps the items published from the Puzzle
+without the tags of co-op and custom maps, then keeps the items published from the Puzzle
 Maker (file `mymaps/<number>.bsp`). Metadata comes from the keyless GetPublishedFileDetails API.
 
 `download` doesn't take whole maps (5-40 MB, mostly lighting and packed files). It reads the
@@ -39,12 +39,8 @@ ROOT = Path(__file__).resolve().parents[2]
 APP = 620
 BROWSE = "https://steamcommunity.com/workshop/browse/"
 DETAILS = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
-# Workshop tags of Puzzle Maker items the tokens can't express, and of non-Puzzle-Maker maps.
-EXCLUDED_TAGS = [
-    "Cooperative", "Custom Visuals", "Custom Story", "Angled Panel", "Flip Panel", "Glass Panel",
-    "Faith Plate", "Light Bridge", "Tractor Beam", "Laser Emitter", "Laser Catcher", "Laser Relay",
-    "Piston Platform", "Rail Platform", "Stairs",
-]
+# Workshop tags of non-Puzzle-Maker maps (every Puzzle Maker item has tokens now).
+EXCLUDED_TAGS = ["Cooperative", "Custom Visuals", "Custom Story"]
 PUZZLE_MAKER_FILE = re.compile(r"mymaps/\d+\.bsp")
 UA = {"User-Agent": "glados-workshop-fetch/1 (research; low rate)"}
 

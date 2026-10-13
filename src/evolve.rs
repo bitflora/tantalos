@@ -120,7 +120,7 @@ fn cull(pop: &mut Vec<Candidate>, n: usize) {
         ))
     });
     let cap = (n / 8).max(4);
-    let mut niches: HashMap<u16, usize> = HashMap::new();
+    let mut niches: HashMap<u32, usize> = HashMap::new();
     pop.retain(|c| {
         let k = niches.entry(c.metrics.mechanics).or_default();
         *k += 1;

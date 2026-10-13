@@ -156,18 +156,33 @@ def main():
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout)
     init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
     if init:
-        # The model's shape comes from the checkpoint; --block/--layers/--heads/--embd are ignored.
-        if init["vocab"] != vocab.itos:
-            sys.exit(f"{args.init} was trained with a different vocabulary")
-        if init["model_config"]["block_size"] != args.block:
-            sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block to match")
-        cfg = Config(**init["model_config"])
+        # The model's shape comes from the checkpoint; --layers/--heads/--embd are ignored. Its
+        # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
+        # words and conditions can go anywhere), new ones start fresh, and so do new positions.
+        lost = [t for t in init["vocab"] if t not in vocab.stoi]
+        if lost:
+            sys.exit(f"{args.init} knows tokens this data doesn't have: {lost[:8]}")
+        if init["model_config"]["block_size"] > args.block:
+            sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block at least that")
+        cfg = Config(**{**init["model_config"], "vocab_size": len(vocab), "block_size": args.block})
     model = GPT(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)
     step, best = 0, float("inf")
     if init:
-        model.load_state_dict(init["model"])
-        print(f"weights from {args.init}")
+        state, own = init["model"], model.state_dict()
+        for k, v in state.items():
+            if k not in ("tok.weight", "head.weight", "pos.weight"):
+                own[k] = v
+        row = {t: i for i, t in enumerate(init["vocab"])}
+        kept = [(i, row[t]) for i, t in enumerate(vocab.itos) if t in row]
+        own["tok.weight"][[i for i, _ in kept]] = state["tok.weight"][[j for _, j in kept]]
+        own["head.weight"] = own["tok.weight"]
+        n = state["pos.weight"].shape[0]
+        own["pos.weight"][:n] = state["pos.weight"]
+        model.load_state_dict(own)
+        new = len(vocab) - len(kept)
+        print(f"weights from {args.init}" + (f" ({new} new tokens, block {n} -> {args.block})"
+                                             if new or n != args.block else ""))
     if args.resume and (out / "last.pt").exists():
         ck = torch.load(out / "last.pt", map_location=device, weights_only=False)
         model.load_state_dict(ck["model"])

@@ -13,6 +13,13 @@ and button types) and two solver modes that bracket the truth.
 small GPT trained from scratch on them (`train/`).
 **Slice 6:** turrets and gel (repulsion, propulsion, conversion, water), in the solver,
 tokens, metrics and generator.
+**Slice 7:** every other Puzzle Maker item: laser emitters, catchers and relays with
+reflection cubes (`lasers`), faith plates and flings through portals (`flings`), light
+bridges, excursion funnels, angled/glass/flip panels, stairs, piston and rail platforms
+(`dynamics`: device state bits, conditional regions and moves), loose cubes and droppers that
+wait for their inputs; in the solver, tokens, metrics, generator, routes, `train/play.py`
+and the Workshop converter. The modelling assumptions are listed in each module's header;
+the ones most worth checking in the game are in "Unverified" below.
 
 ```bash
 cargo test
@@ -62,9 +69,13 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   depth. That was the main way early samples failed to parse. The worked example is 56 tokens;
   generated rooms average about 105 and stay under about 310. Round trip: `encode(decode(encode(p))) == encode(p)` and the
   solver's verdict is unchanged (tests on every fixture and hundreds of genomes). It keeps what
-  play depends on, not the file's bytes. Lasers, bridges, funnels and the like are refused.
-  Turrets and gel came later; their words are at the end of the vocabulary so earlier token
-  ids are unchanged.
+  play depends on, not the file's bytes. BEEmod and other non-Puzzle-Maker items are refused.
+  Turrets and gel came later, then the other items (lasers, plates, bridges, funnels, panels,
+  stairs, pistons, rails, loose cubes); their words are at the end of the vocabulary so earlier
+  token ids are unchanged. Their condition groups (`train/data.py` `LATER_FEATURES`,
+  `LATER_MECH_GROUPS`) come after the old ones, which shifts level-token ids, so
+  `train.py --init` matches embeddings by token name: a checkpoint from before them warm-starts
+  with its 274 tokens kept and the new ones fresh (and `--block` may grow).
 - **Dataset** (`glados dataset`): JSONL, one level per line with its tokens, verdict, plan length
   and metrics, plus `vocab.txt` beside it. Jobs are 30% fresh random genomes, 70% mutations of a
   pool of solvable ones that drifts toward higher `Metrics::score`. Over a 20k run the share of
@@ -349,3 +360,23 @@ cell, portals, cubes); one that didn't work is put right by teleporting (`setpos
 `SetOrigin`, `portal_place`) and reported as recovered. `--spike` checks the console, VScript,
 coordinates, movement and these commands instead of playing. **Not yet run in the game**: it
 has only been run against a fake netcon server.
+
+## Unverified (check in the game)
+
+The later items' rules were fitted to `editoritems.txt`, the editor's instances and compiled
+Workshop maps, not yet watched in the game. The ones that most change verdicts:
+- Angled panels: local +x points at the edge that swings out, the hinge is opposite, and the
+  face leans toward the hinge (so a wall panel with +x down leans up and out). At 90° the
+  panel lies on its hinge edge (a wall, or a floor for the cell above a wall panel's top).
+- Light bridges sit 0.375 voxel against their walkable side: side up, the floor of the cells
+  they cross; side down, the floor of the cells above.
+- Flings: g = 600 u/s², speed sqrt(2gh) after dropping h voxels (capped at 2000 u/s), the
+  player a point at its feet; conservative rules want ±10% speed to land alike. Dives reach
+  two cells out from a ledge (three, liberal). Eyes may stand 0.4 voxel toward a drop.
+- Faith plates land on their target; `Builder::faith_plate` writes a speed for a lob two voxels
+  over the higher end (the compiled trigger aims with it).
+- Lasers pass glass and grating; a reflection cube redirects a beam crossing its cell toward
+  the way the player faced setting it down; beams don't hurt the player.
+- Funnels carry from any cell beside them and let you step out sideways anywhere further on;
+  oscillating rails act as a walkway along their track.
+- Flip panels start with the tile's own side out; flipping clears a portal on them.

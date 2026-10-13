@@ -36,6 +36,18 @@
 //!   after every action, through a portal if one is under the stream. Splats without a
 //!   dropper are painted from the start. Water washes paint off. Conversion gel makes faces
 //!   portalable; repulsion and propulsion floors allow bounces and leaps.
+//! - Devices (`dynamics`): stairs, panels, pistons, rails, bridges and funnels are switched by
+//!   their wires like fields (start state XOR all inputs on). Their bits and the powered laser
+//!   receivers are part of the state, worked out after every action (`settle`); edges and
+//!   regions that need a device only exist while it is in that state, and whoever stands in a
+//!   region that goes away rides or falls (`Region::fallback`), or dies.
+//! - Lasers (`lasers`): catchers and relays are senders, powered while a beam reaches them.
+//!   Reflection cubes put down at a spot (cell and facing) redirect beams.
+//! - Flings (`flings`): dropping from a ledge into a floor portal (`Action::Dive`) throws the
+//!   player out of the other one at speed. Faith plates launch whatever comes onto them.
+//! - Cubes placed without a dropper are gone for good when fizzled; a dropper that only drops
+//!   when told to (`Auto Drop` off, wired) holds its cube until its inputs are first on.
+//! - A model that had to leave things out (`Model::complete`) never calls a level unsolvable.
 //!
 //! The search works on states packed into a few words (`Layout`), each stored once in a hash
 //! table (`Table`); `State` is the readable form `successors` and `initial` hand out.
@@ -43,11 +55,16 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
+use crate::dynamics::{Bit, Devices};
 use crate::gel::{self, GelRules};
 use crate::geom::{step, Cell, Dir};
-use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, PaintKind, MAX_HAZARDS};
-use crate::portals::{self, Extras, Face, Landing, Masks, Portals, Sight};
-use crate::regions::{Move, RegionGraph};
+use crate::lasers::{Beams, Event};
+use crate::level::{
+    ButtonKind, CubeKind, HazardKind, ItemKind, Level, PaintKind, PanelKind,
+    ProjectorKind, MAX_HAZARDS,
+};
+use crate::portals::{self, resolve, Extras, Face, Landing, Landings, Masks, PanelFace, Portals, Sight};
+use crate::regions::{Cond, Geo, Move, RegionGraph};
 use crate::turrets::{self, TurretSight};
 
 /// Items that don't affect play.
@@ -60,6 +77,11 @@ pub const DECORATIVE: &[&str] = &[
     "ITEM_SECONDARY_OBSERVATION_ROOM",
     "ITEM_BEE2_ANTLINE",
     "ITEM_BEE2_ANTLINE_CORNER",
+    "ITEM_INDICATOR_TOGGLE",
+    "ITEM_INDICATOR_PANEL",
+    "ITEM_INDICATOR_PANEL_TIMER",
+    "ITEM_POINT_LIGHT",
+    "ITEM_PLACEMENT_HELPER",
 ];
 
 pub const DEFAULT_MAX_STATES: usize = 1_000_000;
@@ -154,6 +176,10 @@ pub enum CubeLoc {
     Loose(usize),
     /// Index into `Model::buttons`.
     OnButton(usize),
+    /// Set down at a laser spot (index into `Beams::spots`), facing its way.
+    Spot(usize),
+    /// Destroyed for good (a loose cube fizzled), or not dropped yet.
+    Gone,
 }
 
 /// Cubes with the same kind and home are interchangeable.
@@ -214,6 +240,13 @@ pub enum Action {
     Knock {
         turret: usize,
     },
+    /// Drop `height` voxels off a ledge into the floor portal of this color, and fly out of
+    /// the other one to region `to`.
+    Dive {
+        color: Color,
+        height: i32,
+        to: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -232,6 +265,10 @@ pub struct State {
     /// Painted faces, sorted, each `face << 2 | PaintKind` (face: index into
     /// `Model::paint_faces`).
     pub paint: Vec<u32>,
+    /// Bit `k`: laser receiver `k` (`Beams::receivers`) is powered. Follows from the rest.
+    pub lit: u32,
+    /// The devices' bits (`Devices::bits`). Follows from the rest.
+    pub dev: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -251,12 +288,44 @@ pub struct Pedestal {
     pub cell: Cell,
 }
 
-/// Something that drives a receiver: a floor button or a pedestal (indices into
-/// `Model::buttons` and `Model::pedestals`).
+/// Something that drives a receiver: a floor button, a pedestal or a powered laser catcher
+/// or relay (indices into `Model::buttons`, `Model::pedestals` and `Beams::receivers`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
     Floor(usize),
     Pedestal(usize),
+    Laser(usize),
+}
+
+/// Something wired that is on or off: on when `start` XOR all its inputs are on (`start`
+/// alone without inputs).
+#[derive(Clone, Debug, Default)]
+pub struct Switch {
+    pub item: i32,
+    pub start: bool,
+    pub inputs: Vec<Signal>,
+}
+
+/// How a device bit follows from the state.
+#[derive(Clone, Copy, Debug)]
+enum BitRule {
+    /// The switch (index into `Model::switches`) is on.
+    Switch(usize),
+    /// The projector's switch is on, a portal is on a class its path ends at, and the other
+    /// on a class with this route.
+    Routed {
+        switch: usize,
+        projector: usize,
+        route: usize,
+    },
+}
+
+/// A cube that waits in its dropper until the dropper's inputs are first on.
+#[derive(Clone, Debug)]
+struct Held {
+    kind: CubeKind,
+    home: CubeLoc,
+    inputs: Vec<Signal>,
 }
 
 #[derive(Clone, Debug)]
@@ -304,8 +373,9 @@ struct GelMove {
 struct WalkGraph {
     node: HashMap<Cell, usize>,
     region: Vec<usize>,
-    /// (to, fall height in voxels, hazards crossed). Every move walks one voxel first.
-    moves: Vec<Vec<(usize, i32, u64)>>,
+    /// (to, fall height in voxels, hazards crossed, devices needed). Every move walks one
+    /// voxel first.
+    moves: Vec<Vec<(usize, i32, u64, Cond)>>,
 }
 
 /// Everything the search needs, precomputed from a level.
@@ -323,7 +393,7 @@ pub struct Model {
     exit_inputs: Vec<Signal>,
     exit_inverted: bool,
     /// Per region: where a cube dropped off each of its ledges lands.
-    tosses: Vec<Vec<Landing>>,
+    tosses: Vec<Vec<Landings>>,
     walk: WalkGraph,
     /// Per floor button the player can stand on (`[]` for the others), per face class: the
     /// masks of the clear shots from its cell.
@@ -367,6 +437,28 @@ pub struct Model {
     /// Hazards that are fizzlers, and those that are laser fields.
     pub fizzlers: u64,
     pub lasers: u64,
+    /// Devices, their bits, and how each bit follows from the state.
+    pub devices: Devices,
+    bit_rules: Vec<BitRule>,
+    /// Wired things that are on or off: devices' and laser emitters'.
+    pub switches: Vec<Switch>,
+    /// Laser beams; per emitter (`Beams::emitters`) its switch.
+    pub beams: Beams,
+    emitter_switch: Vec<usize>,
+    /// Per region, the laser spots (`Beams::spots`) in it.
+    spots_in: Vec<Vec<usize>>,
+    /// Per beam end face (a class of its own), its class.
+    beam_end_class: HashMap<Face, usize>,
+    /// Cubes waiting in droppers.
+    held_back: Vec<Held>,
+    /// Devices, lasers or waiting cubes: `settle` has work after any action.
+    dynamic: bool,
+    /// Everything in the level was modelled: an exhausted search means unsolvable.
+    pub complete: bool,
+    projector_kinds: Vec<ProjectorKind>,
+    /// Per region: standing there is standing on a moving platform (a piston, or a rail's
+    /// track where there's no floor of its own).
+    pub on_platform: Vec<bool>,
 }
 
 /// Every state reachable from the start, in BFS order, for metrics.
@@ -385,6 +477,8 @@ pub struct StateSpace {
     uses: Vec<u32>,
     /// How each state but the start was first reached: (state, action).
     parent: Vec<(u32, Action)>,
+    /// Each state's region (`u32::MAX` once escaped).
+    regions: Vec<u32>,
 }
 
 impl StateSpace {
@@ -395,6 +489,12 @@ impl StateSpace {
 
     pub fn is_empty(&self) -> bool {
         self.goal.is_empty()
+    }
+
+    /// The player's region in state `i` (`None` once escaped).
+    pub fn region(&self, i: usize) -> Option<usize> {
+        let r = self.regions[i];
+        (r != u32::MAX).then_some(r as usize)
     }
 
     /// Successors of state `i`, one entry per action (indices of states).
@@ -533,6 +633,15 @@ impl Model {
             .iter()
             .map(|p| Problem::Invalid(p.clone()))
             .collect();
+        let Some(mut devices) = Devices::build(level) else {
+            problems.push(Problem::Unsupported(format!(
+                "more than {} device bits",
+                crate::dynamics::MAX_BITS
+            )));
+            return Err(problems);
+        };
+        let dyn_ = devices.dyn_.clone();
+        let geo = Geo::new(level, &dyn_);
         // Regions split where the turrets that can shoot change.
         let turret_sight = Rules::turret_sight(mode);
         let danger: HashMap<Cell, u32> = if level.turrets.is_empty() {
@@ -540,11 +649,13 @@ impl Model {
         } else {
             level
                 .cells()
-                .filter(|&c| level.standable(c))
+                .filter(|&c| geo.stand(c).is_some())
                 .map(|c| (c, turrets::danger(level, turret_sight, c)))
                 .collect()
         };
-        let graph = RegionGraph::build_with(level, |c| danger.get(&c).copied().unwrap_or(0));
+        let mut graph = RegionGraph::build_dyn(geo, |c| danger.get(&c).copied().unwrap_or(0));
+        let route_moves = devices.funnel_route_moves(geo, |c| graph.region_of(c));
+        graph.add_moves(geo, &route_moves);
 
         let mut unsupported: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
         for it in &level.items {
@@ -635,6 +746,87 @@ impl Model {
             })
             .collect();
 
+        // Laser beams: emitters, receivers, spots for reflection cubes.
+        let reflectors = level
+            .of_kind(&ItemKind::Cube)
+            .filter(|c| c.cube_kind() == CubeKind::Reflection)
+            .count();
+        let beams = Beams::build(level, reflectors);
+
+        // Switches: one per device bit that follows a wire, and per laser emitter.
+        let mut switches: Vec<Switch> = Vec::new();
+        let mut switch_of: HashMap<i32, usize> = HashMap::new();
+        let mut polarity_of: HashMap<i32, usize> = HashMap::new();
+        let new_switch = |switches: &mut Vec<Switch>, item: i32, start: bool| {
+            switches.push(Switch {
+                item,
+                start,
+                inputs: Vec::new(),
+            });
+            switches.len() - 1
+        };
+        let mut bit_rules = vec![BitRule::Switch(0); devices.bits.len()];
+        for (i, st) in level.stairs.iter().enumerate() {
+            let sw = new_switch(&mut switches, st.item, st.start_deployed);
+            switch_of.insert(st.item, sw);
+            bit_rules[devices.stairs_bit[i]] = BitRule::Switch(sw);
+        }
+        for (i, pn) in level.panels.iter().enumerate() {
+            let sw = new_switch(&mut switches, pn.item, pn.start_deployed);
+            switch_of.insert(pn.item, sw);
+            bit_rules[devices.panel_bit[i]] = BitRule::Switch(sw);
+        }
+        for (i, ps) in level.pistons.iter().enumerate() {
+            let sw = new_switch(&mut switches, ps.item, ps.start_up);
+            switch_of.insert(ps.item, sw);
+            bit_rules[devices.piston_bit[i]] = BitRule::Switch(sw);
+        }
+        for (i, rl) in level.rails.iter().enumerate() {
+            let sw = new_switch(&mut switches, rl.item, rl.start_active);
+            switch_of.insert(rl.item, sw);
+            if let Some(b) = devices.rail_bit[i] {
+                bit_rules[b] = BitRule::Switch(sw);
+            }
+        }
+        let mut projector_switch = Vec::new();
+        for (i, pj) in level.projectors.iter().enumerate() {
+            let sw = new_switch(&mut switches, pj.item, pj.start_enabled);
+            switch_of.insert(pj.item, sw);
+            projector_switch.push(sw);
+            bit_rules[devices.projector_bit[i]] = BitRule::Switch(sw);
+            if let Some(b) = devices.reversed_bit[i] {
+                let rs = new_switch(&mut switches, pj.item, pj.start_reversed);
+                polarity_of.insert(pj.item, rs);
+                bit_rules[b] = BitRule::Switch(rs);
+            }
+        }
+        for (b, bit) in devices.bits.iter().enumerate() {
+            if let Bit::Routed { projector, route } = *bit {
+                bit_rules[b] = BitRule::Routed {
+                    switch: projector_switch[projector],
+                    projector,
+                    route,
+                };
+            }
+        }
+        let mut emitter_switch = Vec::new();
+        for &(item, _) in &beams.emitters {
+            let start = level
+                .lasers
+                .iter()
+                .find(|l| l.item == item)
+                .is_some_and(|l| l.start_enabled);
+            let sw = new_switch(&mut switches, item, start);
+            switch_of.insert(item, sw);
+            emitter_switch.push(sw);
+        }
+        // Droppers that only drop when told to, and their inputs.
+        let mut waiting: HashMap<i32, Vec<Signal>> = level
+            .of_kind(&ItemKind::CubeDropper)
+            .filter(|d| d.props.get_i32("ITEM_PROPERTY_AUTO_DROP_CUBE") == Some(0))
+            .map(|d| (d.index, Vec::new()))
+            .collect();
+
         let mut exit_inputs = Vec::new();
         for link in &level.links {
             let receiver = level.item(link.receiver).map(|i| &i.kind);
@@ -652,11 +844,16 @@ impl Model {
                     .iter()
                     .position(|p| p.index == link.sender)
                     .map(Signal::Pedestal),
+                Some(ItemKind::LaserCatcher | ItemKind::LaserRelay) => beams
+                    .receivers
+                    .iter()
+                    .position(|r| r.0 == link.sender)
+                    .map(Signal::Laser),
                 _ => None,
             };
             let Some(signal) = signal else {
                 problems.push(Problem::Unsupported(format!(
-                    "wire {} -> {} comes from something other than a button",
+                    "wire {} -> {} comes from something other than a button or laser receiver",
                     link.sender, link.receiver
                 )));
                 continue;
@@ -681,8 +878,41 @@ impl Model {
                         ))),
                     }
                 }
+                Some(_) if switch_of.contains_key(&link.receiver) => {
+                    switches[switch_of[&link.receiver]].inputs.push(signal);
+                }
+                Some(ItemKind::CubeDropper) if waiting.contains_key(&link.receiver) => {
+                    waiting.get_mut(&link.receiver).unwrap().push(signal);
+                }
+                Some(ItemKind::CubeDropper) => {} // Re-drops its cube: nothing new.
                 _ => problems.push(Problem::Unsupported(format!(
-                    "wire {} -> {} drives something other than the exit door or a field",
+                    "wire {} -> {} drives something that takes no input",
+                    link.sender, link.receiver
+                ))),
+            }
+        }
+        for link in &level.polarity_links {
+            let signal = buttons
+                .iter()
+                .position(|b| b.index == link.sender)
+                .map(Signal::Floor)
+                .or_else(|| {
+                    pedestals
+                        .iter()
+                        .position(|p| p.index == link.sender)
+                        .map(Signal::Pedestal)
+                })
+                .or_else(|| {
+                    beams
+                        .receivers
+                        .iter()
+                        .position(|r| r.0 == link.sender)
+                        .map(Signal::Laser)
+                });
+            match (signal, polarity_of.get(&link.receiver)) {
+                (Some(sig), Some(&sw)) => switches[sw].inputs.push(sig),
+                _ => problems.push(Problem::Unsupported(format!(
+                    "polarity wire {} -> {} isn't from a sender to a funnel",
                     link.sender, link.receiver
                 ))),
             }
@@ -696,13 +926,35 @@ impl Model {
             _ => CubeLoc::Loose(l.region),
         };
         let mut cubes = Vec::new();
+        let mut held_back = Vec::new();
         for cube in level.of_kind(&ItemKind::Cube) {
             // A cube that would fall into goo is simply gone.
             if let Some(l) = Landing::from_fall(level, &graph, cube.cell) {
                 let loc = landing_loc(l, cube.cube_kind());
+                let home = if level.loose_cube(cube.index) {
+                    CubeLoc::Gone
+                } else {
+                    loc
+                };
+                let wait = level
+                    .dropper_of
+                    .get(&cube.index)
+                    .and_then(|d| waiting.get(d))
+                    .filter(|inputs| !inputs.is_empty());
+                let loc = match wait {
+                    Some(inputs) => {
+                        held_back.push(Held {
+                            kind: cube.cube_kind(),
+                            home,
+                            inputs: inputs.clone(),
+                        });
+                        CubeLoc::Gone
+                    }
+                    None => loc,
+                };
                 cubes.push(Cube {
                     kind: cube.cube_kind(),
-                    home: loc,
+                    home,
                     loc,
                 });
             }
@@ -713,19 +965,21 @@ impl Model {
             .regions
             .iter()
             .map(|r| {
-                let mut landings: Vec<Landing> = r
+                let mut landings: Vec<Landings> = r
                     .cells
                     .iter()
                     .flat_map(|&c| Dir::HORIZONTAL.map(|d| (c, d)))
                     .filter(|&(c, d)| level.face(c, d).barrier.is_none())
                     .filter_map(|(c, d)| {
                         let n = step(c, d);
-                        if level.solid(n) || level.standable(n) {
+                        if level.solid(n) || geo.stand(n) == Some(Cond::ALWAYS) {
                             return None;
                         }
-                        let mut l = Landing::from_fall(level, &graph, n)?;
-                        l.hazards |= level.face(c, d).hazards;
-                        Some(l)
+                        let mut ls = Landing::falls(geo, &graph, n);
+                        for (_, l) in &mut ls {
+                            l.hazards |= level.face(c, d).hazards;
+                        }
+                        (!ls.is_empty()).then_some(ls)
                     })
                     .collect();
                 landings.sort();
@@ -855,6 +1109,35 @@ impl Model {
             .filter(|&((c, d), _)| !level.portal_surface(c, d))
             .collect();
         paintable.sort();
+        // Jumping off a ledge into a floor portal: up to two cells out (three, liberal).
+        let reach = if mode == Mode::Liberal { 3 } else { 2 };
+        let dives = portals::dives(level, &graph, reach);
+        let mut fling_heights: Vec<i32> = dives.values().flatten().map(|&(_, h)| h).collect();
+        fling_heights.sort();
+        fling_heights.dedup();
+        let mut flips = Vec::new();
+        let mut panel_faces = HashMap::new();
+        for (i, pn) in level.panels.iter().enumerate() {
+            let face = (pn.cell, pn.normal.opposite());
+            let bit = devices.panel_bit[i];
+            match pn.kind {
+                PanelKind::Flip => {
+                    let white = level.portal_surface(face.0, face.1);
+                    flips.push((face, if white { Cond::off(bit) } else { Cond::on(bit) }));
+                }
+                PanelKind::Angled => {
+                    panel_faces.insert(
+                        face,
+                        PanelFace {
+                            bit,
+                            hinge: pn.hinge(),
+                            angle: pn.angle,
+                        },
+                    );
+                }
+                PanelKind::Glass => {}
+            }
+        }
         let extras = Extras {
             streams: redirectable
                 .iter()
@@ -862,6 +1145,19 @@ impl Model {
                 .collect(),
             split_ceilings: !redirectable.is_empty(),
             paintable,
+            flips,
+            panels: panel_faces,
+            ends: devices.path_ends(),
+            routes: devices.route_faces(),
+            beam_ends: beams.ends.clone(),
+            beam_exits: beams
+                .exits
+                .iter()
+                .map(|(&f, &r)| (f, (r, beams.rays[r].events.clone())))
+                .collect(),
+            dives,
+            fling_heights,
+            liberal: mode == Mode::Liberal,
         };
 
         // Moves off painted floors.
@@ -933,11 +1229,43 @@ impl Model {
             })
             .collect();
         let walk = if pedestals.iter().any(|p| p.timer.is_some()) {
-            walk_graph(level, &graph)
+            walk_graph(geo, &graph)
         } else {
             WalkGraph::default()
         };
-        let portals = Portals::build(level, &graph, rules.sight, &extras);
+        let portals = Portals::build(geo, &graph, rules.sight, &extras);
+        let beam_end_class: HashMap<Face, usize> = portals
+            .classes
+            .iter()
+            .filter(|c| c.beam_end)
+            .map(|c| (c.faces[0], c.id))
+            .collect();
+        let regions_n = graph.regions.len();
+        let mut spots_in = vec![Vec::new(); regions_n];
+        for (k, sp) in beams.spots.iter().enumerate() {
+            if let Some(r) = graph.region_of(beams.spot_cells[sp.cell]) {
+                spots_in[r].push(k);
+            }
+        }
+        let complete = !devices.incomplete && !beams.incomplete;
+        let mut on_platform = vec![false; regions_n];
+        let platform_cells = level
+            .rails
+            .iter()
+            .flat_map(|r| r.track())
+            .chain(
+                level
+                    .pistons
+                    .iter()
+                    .filter(|p| p.normal == Dir::PosZ)
+                    .flat_map(|p| [p.stand(false), p.stand(true)]),
+            );
+        for c in platform_cells {
+            if let Some(r) = graph.region_of(c) {
+                on_platform[r] |= !graph.regions[r].cond.is_always() || !level.standable(c);
+            }
+        }
+        let dynamic = !devices.is_empty() || !beams.is_empty() || !held_back.is_empty();
         let button_sight: Vec<Vec<Masks>> = buttons
             .iter()
             .map(|b| match b.region {
@@ -989,6 +1317,7 @@ impl Model {
                     .iter()
                     .filter(|c| {
                         c.seen_from(r)
+                            || c.deployed_visible.as_ref().is_some_and(|v| !v[r].is_empty())
                             || footholds[r]
                                 .iter()
                                 .any(|&b| !button_sight[b][c.id].is_empty())
@@ -1063,12 +1392,26 @@ impl Model {
                 escaped: false,
                 down: 0,
                 paint: Vec::new(),
+                lit: 0,
+                dev: 0,
             },
             exit_region,
             exit_inputs,
             tosses,
             walk,
             button_sight,
+            devices,
+            bit_rules,
+            switches,
+            beams,
+            emitter_switch,
+            spots_in,
+            beam_end_class,
+            held_back,
+            dynamic,
+            complete,
+            projector_kinds: level.projectors.iter().map(|p| p.kind).collect(),
+            on_platform,
         })
     }
 
@@ -1099,6 +1442,32 @@ impl Model {
     pub fn hazards_on_in(&self, s: &State, held: Option<Signal>) -> u64 {
         let cx = self.context(&s.cubes);
         self.hazards_on(&cx.lay, &self.pack(&cx.lay, s), held)
+    }
+
+    /// Which device bits are bridges (direct or through a portal), moving platforms (pistons
+    /// and rails), and projections through portals.
+    pub fn device_kinds(&self) -> DeviceKinds {
+        let mut k = DeviceKinds::default();
+        for (b, bit) in self.devices.bits.iter().enumerate() {
+            match *bit {
+                Bit::Projector(p) | Bit::Routed { projector: p, .. }
+                    if self.projector_kinds[p] == ProjectorKind::Bridge =>
+                {
+                    k.bridges |= 1 << b;
+                }
+                Bit::Piston(_) | Bit::Rail(_) => k.platforms |= 1 << b,
+                _ => {}
+            }
+            if matches!(bit, Bit::Routed { .. }) {
+                k.routed |= 1 << b;
+            }
+        }
+        k
+    }
+
+    /// The cell of laser spot `k`.
+    pub fn spot_cell(&self, k: usize) -> Cell {
+        self.beams.spot_cells[self.beams.spots[k].cell]
     }
 
     /// The buttons and pedestals wired to hazard `h`.
@@ -1205,7 +1574,11 @@ impl Model {
             next += 1;
         }
         Outcome {
-            verdict: Verdict::Unsolvable,
+            verdict: if self.complete {
+                Verdict::Unsolvable
+            } else {
+                Verdict::Unknown
+            },
             states: table.len(),
         }
     }
@@ -1220,12 +1593,13 @@ impl Model {
         let mut space = StateSpace {
             depth: vec![0],
             goal: Vec::new(),
-            complete: true,
+            complete: self.complete,
             overflow: None,
             offsets: vec![0],
             targets: Vec::new(),
             uses: Vec::new(),
             parent: Vec::new(),
+            regions: Vec::new(),
         };
         let (mut cur, mut sc) = (Vec::new(), Scratch::default());
         let mut i = 0;
@@ -1233,6 +1607,7 @@ impl Model {
             cur.clear();
             cur.extend_from_slice(table.get(i));
             space.goal.push(self.goal(&cx.lay, &cur));
+            space.regions.push(if cur[0] & ESCAPED != 0 { u32::MAX } else { cur[0] });
             self.expand(&cx, &cur, true, &mut sc, &mut |a, n| {
                 let h = Table::hash(n);
                 let j = match table.find(n, h) {
@@ -1292,6 +1667,8 @@ impl Model {
             CubeLoc::Held => HELD,
             CubeLoc::Loose(r) => 1 + r as u32,
             CubeLoc::OnButton(b) => self.button_code(b),
+            CubeLoc::Spot(k) => self.spot_code(k),
+            CubeLoc::Gone => self.spot_code(self.beams.spots.len()),
         }
     }
 
@@ -1299,13 +1676,36 @@ impl Model {
         (1 + self.graph.regions.len() + b) as u32
     }
 
+    fn spot_code(&self, k: usize) -> u32 {
+        (1 + self.graph.regions.len() + self.buttons.len() + k) as u32
+    }
+
     fn code_loc(&self, code: u32) -> CubeLoc {
         let regions = self.graph.regions.len();
+        let buttons = self.buttons.len();
+        let spots = self.beams.spots.len();
         match code as usize {
             0 => CubeLoc::Held,
             c if c <= regions => CubeLoc::Loose(c - 1),
-            c => CubeLoc::OnButton(c - 1 - regions),
+            c if c <= regions + buttons => CubeLoc::OnButton(c - 1 - regions),
+            c if c <= regions + buttons + spots => CubeLoc::Spot(c - 1 - regions - buttons),
+            _ => CubeLoc::Gone,
         }
+    }
+
+    /// The region a cube at `loc` is in, if it is somewhere.
+    fn loc_region(&self, loc: CubeLoc) -> Option<usize> {
+        match loc {
+            CubeLoc::Loose(r) => Some(r),
+            CubeLoc::OnButton(b) => self.buttons[b].region,
+            CubeLoc::Spot(k) => self.spot_region(k),
+            CubeLoc::Held | CubeLoc::Gone => None,
+        }
+    }
+
+    fn spot_region(&self, k: usize) -> Option<usize> {
+        let cell = self.beams.spot_cells[self.beams.spots[k].cell];
+        self.graph.region_of(cell)
     }
 
     fn pack(&self, lay: &Layout, s: &State) -> Vec<u32> {
@@ -1315,6 +1715,9 @@ impl Model {
         w[BLUE + 1] = s.portals[1].map_or(0, |c| c as u32 + 1);
         w[LATCHED] = s.latched;
         w[DOWN] = s.down;
+        w[LIT] = s.lit;
+        w[DEV] = s.dev as u32;
+        w[DEV + 1] = (s.dev >> 32) as u32;
         for (i, c) in s.cubes.iter().enumerate() {
             w[CUBES + i] = self.loc_code(c.loc);
         }
@@ -1338,6 +1741,8 @@ impl Model {
             latched: w[LATCHED],
             escaped: w[0] & ESCAPED != 0,
             down: w[DOWN],
+            lit: w[LIT],
+            dev: dev_of(w),
             paint: (0..self.paint_faces.len())
                 .filter_map(|f| match lay.paint_at(w, f) {
                     0 => None,
@@ -1364,12 +1769,14 @@ impl Model {
         let enabled = match sig {
             Signal::Floor(b) => self.button_enabled[b],
             Signal::Pedestal(p) => self.pedestal_enabled[p],
+            Signal::Laser(_) => true,
         };
         enabled
             && (held == Some(sig)
                 || match sig {
                     Signal::Floor(b) => lay.cubes(s).contains(&self.button_code(b)),
                     Signal::Pedestal(p) => s[LATCHED] & (1 << p) != 0,
+                    Signal::Laser(k) => s[LIT] & (1 << k) != 0,
                 })
     }
 
@@ -1385,6 +1792,104 @@ impl Model {
     fn goal(&self, lay: &Layout, s: &[u32]) -> bool {
         s[0] & ESCAPED != 0
             || (s[0] as usize == self.exit_region && self.exit_open_with(lay, s, None))
+    }
+
+    /// Whether switch `sw` is on.
+    fn switch_on(&self, lay: &Layout, s: &[u32], sw: usize, held: Option<Signal>) -> bool {
+        let w = &self.switches[sw];
+        if w.inputs.is_empty() {
+            w.start
+        } else {
+            w.start != self.all_on(lay, s, &w.inputs, held)
+        }
+    }
+
+    /// The devices' bits, with `held` on for the moment as well.
+    fn device_bits(&self, lay: &Layout, s: &[u32], held: Option<Signal>) -> u64 {
+        let mut dev = 0u64;
+        let (blue, orange) = (portal(s, 0), portal(s, 1));
+        for (b, rule) in self.bit_rules.iter().enumerate() {
+            let on = match *rule {
+                BitRule::Switch(sw) => self.switch_on(lay, s, sw, held),
+                BitRule::Routed {
+                    switch,
+                    projector,
+                    route,
+                } => {
+                    let through = |a: Option<usize>, b: Option<usize>| match (a, b) {
+                        (Some(a), Some(b)) => {
+                            let (a, b) = (&self.portals.classes[a], &self.portals.classes[b]);
+                            a.ends.contains(&projector) && b.routes.contains(&(projector, route))
+                        }
+                        _ => false,
+                    };
+                    (through(blue, orange) || through(orange, blue))
+                        && self.switch_on(lay, s, switch, held)
+                }
+            };
+            dev |= (on as u64) << b;
+        }
+        dev
+    }
+
+    /// The laser receivers powered and the turrets beams hit: every beam from an emitter that
+    /// is on, through reflection cubes at spots and through portals.
+    fn beam_hits(&self, lay: &Layout, s: &[u32]) -> (u32, u32) {
+        let (mut lit, mut hit) = (0u32, 0u32);
+        // Cubes at spots: spot cell -> spot.
+        let mut at: Vec<(usize, usize)> = Vec::new();
+        for (i, &code) in lay.cubes(s).iter().enumerate() {
+            if let CubeLoc::Spot(k) = self.code_loc(code) {
+                if lay.kinds[i] == CubeKind::Reflection {
+                    at.push((self.beams.spots[k].cell, k));
+                }
+            }
+        }
+        let (blue, orange) = (portal(s, 0), portal(s, 1));
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        for (e, &(_, ray)) in self.beams.emitters.iter().enumerate() {
+            if self.switch_on(lay, s, self.emitter_switch[e], None) {
+                stack.push((ray, 0));
+            }
+        }
+        while let Some((ray, depth)) = stack.pop() {
+            if depth > 8 {
+                continue;
+            }
+            let r = &self.beams.rays[ray];
+            let mut redirected = false;
+            for ev in &r.events {
+                match *ev {
+                    Event::Receiver(k) => lit |= 1 << k,
+                    Event::Turret(t) => hit |= 1 << t,
+                    Event::Cube(sc) => {
+                        if let Some(&(_, k)) = at.iter().find(|&&(c, _)| c == sc) {
+                            stack.push((self.beams.spots[k].ray, depth + 1));
+                            redirected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if redirected {
+                continue;
+            }
+            let Some(end) = r.end else { continue };
+            let Some(&class) = self.beam_end_class.get(&end) else {
+                continue;
+            };
+            let out = if blue == Some(class) {
+                orange
+            } else if orange == Some(class) {
+                blue
+            } else {
+                None
+            };
+            if let Some(ray) = out.and_then(|o| self.portals.classes[o].beam_out) {
+                stack.push((ray, depth + 1));
+            }
+        }
+        (lit, hit)
     }
 
     /// Bit `h`: hazard `h` is on.
@@ -1426,9 +1931,20 @@ impl Model {
         }
     }
 
-    /// What follows by itself after any action: a turret over an open portal falls through,
-    /// and pouring droppers paint where their streams land.
+    /// What follows by itself after any action: devices and laser receivers follow the
+    /// buttons, portals and cubes; waiting droppers drop; a portal on a panel that flipped is
+    /// gone; whoever stands where a device went rides or falls (or dies); a turret over an open
+    /// portal falls through, and pouring droppers paint where their streams land.
     fn settle(&self, lay: &Layout, s: &mut [u32]) {
+        if self.dynamic {
+            for _ in 0..4 {
+                let before = (s[1], s[2], s[LIT], dev_of(s));
+                self.settle_devices(lay, s);
+                if before == (s[1], s[2], s[LIT], dev_of(s)) {
+                    break;
+                }
+            }
+        }
         if let (Some(a), Some(b)) = (portal(s, 0), portal(s, 1)) {
             for c in [a, b] {
                 if let Some(t) = self.portals.classes[c].turret {
@@ -1448,6 +1964,71 @@ impl Model {
                 },
             };
             lay.paint_masks(s, masks, self.gels[g].kind);
+        }
+    }
+
+    /// One round of `settle` for devices and lasers.
+    fn settle_devices(&self, lay: &Layout, s: &mut [u32]) {
+        // Devices and lasers: a few rounds, as receivers can drive emitters and devices.
+        for _ in 0..4 {
+            let dev = self.device_bits(lay, s, None);
+            s[DEV] = dev as u32;
+            s[DEV + 1] = (dev >> 32) as u32;
+            if self.beams.is_empty() {
+                break;
+            }
+            let (lit, hit) = self.beam_hits(lay, s);
+            s[DOWN] |= hit;
+            if lit == s[LIT] {
+                break;
+            }
+            s[LIT] = lit;
+        }
+        let dev = dev_of(s);
+        for c in 0..2 {
+            if let Some(cl) = portal(s, c) {
+                if !self.portals.classes[cl].needs.holds(dev) {
+                    s[BLUE + c] = 0;
+                }
+            }
+        }
+        // Cubes waiting in droppers whose inputs are on.
+        for h in &self.held_back {
+            if self.all_on(lay, s, &h.inputs, None) {
+                let (home, gone) = (self.loc_code(h.home), self.loc_code(CubeLoc::Gone));
+                if let Some(i) = (0..lay.kinds.len()).find(|&i| {
+                    lay.kinds[i] == h.kind && lay.homes[i] == home && s[CUBES + i] == gone
+                }) {
+                    lay.move_cube(s, i, home);
+                }
+            }
+        }
+        // Whoever stands where a device went.
+        let fall = |r: usize| -> Option<usize> {
+            let mut r = r;
+            for _ in 0..4 {
+                let region = &self.graph.regions[r];
+                if region.cond.holds(dev) {
+                    return Some(r);
+                }
+                r = region.fallback.iter().find(|(c, _)| c.holds(dev))?.1;
+            }
+            None
+        };
+        if s[0] & ESCAPED == 0 && s[0] != DEAD {
+            s[0] = fall(s[0] as usize).map_or(DEAD, |r| r as u32);
+        }
+        for i in 0..lay.kinds.len() {
+            let loc = self.code_loc(s[CUBES + i]);
+            let Some(r) = self.loc_region(loc) else { continue };
+            if self.graph.regions[r].cond.holds(dev) {
+                continue;
+            }
+            let to = match fall(r) {
+                Some(t) => CubeLoc::Loose(t),
+                None => self.code_loc(lay.homes[i]),
+            };
+            lay.move_cube(s, i, self.loc_code(to));
         }
     }
 
@@ -1477,9 +2058,35 @@ impl Model {
             Color::Orange => (portal(s, 1), portal(s, 0)),
         };
         let (a, b) = (&self.portals.classes[a?], &self.portals.classes[b?]);
-        (a.entry == Some(s[0] as usize))
-            .then_some(b.landing)
+        let dev = dev_of(s);
+        (a.behavior(dev).entry == Some(s[0] as usize))
+            .then(|| resolve(&b.behavior(dev).landings, dev))
             .flatten()
+    }
+
+    /// Dives from the current region into the floor portal of `color`: (height, landing).
+    fn dives(&self, s: &[u32], color: Color) -> Vec<(i32, Landing)> {
+        let (a, b) = match color {
+            Color::Blue => (portal(s, 0), portal(s, 1)),
+            Color::Orange => (portal(s, 1), portal(s, 0)),
+        };
+        let (Some(a), Some(b)) = (a, b) else {
+            return Vec::new();
+        };
+        let (a, b) = (&self.portals.classes[a], &self.portals.classes[b]);
+        let (dev, r) = (dev_of(s), s[0] as usize);
+        let mut out = Vec::new();
+        for &(from, h) in &a.behavior(dev).dives {
+            if from != r {
+                continue;
+            }
+            for &(c, l) in b.behavior(dev).flings_at(h) {
+                if c.holds(dev) && !out.iter().any(|&(_, o): &(i32, Landing)| o.region == l.region) {
+                    out.push((h, l));
+                }
+            }
+        }
+        out
     }
 
     /// Moves the player, into `n`, along a path crossing `hazards`: whether that crossed an
@@ -1524,11 +2131,12 @@ impl Model {
         sc: &mut Scratch,
         emit: &mut impl FnMut(Action, &[u32]),
     ) {
-        if s[0] & ESCAPED != 0 {
+        if s[0] & ESCAPED != 0 || s[0] == DEAD {
             return;
         }
         let lay = &cx.lay;
         let r = s[0] as usize;
+        let dev = dev_of(s);
         let cubes = lay.cubes(s);
         let held = cubes.iter().position(|&c| c == HELD);
         let on = self.hazards_on(lay, s, None);
@@ -1542,11 +2150,14 @@ impl Model {
         // A `quiet` action changes nothing `settle` looks at (cubes on buttons, pedestals,
         // portals on faces under turrets or gel streams), so from a settled state it needs no
         // settling.
+        let dynamic = self.dynamic;
         let mut done = |n: &mut Vec<u32>, a: Action, quiet: bool| {
-            if !(quiet && settled) {
+            if !(quiet && settled && !dynamic) {
                 self.settle(lay, n);
             }
-            emit(a, n);
+            if n[0] != DEAD {
+                emit(a, n);
+            }
         };
         let copy = |n: &mut Vec<u32>| {
             n.clear();
@@ -1555,10 +2166,11 @@ impl Model {
 
         let (lo, hi) = self.edge_range[r];
         for e in &self.graph.edges[lo..hi] {
-            let ok = match e.kind {
-                Move::Step => self.rules.cube_steps && cubes.contains(&(1 + r as u32)),
-                _ => true,
-            };
+            let ok = e.cond.holds(dev)
+                && match e.kind {
+                    Move::Step => self.rules.cube_steps && cubes.contains(&(1 + r as u32)),
+                    _ => true,
+                };
             let moved = ok.then(|| self.travel(lay, s, on, alive, e.to, e.hazards, &mut sc.n));
             if let Some(Some(fizzled)) = moved {
                 let a = Action::Move {
@@ -1582,6 +2194,19 @@ impl Model {
                     hazards: m.hazards,
                 };
                 done(&mut sc.n, a, !fizzled);
+            }
+        }
+        for color in Color::BOTH {
+            for (height, l) in self.dives(s, color) {
+                if let Some(fizzled) = self.travel(lay, s, on, alive, l.region, l.hazards, &mut sc.n)
+                {
+                    let a = Action::Dive {
+                        color,
+                        height,
+                        to: l.region,
+                    };
+                    done(&mut sc.n, a, !fizzled);
+                }
             }
         }
         if !act {
@@ -1619,11 +2244,24 @@ impl Model {
                 let unpainted = t
                     .needs_paint
                     .is_some_and(|f| lay.paint_at(s, f) != PaintKind::Portal as u32 + 1);
-                if !self.class_enabled[c] || portal(s, me) == Some(c) || taken || unpainted {
+                if !self.class_enabled[c]
+                    || portal(s, me) == Some(c)
+                    || taken
+                    || unpainted
+                    || !self.portals.classes[c].needs.holds(dev)
+                {
                     continue;
                 }
-                let visible = &self.portals.classes[c].visible_from[r];
-                let stand_on = if t.open || clear(visible, on) {
+                let class = &self.portals.classes[c];
+                let deployed = class
+                    .deployed
+                    .as_ref()
+                    .is_some_and(|&(b, _)| dev & (1 << b) != 0);
+                let (visible, open) = match (&class.deployed_visible, deployed) {
+                    (Some(v), true) => (&v[r], v[r].contains(&0)),
+                    _ => (&class.visible_from[r], t.open),
+                };
+                let stand_on = if open || clear(visible, on) {
                     Some(None)
                 } else {
                     sc.foot
@@ -1661,21 +2299,38 @@ impl Model {
 
         if let Some(i) = held {
             let kind = lay.kinds[i];
-            let spots = std::iter::once(CubeLoc::Loose(r)).chain(
-                self.buttons_in[r]
-                    .iter()
-                    .filter(|&&b| {
-                        self.buttons[b].kind.accepts(kind) && !cubes.contains(&self.button_code(b))
-                    })
-                    .map(|&b| CubeLoc::OnButton(b)),
-            );
+            let reflects = kind == CubeKind::Reflection;
+            let spots = std::iter::once(CubeLoc::Loose(r))
+                .chain(
+                    self.buttons_in[r]
+                        .iter()
+                        .filter(|&&b| {
+                            self.buttons[b].kind.accepts(kind)
+                                && !cubes.contains(&self.button_code(b))
+                        })
+                        .map(|&b| CubeLoc::OnButton(b)),
+                )
+                .chain(
+                    self.spots_in[r]
+                        .iter()
+                        .filter(|_| reflects)
+                        .filter(|&&k| {
+                            // One cube to a cell.
+                            let cell = self.beams.spots[k].cell;
+                            !cubes.iter().any(|&c| {
+                                matches!(self.code_loc(c), CubeLoc::Spot(o) if self.beams.spots[o].cell == cell)
+                            })
+                        })
+                        .map(|&k| CubeLoc::Spot(k)),
+                );
             for at in spots {
                 copy(&mut sc.n);
                 lay.move_cube(&mut sc.n, i, self.loc_code(at));
-                let quiet = !matches!(at, CubeLoc::OnButton(_));
+                let quiet = !matches!(at, CubeLoc::OnButton(_) | CubeLoc::Spot(_));
                 done(&mut sc.n, Action::PutDown { at }, quiet);
             }
-            for &l in &self.tosses[r] {
+            for ls in &self.tosses[r] {
+                let Some(l) = resolve(ls, dev) else { continue };
                 let to = self.cube_lands(lay, s, on, l, i);
                 copy(&mut sc.n);
                 lay.move_cube(&mut sc.n, i, self.loc_code(to));
@@ -1688,11 +2343,7 @@ impl Model {
             let mut last = None;
             for (i, &code) in cubes.iter().enumerate() {
                 let from = self.code_loc(code);
-                let here = match from {
-                    CubeLoc::Loose(cr) => cr == r,
-                    CubeLoc::OnButton(b) => self.buttons[b].region == Some(r),
-                    CubeLoc::Held => false,
-                };
+                let here = self.loc_region(from) == Some(r);
                 let id = (lay.kinds[i], lay.homes[i], code);
                 if !here || last == Some(id) {
                     continue;
@@ -1704,7 +2355,7 @@ impl Model {
                     cube: lay.kinds[i],
                     from,
                 };
-                done(&mut sc.n, a, !matches!(from, CubeLoc::OnButton(_)));
+                done(&mut sc.n, a, !matches!(from, CubeLoc::OnButton(_) | CubeLoc::Spot(_)));
             }
         }
 
@@ -1752,6 +2403,11 @@ impl Model {
         let lay = &cx.lay;
         let timed = Some(Signal::Pedestal(p));
         let on = self.hazards_on(lay, s, timed);
+        let dev = if self.devices.is_empty() {
+            0
+        } else {
+            self.device_bits(lay, s, timed)
+        };
         let alive = cx.turrets & !s[DOWN];
         let step_time = VOXEL / self.rules.walk_speed;
         let fall_time = |h: i32| (2.0 * h as f64 * VOXEL / GRAVITY).sqrt();
@@ -1769,8 +2425,8 @@ impl Model {
             if best[key(node, fizzled)] < t {
                 continue;
             }
-            for &(to, fall, hazards) in &self.walk.moves[node] {
-                if hazards & on & self.lasers != 0 {
+            for &(to, fall, hazards, cond) in &self.walk.moves[node] {
+                if hazards & on & self.lasers != 0 || !cond.holds(dev) {
                     continue;
                 }
                 let region = self.walk.region[to];
@@ -1833,6 +2489,17 @@ impl Model {
             CubeLoc::Held => "hand".into(),
             CubeLoc::Loose(r) => format!("region {}", RegionGraph::label(r)),
             CubeLoc::OnButton(b) => format!("button {}", self.buttons[b].index),
+            CubeLoc::Spot(k) => {
+                let sp = &self.beams.spots[k];
+                let c = self.beams.spot_cells[sp.cell];
+                format!(
+                    "{:?} facing {:?} (region {})",
+                    c,
+                    sp.dir,
+                    self.spot_region(k).map_or('?', RegionGraph::label)
+                )
+            }
+            CubeLoc::Gone => "nowhere".into(),
         }
     }
 
@@ -1865,6 +2532,10 @@ impl Model {
                     Move::Step => format!("climb onto region {} using a cube", label(to)),
                     Move::Bounce => format!("bounce off repulsion gel up to region {}", label(to)),
                     Move::Leap => format!("leap off propulsion gel across to region {}", label(to)),
+                    Move::Plate => format!("get launched by a faith plate to region {}", label(to)),
+                    Move::Stairs => format!("walk up the stairs to region {}", label(to)),
+                    Move::Funnel => format!("float along the funnel to region {}", label(to)),
+                    Move::Ride => format!("ride the platform to region {}", label(to)),
                 };
                 format!("{what}{}", self.fields(hazards))
             }
@@ -1923,6 +2594,11 @@ impl Model {
             Action::Knock { turret } => {
                 format!("knock over turret {}", self.turrets[turret].index)
             }
+            Action::Dive { color, height, to } => format!(
+                "drop {height} into the {} portal and fly out to region {}",
+                color.name(),
+                label(to)
+            ),
         }
     }
 }
@@ -1941,9 +2617,18 @@ fn knock(s: &mut [u32], turret: Option<usize>) {
 const BLUE: usize = 1;
 const LATCHED: usize = 3;
 const DOWN: usize = 4;
-const CUBES: usize = 5;
+const LIT: usize = 5;
+const DEV: usize = 6;
+const CUBES: usize = 8;
 /// Word 0 holds the region, and this bit if the player escaped during a timed dash.
 const ESCAPED: u32 = 1 << 31;
+/// Word 0 of a state where the player died (a device went from under them over goo).
+const DEAD: u32 = ESCAPED - 1;
+
+/// The devices' bits of a packed state.
+fn dev_of(s: &[u32]) -> u64 {
+    s[DEV] as u64 | (s[DEV + 1] as u64) << 32
+}
 /// Cube location codes: `HELD`, `1 + region` loose, `1 + regions + button` on a button, so
 /// they sort like `CubeLoc`.
 const HELD: u32 = 0;
@@ -1954,8 +2639,9 @@ fn portal(s: &[u32], c: usize) -> Option<usize> {
 }
 
 /// How a search packs states into words: region (and `ESCAPED`), blue and orange portal
-/// classes + 1 (0 = none), latched pedestals, knocked-over turrets, then each cube's location
-/// code, then 2 bits of paint per face (`PaintKind` + 1, 0 = none). Cubes keep the start's
+/// classes + 1 (0 = none), latched pedestals, knocked-over turrets, powered laser receivers,
+/// two words of device bits, then each cube's location code, then 2 bits of paint per face
+/// (`PaintKind` + 1, 0 = none). Cubes keep the start's
 /// sorted order; interchangeable ones (same kind and home) stay sorted among themselves, so
 /// cubes in permuted places are one state, as in `State`.
 struct Layout {
@@ -2057,6 +2743,14 @@ fn spot_masks(spot: &[usize]) -> Vec<(usize, u32)> {
         }
     }
     masks
+}
+
+/// Device bits by kind (`Model::device_kinds`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeviceKinds {
+    pub bridges: u64,
+    pub platforms: u64,
+    pub routed: u64,
 }
 
 /// What a search needs besides the model: how it packs states, and the turrets that exist.
@@ -2177,7 +2871,8 @@ fn cube_name(k: CubeKind) -> &'static str {
     }
 }
 
-fn walk_graph(level: &Level, graph: &RegionGraph) -> WalkGraph {
+fn walk_graph(geo: Geo, graph: &RegionGraph) -> WalkGraph {
+    let level = geo.level;
     let mut w = WalkGraph::default();
     for r in &graph.regions {
         for &c in &r.cells {
@@ -2193,15 +2888,42 @@ fn walk_graph(level: &Level, graph: &RegionGraph) -> WalkGraph {
             if face.barrier.is_some() || level.solid(n) {
                 continue;
             }
-            let target = if level.standable(n) {
-                Some((n, 0))
-            } else {
-                level.fall_path(n)
+            let Some(open) = (match geo.block(c, d) {
+                None => Some(Cond::ALWAYS),
+                Some(b) => b.negate(),
+            }) else {
+                continue;
             };
-            if let Some((f, fallen)) = target {
-                let hazards = face.hazards | fallen;
+            let sn = geo.stand(n);
+            let mut targets: Vec<(Cond, Cell, u64)> = Vec::new();
+            if let Some(cn) = sn {
+                targets.extend(open.and(cn).map(|cc| (cc, n, 0)));
+            }
+            let rest = match sn {
+                None => Some(open),
+                Some(cn) => cn.negate().and_then(|x| open.and(x)),
+            };
+            if let Some(rest) = rest {
+                for f in geo.falls(n) {
+                    if let Some(cc) = rest.and(f.cond) {
+                        targets.push((cc, f.cell, f.hazards));
+                    }
+                }
+            }
+            for (cond, f, fallen) in targets {
                 if let Some(&j) = w.node.get(&f) {
-                    w.moves[i].push((j, n[2] - f[2], hazards));
+                    w.moves[i].push((j, n[2] - f[2], face.hazards | fallen, cond));
+                }
+            }
+        }
+    }
+    // Deployed stairs.
+    for m in geo.dyn_.moves.iter().filter(|m| m.kind == Move::Stairs) {
+        for f in &m.from {
+            let Some(&i) = w.node.get(f) else { continue };
+            for &(c, t, h) in &m.to {
+                if let (Some(&j), Some(cond)) = (w.node.get(&t), m.cond.and(c)) {
+                    w.moves[i].push((j, 0, m.hazards | h, cond));
                 }
             }
         }

@@ -18,8 +18,8 @@ plus `workshop_id` and `title`. `build --p2c DIR` also writes the solvable ones 
 ## How it works
 
 - **Listing**: the public browse pages (`toprated` by default; `--sort mostrecent trend ...`), Singleplayer, minus
-  the Workshop's auto-generated item tags for things the tokens can't express (angled panels,
-  lasers, bridges, faith plates, ...). Steam stops paging near page 1667 per sort. Metadata from the
+  co-op and custom-visuals/story maps (every Puzzle Maker item has tokens now). Steam stops
+  paging near page 1667 per sort. Metadata from the
   keyless `ISteamRemoteStorage/GetPublishedFileDetails`; Puzzle Maker uploads are `mymaps/<n>.bsp`.
 - **Downloading** uses HTTP ranges: header, then the entity lump (~0.2 MB). If instance names rule
   the map out, stop; else fetch the 11 other lumps `convert.py` reads (~0.6 MB of a 5–40 MB map)
@@ -37,7 +37,17 @@ plus `workshop_id` and `title`. `build --p2c DIR` also writes the solvable ones 
   - cube type: `counter_cube_type` startvalue; pedestal: `prop_button` `istimer`/`Delay`;
     gel: `info_paint_sprayer` `PaintType` (0 bounce, 2 speed, 3 portal, 4 water) and `start_active`;
     fields: their trigger brushes' extent, `trigger_hurt` = laser field;
-  - turrets: the `.p2c` Facing is the npc's yaw + 180 (kept, so imports match generated levels).
+  - turrets: the `.p2c` Facing is the npc's yaw + 180 (kept, so imports match generated levels);
+  - lasers, bridges, funnels: the prop's forward (into the room) and its origin 16 units into the
+    wall; a bridge's walkable side is its up; `_center` models are centred; catchers and relays
+    wire like buttons, and a funnel's proxy inputs 3/4 are its reversing wires;
+  - faith plates: the arm's cell and the trigger_catapult's launch target (an info_target, or a
+    helper trigger throwing straight up, whose height comes from its speed);
+  - panels, stairs: the arms' cell, the instance's angles (local +x) and the branch's
+    InitialValue; an angled panel's whiteness from its `panel_top` brush, a flip panel's from
+    its door's outward face; pistons from their func_movelinear and level counters; rails from
+    the track's movedir/movedistance; loose cubes from `cube<N>` instances' CubeType. The voxel
+    behind each such item is forced solid (it is in the editor; compiled, it's a hollow).
 - **Labelling**: `glados score --editor-rules off`. A published map already passed the real
   editor, and our model of its rules flags some of them (a fizzler centred in a doorway, fields
   crossing), so those flags are skipped.
@@ -54,8 +64,9 @@ dropper, glass over a wall, an empty sealed pocket.
 Rejected with a reason in `fetched.jsonl` / `report.jsonl`:
 - **BEEmod maps** (instance names like `bt`, `cd`, `ip`, `orl`): most recent uploads. BEE2's
   compiler names things differently and adds its own items; not attempted.
-- Items the tokens can't express: loose cubes (no dropper), buttons wired to cube droppers,
-  wall-mounted gel droppers, and everything the tag filter misses.
+- Items the tokens can't express: pedestal and floor buttons off the floor, wall-mounted gel
+  droppers and stairs, cube types past franken. (Turrets facing between multiples of 45° are
+  rounded to the nearest.)
 - Some converted puzzles come out `unsolvable`/`uncertain` because the solver doesn't model a
   trick they need (e.g. speed-gel jumps over goo), not because conversion failed.
 

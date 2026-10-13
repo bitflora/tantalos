@@ -5,6 +5,7 @@
 
 use crate::builder::Builder;
 use crate::geom::Dir;
+use crate::level::LaserKind;
 use crate::p2c::Puzzle;
 
 /// One room; entry and exit on the same floor.
@@ -306,6 +307,182 @@ pub fn washed_gel(water: bool) -> Puzzle {
     b.build()
 }
 
+/// The exit is wired to a laser catcher on the far wall; the emitter fires across the room.
+/// A reflection cube set down in the beam, facing the catcher, powers it.
+pub fn laser_cube(cube: bool) -> Puzzle {
+    let title = if cube { "Laser cube" } else { "Laser, no cube" };
+    let mut b = Builder::new(title, [6, 6, 4]);
+    b.carve([0, 0, 1], [5, 5, 3]);
+    b.entry([1, 0, 1], Dir::PosY);
+    let exit = b.exit([0, 4, 1], Dir::PosX);
+    b.laser(LaserKind::Emitter, [5, 2, 1], Dir::NegX, Some(Dir::NegZ), true);
+    let catcher = b.laser(LaserKind::Catcher, [3, 5, 1], Dir::NegY, Some(Dir::NegZ), true);
+    b.connect(catcher, exit);
+    if cube {
+        b.cube_dropper_of([2, 4, 3], 2);
+    }
+    b.build()
+}
+
+/// A laser relay in the beam's path powers the exit from the start.
+pub fn laser_relay() -> Puzzle {
+    let mut b = Builder::new("Laser relay", [6, 6, 4]);
+    b.carve([0, 0, 1], [5, 5, 3]);
+    b.entry([1, 0, 1], Dir::PosY);
+    let exit = b.exit([0, 4, 1], Dir::PosX);
+    b.laser(LaserKind::Emitter, [5, 2, 1], Dir::NegX, Some(Dir::NegZ), true);
+    let relay = b.laser(LaserKind::Relay, [2, 2, 1], Dir::PosZ, None, true);
+    b.connect(relay, exit);
+    b.build()
+}
+
+/// The exit is on a ledge four voxels up; a faith plate on the floor throws you there.
+pub fn faith_plate() -> Puzzle {
+    let mut b = Builder::new("Faith plate", [8, 4, 8]);
+    b.carve([0, 0, 1], [7, 3, 7]);
+    b.fill([5, 0, 1], [7, 3, 4]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([7, 1, 5], Dir::NegX);
+    b.faith_plate([2, 1, 1], Dir::PosZ, [6, 1, 5], Dir::PosZ);
+    b.build()
+}
+
+/// A goo trench; a light bridge from the near wall spans it at floor level. Off at the start
+/// (`switched`), a latching pedestal turns it on.
+pub fn light_bridge(switched: bool) -> Puzzle {
+    let title = if switched {
+        "Switched bridge"
+    } else {
+        "Light bridge"
+    };
+    let mut b = Builder::new(title, [9, 4, 4]);
+    b.carve([0, 0, 1], [8, 3, 3]);
+    b.carve([3, 0, 0], [5, 3, 0]);
+    b.goo([4, 1, 0]);
+    b.entry([1, 3, 1], Dir::NegY);
+    b.exit([8, 2, 1], Dir::NegX);
+    // On the near wall, across the trench at floor level.
+    let bridge = b.light_bridge([0, 0, 1], Dir::PosX, Dir::PosZ, !switched);
+    if switched {
+        let p = b.pedestal([1, 2, 1], None);
+        b.connect(p, bridge);
+    }
+    b.build()
+}
+
+/// The bridge projects into a white wall; a portal there and one on the white wall across
+/// the trench bring it out spanning the trench.
+pub fn bridge_portal() -> Puzzle {
+    let mut b = Builder::new("Bridge portal", [9, 6, 5]);
+    b.carve([0, 0, 1], [8, 5, 4]);
+    b.carve([3, 0, 0], [5, 5, 0]);
+    b.goo([4, 2, 0]);
+    // Near side: the bridge runs along +y into the white wall at y = 6.
+    b.light_bridge([1, 0, 1], Dir::PosY, Dir::PosZ, true);
+    b.paint([1, 5, 1], [1, 5, 1], Dir::PosY, true);
+    // White wall at x = -1 facing the trench, at floor height on the near side.
+    b.paint([0, 3, 1], [0, 3, 1], Dir::NegX, true);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([8, 3, 1], Dir::NegX);
+    b.build()
+}
+
+/// The exit is on a ledge three voxels up; a funnel from the floor beside it lifts you.
+pub fn funnel_lift() -> Puzzle {
+    let mut b = Builder::new("Funnel lift", [7, 3, 7]);
+    b.carve([0, 0, 1], [6, 2, 6]);
+    b.fill([4, 0, 1], [6, 2, 3]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([6, 1, 4], Dir::NegX);
+    b.funnel([3, 1, 1], Dir::PosZ, true, false);
+    b.build()
+}
+
+/// A one-voxel ledge; stairs in front of it, retracted until a cube sits on the button.
+pub fn stairs_button() -> Puzzle {
+    let mut b = Builder::new("Stairs button", [8, 4, 5]);
+    b.carve([0, 0, 1], [7, 3, 4]);
+    b.fill([5, 0, 1], [7, 3, 1]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([7, 2, 2], Dir::NegX);
+    let stairs = b.stairs([3, 2, 1], Dir::PosX, false);
+    let button = b.floor_button([1, 3, 1]);
+    b.connect(button, stairs);
+    b.cube_dropper([2, 0, 4]);
+    b.build()
+}
+
+/// A two-deep pit cuts the room; a piston platform in it rises flush with the floor when a
+/// latching pedestal is pressed.
+pub fn piston_bridge() -> Puzzle {
+    let mut b = Builder::new("Piston bridge", [7, 3, 6]);
+    b.carve([0, 0, 3], [6, 2, 5]);
+    b.carve([3, 0, 1], [3, 2, 2]);
+    b.entry([0, 1, 3], Dir::PosX);
+    b.exit([6, 1, 3], Dir::NegX);
+    let piston = b.piston([3, 1, 1], Dir::PosZ, 0, 2, false);
+    let p = b.pedestal([1, 2, 3], None);
+    b.connect(p, piston);
+    b.build()
+}
+
+/// A goo trench three wide; an oscillating rail platform crosses it.
+pub fn rail_ferry() -> Puzzle {
+    let mut b = Builder::new("Rail ferry", [9, 3, 4]);
+    b.carve([0, 0, 1], [8, 2, 3]);
+    b.carve([3, 0, 0], [5, 2, 0]);
+    b.goo([4, 1, 0]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([8, 1, 1], Dir::NegX);
+    b.rail([3, 1, 1], [5, 1, 1], true, true);
+    b.build()
+}
+
+/// A one-wide corridor; an angled panel deployed at 90° stands across it until a latching
+/// pedestal folds it down.
+pub fn panel_gate() -> Puzzle {
+    let mut b = Builder::new("Panel gate", [7, 3, 4]);
+    b.carve([0, 1, 1], [6, 1, 3]);
+    b.carve([0, 0, 1], [1, 2, 3]);
+    b.entry([0, 0, 1], Dir::PosY);
+    b.exit([6, 1, 1], Dir::NegX);
+    let panel = b.angled_panel([3, 1, 1], Dir::PosZ, Dir::PosX, 90, true, false, false);
+    let p = b.pedestal([1, 2, 1], None);
+    b.connect(p, panel);
+    b.build()
+}
+
+/// `goo_crossing` with the far wall black but for a flip panel, which a latching pedestal
+/// turns white side out.
+pub fn flip_crossing() -> Puzzle {
+    let mut b = Builder::new("Flip crossing", [8, 6, 4]);
+    b.carve([0, 0, 1], [7, 5, 3]);
+    b.carve([3, 0, 0], [4, 5, 0]);
+    b.goo([3, 2, 0]);
+    b.paint([0, 0, 1], [0, 5, 1], Dir::NegX, true);
+    let panel = b.flip_panel([7, 3, 1], Dir::NegX);
+    b.entry([1, 0, 1], Dir::PosY);
+    b.exit([6, 5, 1], Dir::NegY);
+    let p = b.pedestal([1, 4, 1], None);
+    b.connect(p, panel);
+    b.build()
+}
+
+/// Jump off a high ledge into a floor portal two cells out, come out of a portal high on the
+/// wall behind the ledge at speed, and fly over the goo to the exit.
+pub fn fling() -> Puzzle {
+    let mut b = Builder::new("Fling", [14, 3, 9]);
+    b.carve([0, 0, 1], [13, 2, 8]);
+    b.fill([0, 0, 1], [2, 2, 6]);
+    b.paint([4, 1, 1], [4, 1, 1], Dir::NegZ, true);
+    b.paint([0, 1, 8], [0, 1, 8], Dir::NegX, true);
+    b.carve([6, 0, 0], [10, 2, 0]);
+    b.goo([8, 1, 0]);
+    b.entry([1, 2, 7], Dir::NegY);
+    b.exit([13, 1, 1], Dir::NegX);
+    b.build()
+}
+
 pub fn all() -> Vec<(&'static str, Puzzle)> {
     vec![
         ("flat_room", flat_room()),
@@ -331,5 +508,19 @@ pub fn all() -> Vec<(&'static str, Puzzle)> {
         ("washed_gel", washed_gel(true)),
         ("timed_field", timed_field(6)),
         ("sphere_button", sphere_button()),
+        ("laser_cube", laser_cube(true)),
+        ("laser_no_cube", laser_cube(false)),
+        ("laser_relay", laser_relay()),
+        ("faith_plate", faith_plate()),
+        ("light_bridge", light_bridge(false)),
+        ("switched_bridge", light_bridge(true)),
+        ("bridge_portal", bridge_portal()),
+        ("funnel_lift", funnel_lift()),
+        ("stairs_button", stairs_button()),
+        ("piston_bridge", piston_bridge()),
+        ("rail_ferry", rail_ferry()),
+        ("panel_gate", panel_gate()),
+        ("flip_crossing", flip_crossing()),
+        ("fling", fling()),
     ]
 }

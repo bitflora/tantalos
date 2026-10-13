@@ -3,7 +3,7 @@
 use glados::fixtures;
 use glados::level::{ItemKind, Level};
 use glados::p2c::Puzzle;
-use glados::regions::{Edge, Move, RegionGraph};
+use glados::regions::{Cond, Edge, Move, RegionGraph};
 
 fn analyse(p: &Puzzle) -> (Level, RegionGraph) {
     let level = Level::from_puzzle(p);
@@ -73,13 +73,15 @@ fn step_ledge_needs_a_cube_up_and_drops_down() {
                 from: a,
                 to: b,
                 kind: Move::Step,
-                hazards: 0
+                hazards: 0,
+                cond: Cond::ALWAYS,
             },
             Edge {
                 from: b,
                 to: a,
                 kind: Move::Drop { height: 1 },
-                hazards: 0
+                hazards: 0,
+                cond: Cond::ALWAYS,
             },
         ]
     );
@@ -99,7 +101,8 @@ fn worked_example_ledge_is_unreachable_on_foot() {
             from: b,
             to: a,
             kind: Move::Drop { height: 2 },
-            hazards: 0
+            hazards: 0,
+            cond: Cond::ALWAYS,
         }]
     );
     assert!(!graph.reachable_on_foot(a)[b]);

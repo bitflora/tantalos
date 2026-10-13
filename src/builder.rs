@@ -2,7 +2,21 @@
 //! (taken from real v14 files), so the output should open in the Puzzle Maker.
 
 use crate::geom::{angles_for_up, angles_mapping, step, Cell, Dir};
+use crate::level::LaserKind;
 use crate::p2c::{Connection, Item, Props, Puzzle, Section, Voxels};
+
+/// Gravity, units per second squared.
+const GRAVITY: f64 = 600.0;
+
+/// Yaw in degrees of a horizontal direction.
+fn yaw(d: Dir) -> i32 {
+    match d {
+        Dir::PosX => 0,
+        Dir::PosY => 90,
+        Dir::NegX => 180,
+        _ => 270,
+    }
+}
 
 pub struct Builder {
     title: String,
@@ -63,6 +77,11 @@ impl Builder {
     pub fn set_prop(&mut self, item: i32, key: &str, value: &str) -> &mut Self {
         self.items[item as usize].set(key, value);
         self
+    }
+
+    /// Whether the `d` face of cell `c` is white so far.
+    pub fn white(&self, c: Cell, d: Dir) -> bool {
+        self.voxels.face_portalable(c, d)
     }
 
     /// Sets portalability of the `d` face of every cell in the box.
@@ -414,6 +433,347 @@ impl Builder {
         let splat = self.add("ITEM_PAINT_SPLAT", cell, normal, &props, &[]);
         self.items[splat as usize].set("ConnectionVisiblity", "2");
         splat
+    }
+
+    /// A cube placed without a dropper, resting in open `cell`. The editor still writes a
+    /// dropper for it, switched off, at the top of the chamber (as in the style map).
+    /// `cube_type` as in `cube_dropper_of`.
+    pub fn loose_cube(&mut self, cell: Cell, cube_type: i32) -> i32 {
+        let shared = |delay: &str| {
+            vec![
+                ("ITEM_PROPERTY_CUBE_TYPE", cube_type.to_string()),
+                ("ITEM_PROPERTY_DROPPER_ENABLED", "0".into()),
+                ("ITEM_PROPERTY_AUTO_DROP_CUBE", "1".into()),
+                ("ITEM_PROPERTY_AUTO_RESPAWN_CUBE", "1".into()),
+                ("ITEM_PROPERTY_TIMER_DELAY", delay.into()),
+            ]
+        };
+        let cube = self.add("ITEM_CUBE", cell, Dir::PosZ, &shared("0"), &[]);
+        let mut dropper_props = vec![("ITEM_PROPERTY_CONNECTION_COUNT", "0".to_string())];
+        dropper_props.extend(shared("0"));
+        dropper_props.insert(3, ("ITEM_PROPERTY_DROPPER_FALL_STRAIGHT_DOWN", "1".into()));
+        let top = [cell[0], cell[1], self.size[2] - 1];
+        let dropper = self.add("ITEM_DROPPER_CUBE", top, Dir::NegZ, &dropper_props, &[]);
+        self.link(cube, dropper, "CONNECTION_BOX_DROPPER");
+        cube
+    }
+
+    /// A laser emitter, catcher or relay in open `cell` on the surface behind it (against
+    /// `normal`). `offset`: the `_OFFSET` item, sitting toward that side of the face; `None`
+    /// for the centred one. Emitters fire along `normal`; `start_on` only matters for them.
+    pub fn laser(
+        &mut self,
+        kind: LaserKind,
+        cell: Cell,
+        normal: Dir,
+        offset: Option<Dir>,
+        start_on: bool,
+    ) -> i32 {
+        let name = match kind {
+            LaserKind::Emitter => "EMITTER",
+            LaserKind::Catcher => "CATCHER",
+            LaserKind::Relay => "RELAY",
+        };
+        let kind_name = format!(
+            "ITEM_LASER_{name}_{}",
+            if offset.is_some() { "OFFSET" } else { "CENTER" }
+        );
+        let angles = match offset {
+            Some(o) => angles_mapping([0, 0, 1], normal, [-1, 0, 0], o),
+            None => angles_for_up(normal),
+        };
+        let mut extra = vec![("ITEM_PROPERTY_CONNECTION_COUNT", "0".to_string())];
+        match kind {
+            LaserKind::Emitter => {
+                extra.push(("ITEM_PROPERTY_CUBE_TYPE", "0".into()));
+                extra.push(("ITEM_PROPERTY_START_ENABLED", (start_on as i32).to_string()));
+            }
+            LaserKind::Catcher => extra.push(("ITEM_PROPERTY_CUBE_TYPE", "0".into())),
+            LaserKind::Relay => {}
+        }
+        self.add_raw(&kind_name, cell, angles, "0 0 0", true, &extra, &[])
+    }
+
+    /// A faith plate in open `cell` on the surface against `normal`, launching to a target in
+    /// open `target` on the surface against `target_normal`. Its speed is what a lob over the
+    /// higher of the two by two voxels needs (ASSUMPTION: the compiled trigger aims at the
+    /// target with this speed). Returns (plate, target).
+    pub fn faith_plate(
+        &mut self,
+        cell: Cell,
+        normal: Dir,
+        target: Cell,
+        target_normal: Dir,
+    ) -> (i32, i32) {
+        let dz = (target[2] - cell[2]) as f64 * 128.0;
+        let flat = (((target[0] - cell[0]).pow(2) + (target[1] - cell[1]).pow(2)) as f64).sqrt()
+            * 128.0;
+        let rise = dz.max(0.0) + 256.0;
+        let vz = (2.0 * GRAVITY * rise).sqrt();
+        let t = vz / GRAVITY + (2.0 * (rise - dz) / GRAVITY).sqrt();
+        let speed = (vz * vz + (flat / t).powi(2)).sqrt();
+        let height = (rise / 128.0).round();
+        let plate = self.add(
+            "ITEM_CATAPULT",
+            cell,
+            normal,
+            &[
+                ("ITEM_PROPERTY_CONNECTION_COUNT", "0".into()),
+                ("ITEM_PROPERTY_START_ENABLED", "1".into()),
+                ("ITEM_PROPERTY_START_REVERSED", "0".into()),
+                ("ITEM_PROPERTY_CATAPULT_SPEED", format!("{speed:.6}")),
+                ("ITEM_PROPERTY_TARGET_NAME", "target".into()),
+                ("ITEM_PROPERTY_VERTICAL_ALIGNMENT", "0".into()),
+            ],
+            &[("CatapultHeight", format!("{height:.6}"))],
+        );
+        let t = self.add(
+            "ITEM_CATAPULT_TARGET",
+            target,
+            target_normal,
+            &[("ITEM_PROPERTY_VERTICAL_ALIGNMENT", "0".into())],
+            &[],
+        );
+        self.link(plate, t, "CONNECTION_CATAPULT_TARGET");
+        (plate, t)
+    }
+
+    /// A light bridge emitter in open `cell` on the surface against `normal`, projecting
+    /// along it, walkable side `side`. Like the style map's, it sits 0.375 voxel toward
+    /// `-side`, so a bridge with `side` up is the floor of the cells it crosses.
+    pub fn light_bridge(&mut self, cell: Cell, normal: Dir, side: Dir, start_on: bool) -> i32 {
+        let angles = angles_mapping([0, 0, 1], normal, [1, 0, 0], side);
+        let v = side.vector();
+        let local = format!(
+            "{} {} {}",
+            -0.375 * v[0] as f64,
+            -0.375 * v[1] as f64,
+            -0.375 * v[2] as f64
+        );
+        self.add_raw(
+            "ITEM_LIGHT_BRIDGE",
+            cell,
+            angles,
+            &local,
+            true,
+            &[
+                ("ITEM_PROPERTY_CONNECTION_COUNT", "0".into()),
+                ("ITEM_PROPERTY_START_ENABLED", (start_on as i32).to_string()),
+            ],
+            &[],
+        )
+    }
+
+    /// An excursion funnel emitter in open `cell` on the surface against `normal`.
+    pub fn funnel(&mut self, cell: Cell, normal: Dir, start_on: bool, reversed: bool) -> i32 {
+        self.add(
+            "ITEM_TBEAM",
+            cell,
+            normal,
+            &[
+                ("ITEM_PROPERTY_CONNECTION_COUNT", "0".into()),
+                ("ITEM_PROPERTY_CONNECTION_COUNT_POLARITY", "0".into()),
+                ("ITEM_PROPERTY_START_ENABLED", (start_on as i32).to_string()),
+                ("ITEM_PROPERTY_START_REVERSED", (reversed as i32).to_string()),
+            ],
+            &[],
+        )
+    }
+
+    /// An angled panel (`glass`: the clear one) on the face behind open `cell` (against
+    /// `normal`), tilting toward `tilt` by `angle` degrees (30, 45, 60 or 90) when deployed.
+    /// ASSUMPTION: `ITEM_PROPERTY_ANGLED_PANEL_TYPE` counts 30° = 1 ... 90° = 4 (the default
+    /// type 2 goes with the default 45° animation).
+    #[allow(clippy::too_many_arguments)]
+    pub fn angled_panel(
+        &mut self,
+        cell: Cell,
+        normal: Dir,
+        tilt: Dir,
+        angle: i32,
+        start_deployed: bool,
+        white: bool,
+        glass: bool,
+    ) -> i32 {
+        let angles = angles_mapping([0, 0, 1], normal, [1, 0, 0], tilt);
+        let kind = if glass {
+            "ITEM_PANEL_CLEAR"
+        } else {
+            "ITEM_PANEL_ANGLED"
+        };
+        let ty = match angle {
+            30 => 1,
+            45 => 2,
+            60 => 3,
+            _ => 4,
+        };
+        self.add_raw(
+            kind,
+            cell,
+            angles,
+            "0 0 0",
+            true,
+            &[
+                ("ITEM_PROPERTY_CONNECTION_COUNT", "0".into()),
+                (
+                    "ITEM_PROPERTY_START_DEPLOYED",
+                    (start_deployed as i32).to_string(),
+                ),
+                ("ITEM_PROPERTY_PORTALABLE", ((white && !glass) as i32).to_string()),
+                ("ITEM_PROPERTY_ANGLED_PANEL_TYPE", ty.to_string()),
+                (
+                    "ITEM_PROPERTY_ANGLED_PANEL_ANIMATION",
+                    format!("ramp_{angle}_deg_open"),
+                ),
+            ],
+            &[],
+        )
+    }
+
+    /// A flip panel on the face behind open `cell` (against `normal`).
+    pub fn flip_panel(&mut self, cell: Cell, normal: Dir) -> i32 {
+        self.add(
+            "ITEM_PANEL_FLIP",
+            cell,
+            normal,
+            &[("ITEM_PROPERTY_CONNECTION_COUNT", "0".into())],
+            &[],
+        )
+    }
+
+    /// Stairs on the floors of open `cell` and the next cell along `dir`, rising toward `dir`.
+    pub fn stairs(&mut self, cell: Cell, dir: Dir, start_deployed: bool) -> i32 {
+        self.add_raw(
+            "ITEM_PANEL_STAIRS",
+            cell,
+            [0, yaw(dir), 0],
+            "0 0 0",
+            true,
+            &[
+                ("ITEM_PROPERTY_CONNECTION_COUNT", "0".into()),
+                (
+                    "ITEM_PROPERTY_START_DEPLOYED",
+                    (start_deployed as i32).to_string(),
+                ),
+            ],
+            &[],
+        )
+    }
+
+    /// A piston platform pushing out of the surface behind `cell` along `normal`, `bottom`
+    /// (down) or `top` (up) cells out.
+    pub fn piston(
+        &mut self,
+        cell: Cell,
+        normal: Dir,
+        bottom: i32,
+        top: i32,
+        start_up: bool,
+    ) -> i32 {
+        let p = self.add(
+            "ITEM_PISTON_PLATFORM",
+            cell,
+            normal,
+            &[
+                ("ITEM_PROPERTY_CONNECTION_COUNT", "0".into()),
+                ("ITEM_PROPERTY_CUBE_TYPE", "0".into()),
+                ("ITEM_PROPERTY_AUTO_DROP_CUBE", "1".into()),
+                ("ITEM_PROPERTY_PISTON_LIFT_BOTTOM_LEVEL", bottom.to_string()),
+                ("ITEM_PROPERTY_PISTON_LIFT_TOP_LEVEL", top.to_string()),
+                ("ITEM_PROPERTY_PISTON_LIFT_START_UP", (start_up as i32).to_string()),
+            ],
+            &[],
+        );
+        let v = normal.vector();
+        for (level, handle) in [(top, 0), (bottom, 1)] {
+            let c = std::array::from_fn(|a| cell[a] + v[a] * level);
+            let e = self.add_raw(
+                "ITEM_PISTON_PLATFORM_EXTENT",
+                c,
+                angles_for_up(normal),
+                "0 0 0",
+                false,
+                &[],
+                &[("EndHandle", handle.to_string())],
+            );
+            self.link(p, e, "CONNECTION_BARRIER_ANCHOR_TO_EXTENT");
+        }
+        p
+    }
+
+    /// A rail platform: a floor in open `cell` travelling along a straight track to `end`.
+    /// Angles and extents copy the style map's rail (track toward -y), turned about z; a
+    /// vertical one keeps those and travels up or down (ASSUMPTION: `TRAVEL_DIRECTION` pitch).
+    pub fn rail(&mut self, cell: Cell, end: Cell, oscillate: bool, start_active: bool) -> i32 {
+        let a = (0..3).find(|&a| end[a] != cell[a]).unwrap_or(0);
+        let t = Dir::from_axis(a, end[a] > cell[a]);
+        let turn = if a == 2 { 0 } else { yaw(t) - 270 };
+        let dist = (end[a] - cell[a]).abs() * 128;
+        let direction = match t {
+            Dir::PosZ => "-90 0 0".to_string(),
+            Dir::NegZ => "90 0 0".to_string(),
+            _ => format!("0 {} 0", (yaw(t) + 180) % 360),
+        };
+        let r = self.add_raw(
+            "ITEM_RAIL_PLATFORM",
+            cell,
+            [90, 180 + turn, 0],
+            "0 0 0",
+            true,
+            &[
+                ("ITEM_PROPERTY_CONNECTION_COUNT", "0".into()),
+                ("ITEM_PROPERTY_CUBE_TYPE", "0".into()),
+                ("ITEM_PROPERTY_AUTO_DROP_CUBE", "0".into()),
+                ("ITEM_PROPERTY_RAIL_OSCILLATE", (oscillate as i32).to_string()),
+                ("ITEM_PROPERTY_RAIL_STARTING_POSITION", "0".into()),
+                ("ITEM_PROPERTY_RAIL_TRAVEL_DISTANCE", dist.to_string()),
+                ("ITEM_PROPERTY_RAIL_SPEED", "100".into()),
+                ("ITEM_PROPERTY_RAIL_TRAVEL_DIRECTION", direction),
+                (
+                    "ITEM_PROPERTY_RAIL_START_ACTIVE",
+                    (start_active as i32).to_string(),
+                ),
+            ],
+            &[],
+        );
+        for (c, angles) in [
+            (cell, [90, 180, 0]),
+            (cell, [0, 90, -90]),
+            (cell, [-90, 0, 0]),
+            (end, [0, -90, 90]),
+        ] {
+            let angles = [angles[0], angles[1] + turn, angles[2]];
+            let e = self.add_raw("ITEM_RAIL_PLATFORM_EXTENT", c, angles, "0 0 0", false, &[], &[]);
+            self.link(r, e, "CONNECTION_BARRIER_ANCHOR_TO_EXTENT");
+        }
+        r
+    }
+
+    /// Wires `sender` to reverse funnel `funnel`.
+    pub fn connect_polarity(&mut self, sender: i32, funnel: i32) -> &mut Self {
+        self.link(sender, funnel, "CONNECTION_TBEAM_POLARITY");
+        let r = &mut self.items[funnel as usize];
+        let count = r
+            .get_i32("ITEM_PROPERTY_CONNECTION_COUNT_POLARITY")
+            .unwrap_or(0)
+            + 1;
+        r.set("ITEM_PROPERTY_CONNECTION_COUNT_POLARITY", count.to_string());
+        self
+    }
+
+    /// Sets whether cube dropper `dropper` drops its cube by itself (or waits for its inputs).
+    pub fn auto_drop(&mut self, dropper: i32, on: bool) -> &mut Self {
+        let cubes: Vec<i32> = self
+            .connections
+            .iter()
+            .filter(|c| c.get("Type") == Some("CONNECTION_BOX_DROPPER"))
+            .filter(|c| c.get_i32("Receiver") == Some(dropper))
+            .filter_map(|c| c.get_i32("Sender"))
+            .collect();
+        for item in cubes.into_iter().chain([dropper]) {
+            self.items[item as usize].set("ITEM_PROPERTY_AUTO_DROP_CUBE", (on as i32).to_string());
+        }
+        self
     }
 
     /// Wires `sender` to activate `receiver`. A wired exit door starts closed.

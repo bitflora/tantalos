@@ -62,13 +62,23 @@ pub fn describe_regions(graph: &RegionGraph) -> String {
             .map(|e| {
                 let to = RegionGraph::label(e.to);
                 let via = if e.hazards != 0 { " via field" } else { "" };
-                match e.kind {
+                let when = if e.cond.is_always() {
+                    String::new()
+                } else {
+                    format!(" (devices {:b}/{:b})", e.cond.on, e.cond.off)
+                };
+                let what = match e.kind {
                     Move::Walk => format!("walk{via} -> {to}"),
                     Move::Drop { height } => format!("drop {height}{via} -> {to}"),
                     Move::Step => format!("step (needs cube){via} -> {to}"),
                     Move::Bounce => format!("bounce (needs gel) -> {to}"),
                     Move::Leap => format!("leap (needs gel) -> {to}"),
-                }
+                    Move::Plate => format!("faith plate{via} -> {to}"),
+                    Move::Stairs => format!("stairs{via} -> {to}"),
+                    Move::Funnel => format!("funnel{via} -> {to}"),
+                    Move::Ride => format!("ride{via} -> {to}"),
+                };
+                format!("{what}{when}")
             })
             .collect();
         let moves = if moves.is_empty() {

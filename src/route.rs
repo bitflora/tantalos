@@ -10,16 +10,22 @@
 //! Choices the plan leaves open (which cell to fire from, which face of a class, where to put
 //! a cube down) go to the nearest cell on foot, avoiding cells with something in the way
 //! (cubes, buttons, pedestals, turrets, gel) unless there is no other way.
+//!
+//! What devices do by themselves after a step (a platform carrying the player, a bridge
+//! vanishing from under a cube, a flip panel losing its portal, a dropper dropping) is applied
+//! to the concrete state the way the solver's `settle` does (`Grounder::settle`).
 
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use crate::dataset::json_str;
+use crate::dynamics;
+use crate::flings;
 use crate::gel;
 use crate::geom::{step, Cell, Dir};
-use crate::level::{CubeKind, FaceInfo, ItemKind, Level, PaintKind};
+use crate::level::{CubeKind, FaceInfo, ItemKind, Level, PaintKind, PanelKind, ProjectorKind};
 use crate::metrics::replay;
 use crate::portals::{self, Face};
-use crate::regions::Move;
+use crate::regions::{Cond, Geo, Move};
 use crate::solver::{Action, Color, Cube, CubeLoc, Mode, Model, Signal, State, Verdict};
 
 const VOXEL: f64 = 128.0;
@@ -42,8 +48,14 @@ pub struct Placed {
     pub kind: CubeKind,
     /// Where it comes back to after a fizzler (where it first came to rest).
     pub home: Cell,
+    /// Placed without a dropper: fizzled, it's gone for good.
+    pub loose: bool,
     /// `None` while held.
     pub at: Option<Cell>,
+    /// Destroyed, or still waiting in its dropper.
+    pub gone: bool,
+    /// The laser spot (`Beams::spots`) it was set down at, facing its way.
+    pub spot: Option<usize>,
 }
 
 /// What a leg does once the player has walked to where it starts.
@@ -52,11 +64,14 @@ pub enum Act {
     /// Nothing more: the walk is the step (a walk across a field or into new sight lines, or
     /// a drop off a ledge at its end).
     Walk,
-    /// Fire from `eye` (the walk's end) at the centre of `face`.
+    /// Fire from `eye` (a point in the walk's last cell, `cell`) at the centre of `face`, or at
+    /// `aim` (a deployed angled panel's middle).
     Fire {
         color: Color,
         face: Face,
-        eye: Cell,
+        cell: Cell,
+        eye: [f64; 3],
+        aim: Option<[f64; 3]>,
     },
     /// Walk into the portal on `face` (from the cell in front of it, which the walk ends in),
     /// coming out of the one on `out`.
@@ -68,10 +83,12 @@ pub enum Act {
     PickUp {
         cube: Cell,
     },
-    /// Put the held cube down in `at`, next to the walk's end.
+    /// Put the held cube down in `at`, next to the walk's end; facing `facing` (from the cell
+    /// behind it) to turn a laser.
     PutDown {
         at: Cell,
         button: bool,
+        facing: Option<Dir>,
     },
     /// Drop the held cube off the ledge of `edge` (the walk's end) on side `dir`.
     Toss {
@@ -116,6 +133,41 @@ pub enum Act {
         dir: Dir,
         to: Cell,
     },
+    /// Step from `from` (the walk's end) toward `dir` onto the faith plate in `plate`, and
+    /// come down in `to`.
+    Plate {
+        from: Cell,
+        dir: Dir,
+        plate: Cell,
+        to: Cell,
+    },
+    /// Walk up deployed stairs: `path` is the stairs' second cell and the top.
+    Climb {
+        path: Vec<Cell>,
+    },
+    /// Step from `enter` (the walk's end) into the funnel, float along `via` (its cells, in
+    /// order) and step out from the last of them into `out`, coming to rest in `to`.
+    Funnel {
+        enter: Cell,
+        via: Vec<Cell>,
+        out: Cell,
+        to: Cell,
+    },
+    /// Ride a platform from stop `from` (the walk's end) to stop `to`.
+    Ride {
+        from: Cell,
+        to: Cell,
+    },
+    /// Jump off the ledge of `edge` (the walk's end) toward `dir`, `out` cells out, into the
+    /// floor portal on `face`; fly out of `exit` and land in `landing`.
+    Dive {
+        edge: Cell,
+        dir: Dir,
+        out: i32,
+        face: Face,
+        exit: Face,
+        landing: Cell,
+    },
     /// Walk out through the exit door in `cell`, against its `normal`.
     Exit {
         cell: Cell,
@@ -154,7 +206,7 @@ pub fn route(level: &Level, budget: usize) -> Result<Route, String> {
     };
     let states = replay(&model, &plan).ok_or("the plan doesn't replay")?;
     let g = Grounder::new(level, &model);
-    let start = g.start()?;
+    let start = g.settle(g.start()?, &states[0]);
     g.check(&start, &states[0])
         .map_err(|e| format!("start: {e}"))?;
     let mut here = start.clone();
@@ -183,6 +235,7 @@ pub fn route(level: &Level, budget: usize) -> Result<Route, String> {
 struct Grounder<'a> {
     level: &'a Level,
     model: &'a Model,
+    geo: Geo<'a>,
     class_of: HashMap<Face, usize>,
     face_id: HashMap<Face, usize>,
     entry: (Cell, Dir),
@@ -198,6 +251,7 @@ impl<'a> Grounder<'a> {
         Grounder {
             level,
             model,
+            geo: Geo::new(level, &model.devices.dyn_),
             class_of: model
                 .portals
                 .classes
@@ -221,10 +275,24 @@ impl<'a> Grounder<'a> {
             .of_kind(&ItemKind::Cube)
             .filter_map(|c| {
                 let home = self.level.fall(c.cell)?;
+                let loose = self.level.loose_cube(c.index);
+                // A dropper that waits for its inputs holds its cube back (`settle` drops it).
+                let waits = self
+                    .level
+                    .dropper_of
+                    .get(&c.index)
+                    .and_then(|&d| self.level.item(d))
+                    .is_some_and(|d| {
+                        d.props.get_i32("ITEM_PROPERTY_AUTO_DROP_CUBE") == Some(0)
+                            && self.level.inputs(d.index).next().is_some()
+                    });
                 Some(Placed {
                     kind: c.cube_kind(),
                     home,
-                    at: Some(home),
+                    loose,
+                    at: (!waits).then_some(home),
+                    gone: waits,
+                    spot: None,
                 })
             })
             .collect();
@@ -237,6 +305,118 @@ impl<'a> Grounder<'a> {
 
     fn region(&self, c: Cell) -> Option<usize> {
         self.model.graph.region_of(c)
+    }
+
+    /// Whether cell `c` can be stood in with the devices in `dev`.
+    fn stands(&self, c: Cell, dev: u64) -> bool {
+        self.geo.stand(c).is_some_and(|k| k.holds(dev))
+    }
+
+    /// Where something falling from open cell `c` comes to rest with the devices in `dev`, the
+    /// fields it falls through, and the faith plate that launched it on the way.
+    fn fall_at(&self, c: Cell, dev: u64) -> Option<(Cell, u64, Option<usize>)> {
+        self.geo
+            .falls(c)
+            .into_iter()
+            .find(|f| f.cond.holds(dev))
+            .map(|f| (f.cell, f.hazards, f.plate))
+    }
+
+    /// Where whoever is in `c` ends up with the devices in `dev`: there if they can still
+    /// stand there, else carried by a platform, or falling.
+    fn carry(&self, c: Cell, dev: u64) -> Option<Cell> {
+        if self.stands(c, dev) {
+            return Some(c);
+        }
+        if let Some(&p) = self.geo.dyn_.rides.get(&c) {
+            if self.stands(p, dev) {
+                return Some(p);
+            }
+        }
+        self.fall_at(c, dev).map(|(f, _, _)| f)
+    }
+
+    /// The angled panel on face `f` that is deployed in `dev`: (hinge side, angle).
+    fn deployed_panel(&self, f: Face, dev: u64) -> Option<(Dir, i32)> {
+        let (i, p) = self
+            .level
+            .panels
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.kind == PanelKind::Angled && (p.cell, p.normal.opposite()) == f)?;
+        (dev & (1 << self.model.devices.panel_bit[i]) != 0).then_some((p.hinge(), p.angle))
+    }
+
+    /// The face a portal on `f` really is with the devices in `dev`: a deployed 90° panel's
+    /// looks across its hinge edge.
+    fn live_face(&self, f: Face, dev: u64) -> Face {
+        match self.deployed_panel(f, dev) {
+            Some((hinge, 90)) => (step(f.0, hinge), hinge.opposite()),
+            _ => f,
+        }
+    }
+
+    /// What follows by itself after a step, as the solver's `settle` has it in `next`: portals
+    /// on flipped panels gone, the player and cubes carried or dropped by devices, cubes
+    /// dropped by droppers that were waiting.
+    fn settle(&self, mut h: Here, next: &State) -> Here {
+        let dev = next.dev;
+        for k in 0..2 {
+            if next.portals[k].is_none() {
+                h.portals[k] = None;
+            }
+        }
+        if !next.escaped {
+            if let Some(c) = self.carry(h.player, dev) {
+                h.player = c;
+            }
+        }
+        for q in &mut h.cubes {
+            if let Some(c) = q.at.filter(|_| !q.gone) {
+                match self.carry(c, dev) {
+                    Some(n) if n != c => {
+                        q.at = Some(n);
+                        q.spot = None;
+                    }
+                    Some(_) => {}
+                    None if q.loose => q.gone = true,
+                    None => q.at = Some(q.home),
+                }
+            }
+        }
+        for kind in [
+            CubeKind::Standard,
+            CubeKind::Companion,
+            CubeKind::Reflection,
+            CubeKind::Sphere,
+            CubeKind::Franken,
+        ] {
+            let want = next
+                .cubes
+                .iter()
+                .filter(|c| c.kind == kind && c.loc == CubeLoc::Gone)
+                .count();
+            let mut have = h
+                .cubes
+                .iter()
+                .filter(|c| c.kind == kind && c.gone)
+                .count();
+            for q in h.cubes.iter_mut().filter(|c| c.kind == kind && c.gone && !c.loose) {
+                if have <= want {
+                    break;
+                }
+                q.gone = false;
+                q.at = Some(q.home);
+                have -= 1;
+            }
+        }
+        h
+    }
+
+    /// `after`, settled (`settle`), if it is what the solver means by `next`.
+    fn fits(&self, after: Here, next: &State) -> Option<Here> {
+        let after = self.settle(after, next);
+        self.matches(&after, next).then_some(after)
     }
 
     /// The solver's view of a cube at rest in `cell`: on a button that takes it and that no
@@ -264,10 +444,16 @@ impl<'a> Grounder<'a> {
             .iter()
             .map(|c| Cube {
                 kind: c.kind,
-                home: self.loc_at(c.home, c.kind, None),
-                loc: match c.at {
-                    None => CubeLoc::Held,
-                    Some(cell) => self.loc_at(cell, c.kind, Some(&mut claimed)),
+                home: if c.loose {
+                    CubeLoc::Gone
+                } else {
+                    self.loc_at(c.home, c.kind, None)
+                },
+                loc: match (c.gone, c.at, c.spot) {
+                    (true, ..) => CubeLoc::Gone,
+                    (false, None, _) => CubeLoc::Held,
+                    (false, Some(_), Some(k)) => CubeLoc::Spot(k),
+                    (false, Some(cell), None) => self.loc_at(cell, c.kind, Some(&mut claimed)),
                 },
             })
             .collect()
@@ -303,30 +489,35 @@ impl<'a> Grounder<'a> {
         self.check(h, s).is_ok()
     }
 
-    /// A fizzler: portals gone, a held cube back home.
+    /// A fizzler: portals gone, a held cube back home (or gone, if it had no dropper).
     fn fizzle(h: &mut Here) {
         h.portals = [None, None];
         for c in &mut h.cubes {
-            if c.at.is_none() {
-                c.at = Some(c.home);
+            if c.at.is_none() && !c.gone {
+                if c.loose {
+                    c.gone = true;
+                } else {
+                    c.at = Some(c.home);
+                }
             }
         }
     }
 
     fn held(h: &Here) -> Option<usize> {
-        h.cubes.iter().position(|c| c.at.is_none())
+        h.cubes.iter().position(|c| c.at.is_none() && !c.gone)
     }
 
     /// Something stands in `c` that the player shouldn't walk into, stand on to act, or put a
-    /// cube on: a cube, a floor button, a pedestal or a turret, gel on the floor, or an open
-    /// portal in the floor (walking over it, the player falls in).
+    /// cube on: a cube, a floor button, a pedestal or a turret, gel on the floor, an open
+    /// portal in the floor (walking over it, the player falls in), or a faith plate.
     fn in_the_way(&self, h: &Here, s: &State, c: Cell) -> bool {
         let open = h.portals.iter().all(Option::is_some);
         (open && h.portals.contains(&Some((c, Dir::NegZ))))
-            || h.cubes.iter().any(|q| q.at == Some(c))
+            || h.cubes.iter().any(|q| q.at == Some(c) && !q.gone)
             || self.model.buttons.iter().any(|b| b.cell == c)
             || self.model.pedestals.iter().any(|p| p.cell == c)
             || self.model.turrets.iter().any(|t| t.cell == c)
+            || self.level.plate_at(c).is_some()
             || self.face_id.get(&(c, Dir::NegZ)).is_some_and(|&f| {
                 [PaintKind::Bounce, PaintKind::Speed]
                     .iter()
@@ -339,7 +530,10 @@ impl<'a> Grounder<'a> {
         let r = self.region(c);
         Dir::HORIZONTAL.into_iter().filter_map(move |d| {
             let n = step(c, d);
-            (self.level.face(c, d) == FaceInfo::default() && r.is_some() && self.region(n) == r)
+            (self.level.face(c, d) == FaceInfo::default()
+                && self.geo.block(c, d).is_none()
+                && r.is_some()
+                && self.region(n) == r)
                 .then_some(n)
         })
     }
@@ -386,33 +580,61 @@ impl<'a> Grounder<'a> {
         self.steps_in_region(c).collect()
     }
 
+    /// The funnels flowing in `s` and where: each one's cells in the order it carries.
+    fn funnels(&self, h: &Here, s: &State) -> Vec<Vec<Cell>> {
+        let (level, devices) = (self.level, &self.model.devices);
+        let mut out = Vec::new();
+        for (i, p) in level.projectors.iter().enumerate() {
+            if p.kind != ProjectorKind::Funnel || s.dev & (1 << devices.projector_bit[i]) == 0 {
+                continue;
+            }
+            let rev = devices.reversed_bit[i].is_some_and(|b| s.dev & (1 << b) != 0);
+            let mut cells = devices.paths[i].cells.clone();
+            // On through a portal at its end, out of the other one.
+            let end = devices.paths[i].end;
+            let k = end.and_then(|e| h.portals.iter().position(|&p| p == Some(e)));
+            if let Some(out) = k.and_then(|k| h.portals[1 - k]) {
+                cells.extend(dynamics::path(level, out.0, out.1.opposite()).cells);
+            }
+            if rev {
+                cells.reverse();
+            }
+            out.push(cells);
+        }
+        out
+    }
+
     fn leg(&self, h: &Here, s: &State, a: &Action, next: &State) -> Option<Leg> {
         let (level, model) = (self.level, self.model);
         let on = model.hazards_on_in(s, None);
+        let dev = s.dev;
         let fizzles = |hazards: u64, on: u64| hazards & on & model.fizzlers != 0;
         let rules = model.rules;
         let found: Option<(Vec<Cell>, (Act, Here))> = match *a {
             Action::Move { to, kind, hazards } => match kind {
-                Move::Walk | Move::Drop { .. } => self
+                Move::Walk | Move::Drop { .. } | Move::Plate => self
                     .find(h, s, |c| {
                         Dir::HORIZONTAL.into_iter().find_map(|d| {
                             let n = step(c, d);
                             let face = level.face(c, d);
-                            if face.barrier.is_some() || level.solid(n) {
+                            let blocked = self.geo.block(c, d).is_some_and(|b| b.holds(dev));
+                            if face.barrier.is_some() || level.solid(n) || blocked {
                                 return None;
                             }
-                            let (f, hz) = match kind {
-                                Move::Walk if level.standable(n) => (n, face.hazards),
-                                Move::Drop { height } if !level.standable(n) => {
-                                    let (f, fallen) = level.fall_path(n)?;
-                                    if n[2] - f[2] != height {
-                                        return None;
-                                    }
-                                    (f, face.hazards | fallen)
-                                }
-                                _ => return None,
+                            let (f, hz, plate) = if self.stands(n, dev) {
+                                (n, face.hazards, None)
+                            } else {
+                                let (f, fallen, plate) = self.fall_at(n, dev)?;
+                                (f, face.hazards | fallen, plate)
                             };
-                            if hz != hazards || self.region(f) != Some(to) {
+                            let fits_kind = match kind {
+                                Move::Walk => plate.is_none() && f == n,
+                                Move::Drop { height } => {
+                                    plate.is_none() && f != n && n[2] - f[2] == height
+                                }
+                                _ => plate.is_some(),
+                            };
+                            if !fits_kind || hz != hazards || self.region(f) != Some(to) {
                                 return None;
                             }
                             let mut after = h.clone();
@@ -420,11 +642,22 @@ impl<'a> Grounder<'a> {
                             if fizzles(hz, on) {
                                 Self::fizzle(&mut after);
                             }
-                            self.matches(&after, next).then_some((Act::Walk, after))
+                            let act = match plate {
+                                Some(p) => Act::Plate {
+                                    from: c,
+                                    dir: d,
+                                    plate: level.plates[p].cell,
+                                    to: f,
+                                },
+                                None => Act::Walk,
+                            };
+                            self.fits(after, next).map(|after| (act, after))
                         })
                     })
                     .map(|(mut walk, (act, after))| {
-                        walk.push(after.player);
+                        if act == Act::Walk {
+                            walk.push(after.player);
+                        }
                         (walk, (act, after))
                     }),
                 Move::Bounce => self.find(h, s, |c| {
@@ -443,8 +676,8 @@ impl<'a> Grounder<'a> {
                             if fizzles(hz, on) {
                                 Self::fizzle(&mut after);
                             }
-                            self.matches(&after, next)
-                                .then_some((Act::Bounce { gel: c, to: t }, after))
+                            self.fits(after, next)
+                                .map(|after| (Act::Bounce { gel: c, to: t }, after))
                         })
                 }),
                 // `c` is where the run starts, `leap_run - 1` cells back from the take-off.
@@ -468,10 +701,99 @@ impl<'a> Grounder<'a> {
                         if fizzles(hz, on) {
                             Self::fizzle(&mut after);
                         }
-                        self.matches(&after, next)
-                            .then_some((Act::Leap { run, dir: d, to: t }, after))
+                        self.fits(after, next)
+                            .map(|after| (Act::Leap { run, dir: d, to: t }, after))
                     })
                 }),
+                Move::Stairs => {
+                    let stairs = level.stairs.iter().enumerate().find(|(i, st)| {
+                        dev & (1 << model.devices.stairs_bit[*i]) != 0
+                            && self.region(st.top()) == Some(to)
+                    });
+                    stairs.and_then(|(_, st)| {
+                        let second = step(st.cell, st.dir);
+                        self.find(h, s, |c| {
+                            if c != st.cell && c != second {
+                                return None;
+                            }
+                            let mut after = h.clone();
+                            after.player = st.top();
+                            let path = if c == second {
+                                vec![st.top()]
+                            } else {
+                                vec![second, st.top()]
+                            };
+                            self.fits(after, next).map(|after| (Act::Climb { path }, after))
+                        })
+                    })
+                }
+                Move::Funnel => {
+                    let mut found = None;
+                    for cells in self.funnels(h, s) {
+                        let moves = dynamics::funnel_moves(self.geo, &cells, Cond::ALWAYS);
+                        found = self.find(h, s, |c| {
+                            moves.iter().filter(|m| m.from.contains(&c)).find_map(|m| {
+                                m.to.iter().find_map(|&(cond, t, th)| {
+                                    if !cond.holds(dev)
+                                        || m.hazards | th != hazards
+                                        || self.region(t) != Some(to)
+                                    {
+                                        return None;
+                                    }
+                                    let i = cells.iter().position(|&f| {
+                                        f == c || Dir::HORIZONTAL.iter().any(|&d| step(f, d) == c)
+                                    })?;
+                                    // Where it steps out: a funnel cell further on with `t` beside
+                                    // it, or under the cell beside it.
+                                    let (j, out) = (i..cells.len()).find_map(|j| {
+                                        Dir::HORIZONTAL.iter().find_map(|&d| {
+                                            let m = step(cells[j], d);
+                                            let lands = m == t
+                                                || self.fall_at(m, dev).is_some_and(|f| f.0 == t);
+                                            lands.then_some((j, m))
+                                        })
+                                    })?;
+                                    let mut after = h.clone();
+                                    after.player = t;
+                                    if fizzles(hazards, on) {
+                                        Self::fizzle(&mut after);
+                                    }
+                                    let act = Act::Funnel {
+                                        enter: c,
+                                        via: cells[i..=j].to_vec(),
+                                        out,
+                                        to: t,
+                                    };
+                                    self.fits(after, next).map(|after| (act, after))
+                                })
+                            })
+                        });
+                        if found.is_some() {
+                            break;
+                        }
+                    }
+                    found
+                }
+                Move::Ride => {
+                    let pairs: Vec<(Cell, Cell)> = level
+                        .rails
+                        .iter()
+                        .flat_map(|r| {
+                            let t = r.track();
+                            t.windows(2)
+                                .flat_map(|w| [(w[0], w[1]), (w[1], w[0])])
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|&(_, b)| self.region(b) == Some(to))
+                        .collect();
+                    self.find(h, s, |c| {
+                        let &(from, to_cell) = pairs.iter().find(|p| p.0 == c)?;
+                        let mut after = h.clone();
+                        after.player = to_cell;
+                        self.fits(after, next)
+                            .map(|after| (Act::Ride { from, to: to_cell }, after))
+                    })
+                }
                 Move::Step => None,
             },
 
@@ -493,10 +815,9 @@ impl<'a> Grounder<'a> {
                             None if self.in_the_way(h, s, c) => return None,
                             _ => {}
                         }
-                        let eye = [c[0] as f64 + 0.5, c[1] as f64 + 0.5, c[2] as f64 + 0.5];
-                        // Squared distance to the face's centre, and the cosine between the
-                        // face's normal and the way back to the eye.
-                        let seen = |&(fc, d): &Face| {
+                        // Squared distance from `eye` to the face's centre, and the cosine
+                        // between the face's normal and the way back to the eye.
+                        let seen = |eye: [f64; 3], &(fc, d): &Face| {
                             let p = face_centre((fc, d));
                             let v: [f64; 3] = std::array::from_fn(|i| eye[i] - p[i]);
                             let d2: f64 = v.iter().map(|x| x * x).sum();
@@ -504,28 +825,46 @@ impl<'a> Grounder<'a> {
                             let cos = (0..3).map(|i| v[i] * n[i] as f64).sum::<f64>() / d2.sqrt();
                             (d2, cos)
                         };
-                        let score = |f: &Face| {
-                            let (d2, cos) = seen(f);
+                        let score = |eye: [f64; 3], f: &Face| {
+                            let (d2, cos) = seen(eye, f);
                             d2 / cos.max(0.05).powi(2)
                         };
-                        let face = faces
-                            .iter()
-                            .filter(|&&f| Some(f) != other && seen(&f).1 >= min_cos)
-                            .filter(|&&f| {
-                                portals::shots(level, c, f, rules.sight)
-                                    .any(|m| m & on & model.fizzlers == 0)
+                        // A deployed angled panel sticks out: aim at its middle.
+                        let panel = |f: &Face| {
+                            self.deployed_panel(*f, dev)
+                                .map(|(hinge, angle)| portals::panel_aim(*f, hinge, angle))
+                        };
+                        let clear = |eye: [f64; 3], f: &Face| match panel(f) {
+                            Some((cell, point, facing)) => portals::point_shot(
+                                level, c, eye, cell, point, facing, rules.sight,
+                            )
+                            .is_some_and(|m| m & on & model.fizzlers == 0),
+                            None => portals::shots_from(level, c, eye, *f, rules.sight)
+                                .any(|m| m & on & model.fizzlers == 0),
+                        };
+                        let (eye, face) = portals::eye_points(level, c)
+                            .into_iter()
+                            .flat_map(|eye| faces.iter().map(move |f| (eye, f)))
+                            .filter(|&(eye, f)| {
+                                Some(*f) != other && (panel(f).is_some() || seen(eye, f).1 >= min_cos)
                             })
-                            .min_by(|a, b| score(a).total_cmp(&score(b)))?;
+                            .filter(|&(eye, f)| clear(eye, f))
+                            .min_by(|a, b| score(a.0, a.1).total_cmp(&score(b.0, b.1)))?;
                         let mut after = h.clone();
                         after.portals[k] = Some(*face);
-                        self.matches(&after, next).then_some((
-                            Act::Fire {
-                                color,
-                                face: *face,
-                                eye: c,
-                            },
-                            after,
-                        ))
+                        let aim = panel(face).map(|p| p.1);
+                        self.fits(after, next).map(|after| {
+                            (
+                                Act::Fire {
+                                    color,
+                                    face: *face,
+                                    cell: c,
+                                    eye,
+                                    aim,
+                                },
+                                after,
+                            )
+                        })
                     })
                 };
                 at_angle(MIN_SHOT_COS).or_else(|| at_angle(-1.0))
@@ -534,9 +873,10 @@ impl<'a> Grounder<'a> {
             Action::Enter { color } => {
                 let k = color as usize;
                 let (face, out) = (h.portals[k]?, h.portals[1 - k]?);
-                let (landing, hz) = level.fall_path(out.0)?;
+                let (face_live, out_live) = (self.live_face(face, dev), self.live_face(out, dev));
+                let (landing, hz, _) = self.fall_at(out_live.0, dev)?;
                 self.find(h, s, |c| {
-                    if c != face.0 {
+                    if c != face_live.0 {
                         return None;
                     }
                     let mut after = h.clone();
@@ -544,8 +884,68 @@ impl<'a> Grounder<'a> {
                     if fizzles(hz, on) {
                         Self::fizzle(&mut after);
                     }
-                    self.matches(&after, next)
-                        .then_some((Act::Enter { color, face, out }, after))
+                    self.fits(after, next).map(|after| {
+                        (
+                            Act::Enter {
+                                color,
+                                face: face_live,
+                                out: out_live,
+                            },
+                            after,
+                        )
+                    })
+                })
+            }
+
+            Action::Dive { color, height, to } => {
+                let k = color as usize;
+                let (face, out) = (h.portals[k]?, h.portals[1 - k]?);
+                // The way out at the speed of the fall, as the solver's nominal trial has it.
+                let (exit, tilt) = match self.deployed_panel(out, dev) {
+                    Some((t, 90)) => (self.live_face(out, dev), Some((t, 0))),
+                    Some(t) => (out, Some(t)),
+                    None => (out, None),
+                };
+                let e = flings::exit_vector(exit.1, tilt.filter(|t| t.1 != 0));
+                let speed = flings::dive_speed(height);
+                let v: [f64; 3] = std::array::from_fn(|a| e[a] * speed);
+                let (landing, hz) = flings::fly(level, flings::exit_point(exit.0, exit.1), v)?;
+                if self.region(landing) != Some(to) {
+                    return None;
+                }
+                self.find(h, s, |c| {
+                    Dir::HORIZONTAL.into_iter().find_map(|d| {
+                        let mut cur = c;
+                        for out_cells in 1..=2 {
+                            let n = step(cur, d);
+                            if level.solid(n)
+                                || level.standable(n)
+                                || level.face(cur, d).barrier.is_some()
+                            {
+                                return None;
+                            }
+                            cur = n;
+                            let Some((f, _)) = level.fall_path(n) else { continue };
+                            if (f, Dir::NegZ) != face || c[2] - f[2] != height {
+                                continue;
+                            }
+                            let mut after = h.clone();
+                            after.player = landing;
+                            if fizzles(hz, on) {
+                                Self::fizzle(&mut after);
+                            }
+                            let act = Act::Dive {
+                                edge: c,
+                                dir: d,
+                                out: out_cells,
+                                face,
+                                exit,
+                                landing,
+                            };
+                            return self.fits(after, next).map(|after| (act, after));
+                        }
+                        None
+                    })
                 })
             }
 
@@ -553,33 +953,39 @@ impl<'a> Grounder<'a> {
                 let k = color as usize;
                 let i = Self::held(h)?;
                 let (face, out) = (h.portals[k]?, h.portals[1 - k]?);
-                let (fall, hz) = level.fall_path(out.0)?;
-                let landing = if fizzles(hz, on) {
-                    h.cubes[i].home
-                } else {
-                    fall
-                };
+                let (face_live, out_live) = (self.live_face(face, dev), self.live_face(out, dev));
+                let (fall, hz, _) = self.fall_at(out_live.0, dev)?;
+                let fizzled = fizzles(hz, on);
                 // Into a wall portal from in front of it; over a floor portal from beside it.
-                let stand = if face.1 == Dir::NegZ {
-                    self.beside(face.0)
+                let stand = if face_live.1 == Dir::NegZ {
+                    self.beside(face_live.0)
                 } else {
-                    vec![face.0]
+                    vec![face_live.0]
                 };
                 self.find(h, s, |c| {
                     if !stand.contains(&c) {
                         return None;
                     }
                     let mut after = h.clone();
-                    after.cubes[i].at = Some(landing);
-                    self.matches(&after, next).then_some((
-                        Act::Throw {
-                            color,
-                            face,
-                            out,
-                            landing,
-                        },
-                        after,
-                    ))
+                    let q = &mut after.cubes[i];
+                    q.spot = None;
+                    if fizzled && q.loose {
+                        q.gone = true;
+                    } else {
+                        q.at = Some(if fizzled { q.home } else { fall });
+                    }
+                    let landing = q.at.unwrap_or(fall);
+                    self.fits(after, next).map(|after| {
+                        (
+                            Act::Throw {
+                                color,
+                                face: face_live,
+                                out: out_live,
+                                landing,
+                            },
+                            after,
+                        )
+                    })
                 })
             }
 
@@ -590,7 +996,7 @@ impl<'a> Grounder<'a> {
                 for own_cell in [false, true] {
                     found = self.find(h, s, |c| {
                         (0..h.cubes.len()).find_map(|i| {
-                            let q = h.cubes[i].at?;
+                            let q = h.cubes[i].at.filter(|_| !h.cubes[i].gone)?;
                             let near = if own_cell {
                                 c == q
                             } else {
@@ -601,8 +1007,9 @@ impl<'a> Grounder<'a> {
                             }
                             let mut after = h.clone();
                             after.cubes[i].at = None;
-                            self.matches(&after, next)
-                                .then_some((Act::PickUp { cube: q }, after))
+                            after.cubes[i].spot = None;
+                            self.fits(after, next)
+                                .map(|after| (Act::PickUp { cube: q }, after))
                         })
                     });
                     if found.is_some() {
@@ -615,6 +1022,38 @@ impl<'a> Grounder<'a> {
             Action::PutDown { at } => {
                 let i = Self::held(h)?;
                 let doors = [self.entry.0, self.exit_door.0];
+                if let CubeLoc::Spot(k) = at {
+                    // From behind the spot, facing its way: a held cube faces where the
+                    // player does.
+                    let (x, d) = (model.spot_cell(k), model.beams.spots[k].dir);
+                    let behind = step(x, d.opposite());
+                    return self
+                        .find(h, s, |c| {
+                            if c != behind {
+                                return None;
+                            }
+                            let mut after = h.clone();
+                            after.cubes[i].at = Some(x);
+                            after.cubes[i].spot = Some(k);
+                            let act = Act::PutDown {
+                                at: x,
+                                button: false,
+                                facing: Some(d),
+                            };
+                            self.fits(after, next).map(|after| (act, after))
+                        })
+                        .map(|(walk, (act, mut after))| {
+                            if let Some(&end) = walk.last() {
+                                after.player = end;
+                            }
+                            Leg {
+                                text: model.describe(a),
+                                walk,
+                                act,
+                                after,
+                            }
+                        });
+                }
                 self.find(h, s, |c| {
                     if self.in_the_way(h, s, c) {
                         return None;
@@ -637,8 +1076,12 @@ impl<'a> Grounder<'a> {
                         let mut after = h.clone();
                         after.cubes[i].at = Some(t);
                         let button = matches!(at, CubeLoc::OnButton(_));
-                        self.matches(&after, next)
-                            .then_some((Act::PutDown { at: t, button }, after))
+                        let act = Act::PutDown {
+                            at: t,
+                            button,
+                            facing: None,
+                        };
+                        self.fits(after, next).map(|after| (act, after))
                     })
                 })
             }
@@ -652,33 +1095,37 @@ impl<'a> Grounder<'a> {
                     Dir::HORIZONTAL.into_iter().find_map(|d| {
                         let n = step(c, d);
                         let face = level.face(c, d);
-                        if face.barrier.is_some() || level.solid(n) || level.standable(n) {
+                        if face.barrier.is_some() || level.solid(n) || self.stands(n, dev) {
                             return None;
                         }
-                        let (fall, fallen) = level.fall_path(n)?;
+                        let (fall, fallen, _) = self.fall_at(n, dev)?;
                         let hz = face.hazards | fallen;
-                        let landing = if fizzles(hz, on) {
-                            h.cubes[i].home
-                        } else {
-                            fall
-                        };
                         let mut after = h.clone();
-                        after.cubes[i].at = Some(landing);
-                        self.matches(&after, next).then_some((
-                            Act::Toss {
-                                edge: c,
-                                dir: d,
-                                landing,
-                            },
-                            after,
-                        ))
+                        let q = &mut after.cubes[i];
+                        let fizzled = fizzles(hz, on);
+                        if fizzled && q.loose {
+                            q.gone = true;
+                        } else {
+                            q.at = Some(if fizzled { q.home } else { fall });
+                        }
+                        let landing = q.at.unwrap_or(fall);
+                        self.fits(after, next).map(|after| {
+                            (
+                                Act::Toss {
+                                    edge: c,
+                                    dir: d,
+                                    landing,
+                                },
+                                after,
+                            )
+                        })
                     })
                 })
             }
 
             Action::Press { pedestal } => {
                 let p = &model.pedestals[pedestal];
-                self.matches(h, next).then_some(())?;
+                let after = self.fits(h.clone(), next)?;
                 let near = self.beside(p.cell);
                 self.find(h, s, |c| {
                     (near.contains(&c) && !self.in_the_way(h, s, c)).then_some(())
@@ -689,7 +1136,7 @@ impl<'a> Grounder<'a> {
                         pedestal: p.index,
                         cell: p.cell,
                     };
-                    (walk, (act, h.clone()))
+                    (walk, (act, after.clone()))
                 })
             }
 
@@ -734,7 +1181,10 @@ impl<'a> Grounder<'a> {
                         } else {
                             self.region(cell) == Some(to)
                         };
-                        (arrived && self.matches(&after, next)).then_some(after)
+                        if !arrived {
+                            return None;
+                        }
+                        self.fits(after, next)
                     }) else {
                         continue;
                     };
@@ -755,7 +1205,7 @@ impl<'a> Grounder<'a> {
 
             Action::Knock { turret } => {
                 let t = &model.turrets[turret];
-                self.matches(h, next).then_some(())?;
+                let after = self.fits(h.clone(), next)?;
                 let beside: Vec<Cell> = Dir::HORIZONTAL
                     .into_iter()
                     .filter(|&d| level.face(t.cell, d).barrier.is_none())
@@ -768,12 +1218,12 @@ impl<'a> Grounder<'a> {
                             turret: t.index,
                             cell: t.cell,
                         };
-                        (walk, (act, h.clone()))
+                        (walk, (act, after.clone()))
                     })
             }
         };
         let (walk, (act, mut after)) = found?;
-        // Acting in place leaves the player where the walk ends.
+        // Acting in place leaves the player where the walk ends (unless a device moved them).
         let stays = matches!(
             act,
             Act::Fire { .. }
@@ -785,7 +1235,9 @@ impl<'a> Grounder<'a> {
                 | Act::Knock { .. }
         );
         if let (true, Some(&end)) = (stays, walk.last()) {
-            after.player = end;
+            if self.region(after.player) == self.region(end) {
+                after.player = end;
+            }
         }
         Some(Leg {
             text: model.describe(a),
@@ -957,7 +1409,13 @@ fn here_json(h: &Here) -> String {
     let cubes: Vec<String> = h
         .cubes
         .iter()
-        .map(|c| c.at.map_or("null".into(), cell_json))
+        .map(|c| {
+            if c.gone {
+                "\"gone\"".into()
+            } else {
+                c.at.map_or("null".into(), cell_json)
+            }
+        })
         .collect();
     format!(
         "{{\"player\":{},\"portals\":[{}],\"cubes\":[{}]}}",
@@ -976,11 +1434,19 @@ const TURRET_MIDDLE: f64 = 0.3;
 fn act_json(act: &Act) -> String {
     match act {
         Act::Walk => "\"action\":\"walk\"".into(),
-        Act::Fire { color, face, eye } => format!(
-            "\"action\":\"fire\",\"color\":\"{}\",\"face\":{},\"eye\":{}",
+        Act::Fire {
+            color,
+            face,
+            cell,
+            eye,
+            aim,
+        } => format!(
+            "\"action\":\"fire\",\"color\":\"{}\",\"face\":{},\"cell\":{},\"eye\":{}{}",
             color_name(*color),
             face_json(*face),
-            point_json(above(*eye, 0.5))
+            cell_json(*cell),
+            point_json(*eye),
+            aim.map_or(String::new(), |p| format!(",\"aim\":{}", point_json(p)))
         ),
         Act::Enter { color, face, out } => format!(
             "\"action\":\"enter\",\"color\":\"{}\",\"face\":{},\"out\":{}",
@@ -993,10 +1459,11 @@ fn act_json(act: &Act) -> String {
             cell_json(*cube),
             point_json(above(*cube, CUBE_CENTRE))
         ),
-        Act::PutDown { at, button } => format!(
-            "\"action\":\"putdown\",\"at\":{},\"button\":{button},\"look\":{}",
+        Act::PutDown { at, button, facing } => format!(
+            "\"action\":\"putdown\",\"at\":{},\"button\":{button},\"look\":{}{}",
             cell_json(*at),
-            point_json(above(*at, 0.0))
+            point_json(above(*at, 0.0)),
+            facing.map_or(String::new(), |d| format!(",\"facing\":\"{}\"", dir_name(d)))
         ),
         Act::Toss { edge, dir, landing } => {
             let over = step(*edge, *dir);
@@ -1053,6 +1520,46 @@ fn act_json(act: &Act) -> String {
             cells_json(run),
             dir_name(*dir),
             cell_json(*to)
+        ),
+        Act::Plate {
+            from,
+            dir,
+            plate,
+            to,
+        } => format!(
+            "\"action\":\"plate\",\"from\":{},\"dir\":\"{}\",\"plate\":{},\"to\":{}",
+            cell_json(*from),
+            dir_name(*dir),
+            cell_json(*plate),
+            cell_json(*to)
+        ),
+        Act::Climb { path } => format!("\"action\":\"climb\",\"path\":{}", cells_json(path)),
+        Act::Funnel { enter, via, out, to } => format!(
+            "\"action\":\"funnel\",\"enter\":{},\"via\":{},\"out\":{},\"to\":{}",
+            cell_json(*enter),
+            cells_json(via),
+            cell_json(*out),
+            cell_json(*to)
+        ),
+        Act::Ride { from, to } => format!(
+            "\"action\":\"ride\",\"from\":{},\"to\":{}",
+            cell_json(*from),
+            cell_json(*to)
+        ),
+        Act::Dive {
+            edge,
+            dir,
+            out,
+            face,
+            exit,
+            landing,
+        } => format!(
+            "\"action\":\"dive\",\"edge\":{},\"dir\":\"{}\",\"out\":{out},\"face\":{},\"exit\":{},\"landing\":{}",
+            cell_json(*edge),
+            dir_name(*dir),
+            face_json(*face),
+            face_json(*exit),
+            cell_json(*landing)
         ),
         Act::Exit { cell, normal } => format!(
             "\"action\":\"exit\",\"cell\":{},\"normal\":\"{}\"",

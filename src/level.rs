@@ -21,6 +21,34 @@
 //!   (linked by `CONNECTION_PAINT_DROPPER`) pours it; buttons wire to the dropper, whose
 //!   `ITEM_PROPERTY_START_ENABLED` says whether it pours from the start. Without a dropper the
 //!   splat is paint that is there from the start.
+//!
+//! The other Puzzle Maker items (from `portal2_dlc2/scripts/editoritems.txt`, the instances in
+//! `sdk_content/maps/instances/p2editor` and the community style map; ASSUMPTIONS where noted):
+//! - Loose cubes: an `ITEM_CUBE` whose `ITEM_DROPPER_CUBE` (still linked by
+//!   `CONNECTION_BOX_DROPPER`) has `ITEM_PROPERTY_DROPPER_ENABLED` 0. A fizzled one is gone.
+//! - Laser emitters, catchers and relays (`_CENTER` and `_OFFSET`): in the open cell in front of
+//!   their surface; up is the normal, along which an emitter fires. `_OFFSET` ones sit off the
+//!   middle of the face toward local -x (editoritems' EmbedFace), still in the same cell.
+//! - Faith plates (`ITEM_CATAPULT`) launch whatever lands on them to their target
+//!   (`ITEM_CATAPULT_TARGET`, linked by `CONNECTION_CATAPULT_TARGET`).
+//! - Light bridges and excursion funnels (`ITEM_LIGHT_BRIDGE`, `ITEM_TBEAM`) project along their
+//!   up. A bridge's walkable side faces its local +x (the style map's wall bridge has +x up; its
+//!   `LocalPos` puts it 0.375 voxel low, so it is the floor of the cells it crosses).
+//! - Angled panels (`ITEM_PANEL_ANGLED`, glass `ITEM_PANEL_CLEAR`) cover the face behind their
+//!   cell and, deployed, swing out by `ITEM_PROPERTY_ANGLED_PANEL_ANIMATION` (ramp_N_deg_open):
+//!   local +x points to the edge that swings out, the hinge is on the opposite edge, and the face
+//!   leans toward the hinge (ASSUMPTION; Workshop wall panels point local +x down, so they lean up
+//!   and out, the way flings off them go). Flip panels (`ITEM_PANEL_FLIP`) swap
+//!   the face's portalability when flipped (ASSUMPTION: unflipped is the tile's own).
+//! - Stairs (`ITEM_PANEL_STAIRS`) take two floor cells, the item's and the next along local +x,
+//!   and deployed climb one voxel toward local +x (stairs.vmf: four steps of 32 over 256 units).
+//! - Piston platforms (`ITEM_PISTON_PLATFORM`) push out of the surface behind the item's cell
+//!   along its up: at level L they fill the L cells from the item's (`BOTTOM_LEVEL`/`TOP_LEVEL`,
+//!   `START_UP`). On a floor, that makes the cell L above the item's a floor.
+//! - Rail platforms (`ITEM_RAIL_PLATFORM`) are a floor in the item's cell that travels to the
+//!   cell of the extent farthest from it (their angles don't follow the up = normal rule).
+
+use std::collections::HashMap;
 
 use crate::geom::{rotate, step, up_from_angles, Cell, Dir};
 use crate::p2c::{Props, Puzzle, Voxels};
@@ -43,6 +71,23 @@ pub enum ItemKind {
     Turret,
     PaintSplat,
     PaintDropper,
+    /// A cube dropper switched off: its cube is a loose cube.
+    IdleDropper,
+    LaserEmitter,
+    LaserCatcher,
+    LaserRelay,
+    FaithPlate,
+    PlateTarget,
+    LightBridge,
+    Funnel,
+    AngledPanel,
+    GlassPanel,
+    FlipPanel,
+    Stairs,
+    Piston,
+    PistonExtent,
+    Rail,
+    RailExtent,
     Other(String),
 }
 
@@ -103,6 +148,9 @@ impl ItemKind {
             "ITEM_ENTRY_DOOR" => ItemKind::EntryDoor,
             "ITEM_EXIT_DOOR" => ItemKind::ExitDoor,
             "ITEM_CUBE" => ItemKind::Cube,
+            "ITEM_DROPPER_CUBE" if item.get_i32("ITEM_PROPERTY_DROPPER_ENABLED") == Some(0) => {
+                ItemKind::IdleDropper
+            }
             "ITEM_DROPPER_CUBE" => ItemKind::CubeDropper,
             "ITEM_BUTTON_FLOOR" => ItemKind::FloorButton,
             "ITEM_BUTTON_PEDESTAL" => ItemKind::PedestalButton,
@@ -118,6 +166,21 @@ impl ItemKind {
             "ITEM_TURRET" => ItemKind::Turret,
             "ITEM_PAINT_SPLAT" => ItemKind::PaintSplat,
             "ITEM_DROPPER_PAINT" => ItemKind::PaintDropper,
+            "ITEM_LASER_EMITTER_CENTER" | "ITEM_LASER_EMITTER_OFFSET" => ItemKind::LaserEmitter,
+            "ITEM_LASER_CATCHER_CENTER" | "ITEM_LASER_CATCHER_OFFSET" => ItemKind::LaserCatcher,
+            "ITEM_LASER_RELAY_CENTER" | "ITEM_LASER_RELAY_OFFSET" => ItemKind::LaserRelay,
+            "ITEM_CATAPULT" => ItemKind::FaithPlate,
+            "ITEM_CATAPULT_TARGET" => ItemKind::PlateTarget,
+            "ITEM_LIGHT_BRIDGE" => ItemKind::LightBridge,
+            "ITEM_TBEAM" => ItemKind::Funnel,
+            "ITEM_PANEL_ANGLED" => ItemKind::AngledPanel,
+            "ITEM_PANEL_CLEAR" => ItemKind::GlassPanel,
+            "ITEM_PANEL_FLIP" => ItemKind::FlipPanel,
+            "ITEM_PANEL_STAIRS" => ItemKind::Stairs,
+            "ITEM_PISTON_PLATFORM" => ItemKind::Piston,
+            "ITEM_PISTON_PLATFORM_EXTENT" => ItemKind::PistonExtent,
+            "ITEM_RAIL_PLATFORM" => ItemKind::Rail,
+            "ITEM_RAIL_PLATFORM_EXTENT" => ItemKind::RailExtent,
             other => ItemKind::Other(other.to_string()),
         }
     }
@@ -139,6 +202,28 @@ impl ItemKind {
                 | ItemKind::Turret
                 | ItemKind::PaintSplat
                 | ItemKind::PaintDropper
+                | ItemKind::LaserEmitter
+                | ItemKind::LaserCatcher
+                | ItemKind::LaserRelay
+                | ItemKind::FaithPlate
+                | ItemKind::LightBridge
+                | ItemKind::Funnel
+                | ItemKind::AngledPanel
+                | ItemKind::GlassPanel
+                | ItemKind::FlipPanel
+                | ItemKind::Stairs
+                | ItemKind::Piston
+        )
+    }
+
+    /// Items that can drive others over a `CONNECTION_STANDARD` wire.
+    pub fn is_sender(&self) -> bool {
+        matches!(
+            self,
+            ItemKind::FloorButton
+                | ItemKind::PedestalButton
+                | ItemKind::LaserCatcher
+                | ItemKind::LaserRelay
         )
     }
 }
@@ -212,6 +297,45 @@ impl PlacedItem {
     pub fn yaw(&self) -> Option<f64> {
         self.props.get_f64s::<3>("Facing").map(|[_, yaw, _]| yaw)
     }
+
+    /// The world direction of the item's local axis `v`, if axis-aligned.
+    pub fn axis(&self, v: [i32; 3]) -> Option<Dir> {
+        self.angles.and_then(|a| rotate(a, v))
+    }
+
+    /// Panels and stairs: `ITEM_PROPERTY_START_DEPLOYED` (default on).
+    pub fn start_deployed(&self) -> bool {
+        self.flag("ITEM_PROPERTY_START_DEPLOYED").unwrap_or(true)
+    }
+
+    /// Funnels: `ITEM_PROPERTY_START_REVERSED`.
+    pub fn start_reversed(&self) -> bool {
+        self.flag("ITEM_PROPERTY_START_REVERSED").unwrap_or(false)
+    }
+
+    /// Angled panels: `ITEM_PROPERTY_PORTALABLE` (default on).
+    pub fn portalable(&self) -> bool {
+        self.flag("ITEM_PROPERTY_PORTALABLE").unwrap_or(true)
+    }
+
+    /// Angled panels: the tilt in degrees, from `ramp_N_deg_open` (default 45).
+    pub fn panel_angle(&self) -> i32 {
+        self.props
+            .get("ITEM_PROPERTY_ANGLED_PANEL_ANIMATION")
+            .and_then(|a| a.strip_prefix("ramp_"))
+            .and_then(|a| a.split('_').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(45)
+    }
+
+    /// Laser items: where an `_OFFSET` one sits on its face (local -x); `None` when centred.
+    pub fn laser_offset(&self) -> Option<Dir> {
+        if self.props.kind().ends_with("_OFFSET") {
+            self.axis([-1, 0, 0])
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -244,6 +368,160 @@ pub struct Gel {
     pub dropper: Option<(i32, Cell)>,
     /// Whether the dropper pours from the start.
     pub start_enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LaserKind {
+    Emitter,
+    Catcher,
+    Relay,
+}
+
+/// A laser emitter, catcher or relay.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Laser {
+    pub item: i32,
+    pub kind: LaserKind,
+    /// The open cell in front of its surface.
+    pub cell: Cell,
+    /// The surface's normal: an emitter fires along it, a catcher takes a beam coming against
+    /// it, a relay takes one crossing its cell along the surface.
+    pub normal: Dir,
+    /// `_OFFSET` items: the side of the face they sit toward (`None`: centred).
+    pub offset: Option<Dir>,
+    /// Emitters: whether they fire from the start.
+    pub start_enabled: bool,
+}
+
+/// A faith plate and its target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plate {
+    pub item: i32,
+    pub cell: Cell,
+    pub normal: Dir,
+    /// The target item: its index, its cell (whatever is launched comes down from there) and
+    /// its surface's normal.
+    pub target: (i32, Cell, Dir),
+    /// Whether a simple arc from the plate to the target misses solid voxels (`clear_arc`).
+    pub clear: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ProjectorKind {
+    Bridge,
+    Funnel,
+}
+
+/// A light bridge or excursion funnel emitter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Projector {
+    pub item: i32,
+    pub kind: ProjectorKind,
+    pub cell: Cell,
+    /// It projects along this.
+    pub normal: Dir,
+    /// Bridges: the walkable side of the bridge (perpendicular to `normal`).
+    pub side: Dir,
+    pub start_enabled: bool,
+    /// Funnels: pulling toward the emitter from the start.
+    pub start_reversed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PanelKind {
+    Angled,
+    Glass,
+    Flip,
+}
+
+/// An angled panel (white/black or glass) or a flip panel, on the face behind `cell`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Panel {
+    pub item: i32,
+    pub kind: PanelKind,
+    pub cell: Cell,
+    pub normal: Dir,
+    /// Angled panels: their local +x, toward the edge that swings out (see `hinge`).
+    pub tilt: Dir,
+    /// Angled panels: degrees (30, 45, 60 or 90); flip panels 180.
+    pub angle: i32,
+    /// Angled panels: deployed from the start. Flip panels: never flipped at the start.
+    pub start_deployed: bool,
+}
+
+impl Panel {
+    /// The edge an angled panel swings on, and the way its face leans when deployed.
+    pub fn hinge(&self) -> Dir {
+        self.tilt.opposite()
+    }
+}
+
+/// Stairs on the floors of `cell` and the next cell along `dir`, rising toward `dir`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stairs {
+    pub item: i32,
+    pub cell: Cell,
+    pub dir: Dir,
+    pub start_deployed: bool,
+}
+
+impl Stairs {
+    /// Where the deployed stairs lead: the cell over the solid voxel past their second cell.
+    pub fn top(&self) -> Cell {
+        step(step(step(self.cell, self.dir), self.dir), Dir::PosZ)
+    }
+}
+
+/// A piston platform pushing out of the surface behind `cell` along `normal`: down, it fills
+/// the `bottom` cells from `cell` on; up, the `top` cells.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Piston {
+    pub item: i32,
+    pub cell: Cell,
+    pub normal: Dir,
+    pub bottom: i32,
+    pub top: i32,
+    pub start_up: bool,
+}
+
+impl Piston {
+    /// The cell `l` out from `cell` along `normal`.
+    pub fn at(&self, l: i32) -> Cell {
+        let v = self.normal.vector();
+        std::array::from_fn(|a| self.cell[a] + v[a] * l)
+    }
+
+    /// On a floor: the cell standing on the platform at its bottom or top.
+    pub fn stand(&self, up: bool) -> Cell {
+        self.at(if up { self.top } else { self.bottom })
+    }
+}
+
+/// A rail platform: a floor in `cell` that travels to `end` (along one axis).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rail {
+    pub item: i32,
+    pub cell: Cell,
+    pub end: Cell,
+    /// Back and forth for as long as it's active.
+    pub oscillate: bool,
+    pub start_active: bool,
+}
+
+impl Rail {
+    /// The cells it stops in, from `cell` to `end`.
+    pub fn track(&self) -> Vec<Cell> {
+        let a = (0..3).find(|&a| self.cell[a] != self.end[a]).unwrap_or(0);
+        let d = (self.end[a] - self.cell[a]).signum();
+        let n = (self.end[a] - self.cell[a]).abs();
+        (0..=n)
+            .map(|k| {
+                let mut c = self.cell;
+                c[a] += d * k;
+                c
+            })
+            .collect()
+    }
 }
 
 /// A `CONNECTION_STANDARD` wire: `sender` drives `receiver` (item indices).
@@ -306,6 +584,20 @@ pub struct Level {
     pub hazards: Vec<Hazard>,
     pub turrets: Vec<Turret>,
     pub gels: Vec<Gel>,
+    /// Laser emitters, catchers and relays, in item order.
+    pub lasers: Vec<Laser>,
+    pub plates: Vec<Plate>,
+    pub projectors: Vec<Projector>,
+    pub panels: Vec<Panel>,
+    pub stairs: Vec<Stairs>,
+    pub pistons: Vec<Piston>,
+    pub rails: Vec<Rail>,
+    /// `CONNECTION_TBEAM_POLARITY` wires: they reverse a funnel.
+    pub polarity_links: Vec<Link>,
+    /// Each cube's dropper, if it has one that is switched on.
+    pub dropper_of: HashMap<i32, i32>,
+    /// Faith plate cells (index into `plates`): whatever comes to them is launched.
+    launch: HashMap<Cell, usize>,
     /// What sits on each face, at `face_slot`.
     faces: Vec<FaceInfo>,
     /// Items that couldn't be decoded (bad extents, too many hazards).
@@ -356,12 +648,17 @@ impl Level {
             .filter(|c| c.get("Type") == Some("CONNECTION_BARRIER_ANCHOR_TO_EXTENT"))
             .filter_map(wire)
             .collect();
-        let paint_links: Vec<Link> = p
-            .connections
-            .iter()
-            .filter(|c| c.get("Type") == Some("CONNECTION_PAINT_DROPPER"))
-            .filter_map(wire)
-            .collect();
+        let typed = |t: &str| -> Vec<Link> {
+            p.connections
+                .iter()
+                .filter(|c| c.get("Type") == Some(t))
+                .filter_map(wire)
+                .collect()
+        };
+        let paint_links = typed("CONNECTION_PAINT_DROPPER");
+        let plate_links = typed("CONNECTION_CATAPULT_TARGET");
+        let polarity_links = typed("CONNECTION_TBEAM_POLARITY");
+        let box_links = typed("CONNECTION_BOX_DROPPER");
         let size = p.chamber_size();
         let n = size.iter().product::<i32>() as usize;
         let mut level = Level {
@@ -374,6 +671,16 @@ impl Level {
             hazards: Vec::new(),
             turrets: Vec::new(),
             gels: Vec::new(),
+            lasers: Vec::new(),
+            plates: Vec::new(),
+            projectors: Vec::new(),
+            panels: Vec::new(),
+            stairs: Vec::new(),
+            pistons: Vec::new(),
+            rails: Vec::new(),
+            polarity_links,
+            dropper_of: HashMap::new(),
+            launch: HashMap::new(),
             faces: vec![
                 FaceInfo::default();
                 3 * size.map(|s| s as usize + 1).iter().product::<usize>()
@@ -383,7 +690,236 @@ impl Level {
         level.flood_goo();
         level.decode_barriers(&extent_links);
         level.decode_turrets_and_gel(&paint_links);
+        level.decode_devices(&extent_links, &plate_links, &box_links);
         level
+    }
+
+    /// Lasers, faith plates, bridges, funnels, panels, stairs, pistons, rails and loose cubes.
+    fn decode_devices(&mut self, extent_links: &[Link], plate_links: &[Link], box_links: &[Link]) {
+        for l in box_links {
+            let on = self
+                .item(l.receiver)
+                .is_some_and(|d| d.kind == ItemKind::CubeDropper);
+            if on {
+                self.dropper_of.insert(l.sender, l.receiver);
+            }
+        }
+        for it in self.items.clone() {
+            let problem = |what: &str| format!("item {} {:?}: {what}", it.index, it.kind);
+            let Some(n) = it.normal else {
+                continue; // `mount_problems` reports it.
+            };
+            match it.kind {
+                ItemKind::LaserEmitter | ItemKind::LaserCatcher | ItemKind::LaserRelay => {
+                    let kind = match it.kind {
+                        ItemKind::LaserEmitter => LaserKind::Emitter,
+                        ItemKind::LaserCatcher => LaserKind::Catcher,
+                        _ => LaserKind::Relay,
+                    };
+                    self.lasers.push(Laser {
+                        item: it.index,
+                        kind,
+                        cell: it.cell,
+                        normal: n,
+                        offset: it.laser_offset(),
+                        start_enabled: it.start_enabled(),
+                    });
+                }
+                ItemKind::FaithPlate => {
+                    let target = plate_links
+                        .iter()
+                        .filter(|l| l.sender == it.index)
+                        .find_map(|l| self.item(l.receiver))
+                        .filter(|t| t.kind == ItemKind::PlateTarget);
+                    let Some(t) = target else {
+                        self.decode_problems.push(problem("faith plate without a target"));
+                        continue;
+                    };
+                    let Some(tn) = t.normal else {
+                        self.decode_problems.push(problem("target angles not axis-aligned"));
+                        continue;
+                    };
+                    if self.solid(t.cell) {
+                        self.decode_problems.push(problem("target isn't in an open cell"));
+                        continue;
+                    }
+                    let clear = self.clear_arc(it.cell, t.cell);
+                    self.plates.push(Plate {
+                        item: it.index,
+                        cell: it.cell,
+                        normal: n,
+                        target: (t.index, t.cell, tn),
+                        clear,
+                    });
+                }
+                ItemKind::LightBridge | ItemKind::Funnel => {
+                    let kind = if it.kind == ItemKind::LightBridge {
+                        ProjectorKind::Bridge
+                    } else {
+                        ProjectorKind::Funnel
+                    };
+                    let side = it.axis([1, 0, 0]).filter(|s| s.axis() != n.axis());
+                    let Some(side) = side else {
+                        self.decode_problems.push(problem("side not axis-aligned"));
+                        continue;
+                    };
+                    self.projectors.push(Projector {
+                        item: it.index,
+                        kind,
+                        cell: it.cell,
+                        normal: n,
+                        side,
+                        start_enabled: it.start_enabled(),
+                        start_reversed: it.start_reversed(),
+                    });
+                }
+                ItemKind::AngledPanel | ItemKind::GlassPanel | ItemKind::FlipPanel => {
+                    let kind = match it.kind {
+                        ItemKind::AngledPanel => PanelKind::Angled,
+                        ItemKind::GlassPanel => PanelKind::Glass,
+                        _ => PanelKind::Flip,
+                    };
+                    let tilt = it.axis([1, 0, 0]).filter(|t| t.axis() != n.axis());
+                    let tilt = match (kind, tilt) {
+                        (PanelKind::Flip, t) => t.unwrap_or(across_of(n)),
+                        (_, Some(t)) => t,
+                        (_, None) => {
+                            self.decode_problems.push(problem("tilt not axis-aligned"));
+                            continue;
+                        }
+                    };
+                    let angle = match kind {
+                        PanelKind::Flip => 180,
+                        _ => it.panel_angle(),
+                    };
+                    if !matches!(angle, 30 | 45 | 60 | 90 | 180) {
+                        self.decode_problems
+                            .push(problem(&format!("unknown panel angle {angle}")));
+                        continue;
+                    }
+                    self.panels.push(Panel {
+                        item: it.index,
+                        kind,
+                        cell: it.cell,
+                        normal: n,
+                        tilt,
+                        angle,
+                        start_deployed: kind != PanelKind::Flip && it.start_deployed(),
+                    });
+                }
+                ItemKind::Stairs => {
+                    let dir = it.axis([1, 0, 0]).filter(|d| d.axis() != 2);
+                    let (Some(dir), Dir::PosZ) = (dir, n) else {
+                        self.decode_problems.push(problem("stairs not flat on a floor"));
+                        continue;
+                    };
+                    let second = step(it.cell, dir);
+                    if self.solid(second) || !self.solid(step(second, Dir::NegZ)) {
+                        self.decode_problems
+                            .push(problem("stairs' second cell isn't open floor"));
+                        continue;
+                    }
+                    self.stairs.push(Stairs {
+                        item: it.index,
+                        cell: it.cell,
+                        dir,
+                        start_deployed: it.start_deployed(),
+                    });
+                }
+                ItemKind::Piston => {
+                    let level = |k: &str| it.props.get_i32(k);
+                    let (b, t) = (
+                        level("ITEM_PROPERTY_PISTON_LIFT_BOTTOM_LEVEL").unwrap_or(0),
+                        level("ITEM_PROPERTY_PISTON_LIFT_TOP_LEVEL").unwrap_or(1),
+                    );
+                    if !(0..=3).contains(&b) || !(1..=4).contains(&t) || b >= t {
+                        self.decode_problems.push(problem("bad piston levels"));
+                        continue;
+                    }
+                    let v = n.vector();
+                    // Open as far as it reaches (and, on a floor, to stand on its top).
+                    let reach = if n == Dir::PosZ { t } else { t - 1 };
+                    let open = (0..=reach)
+                        .all(|l| !self.solid(std::array::from_fn(|a| it.cell[a] + v[a] * l)));
+                    if !open {
+                        self.decode_problems.push(problem("piston's column isn't open"));
+                        continue;
+                    }
+                    self.pistons.push(Piston {
+                        item: it.index,
+                        cell: it.cell,
+                        normal: n,
+                        bottom: b,
+                        top: t,
+                        start_up: it.flag("ITEM_PROPERTY_PISTON_LIFT_START_UP").unwrap_or(false),
+                    });
+                }
+                ItemKind::Rail => {
+                    let end = extent_links
+                        .iter()
+                        .filter(|l| l.sender == it.index)
+                        .filter_map(|l| self.item(l.receiver))
+                        .map(|e| e.cell)
+                        .max_by_key(|e| (0..3).map(|a| (e[a] - it.cell[a]).abs()).sum::<i32>())
+                        .unwrap_or(it.cell);
+                    if (0..3).filter(|&a| end[a] != it.cell[a]).count() > 1 {
+                        self.decode_problems.push(problem("rail track isn't straight"));
+                        continue;
+                    }
+                    let rail = Rail {
+                        item: it.index,
+                        cell: it.cell,
+                        end,
+                        oscillate: it.flag("ITEM_PROPERTY_RAIL_OSCILLATE").unwrap_or(true),
+                        start_active: it.flag("ITEM_PROPERTY_RAIL_START_ACTIVE").unwrap_or(true),
+                    };
+                    if rail.track().iter().any(|&c| self.solid(c)) {
+                        self.decode_problems.push(problem("rail track isn't open"));
+                        continue;
+                    }
+                    self.rails.push(rail);
+                }
+                _ => {}
+            }
+        }
+        for (i, p) in self.plates.iter().enumerate() {
+            self.launch.insert(p.cell, i);
+        }
+        // Panels cover the face behind them: an angled one is white or black as it says, a
+        // glass one is never white.
+        for panel in self.panels.clone() {
+            let (c, d) = (panel.cell, panel.normal.opposite());
+            match panel.kind {
+                PanelKind::Angled => {
+                    let white = self.item(panel.item).is_some_and(|it| it.portalable());
+                    self.voxels.set_face_portalable(c, d, white);
+                }
+                PanelKind::Glass => self.voxels.set_face_portalable(c, d, false),
+                PanelKind::Flip => {}
+            }
+        }
+    }
+
+    /// Whether an arc from the middle of cell `a` up to a voxel over the higher of the two and
+    /// down to the middle of cell `b` misses solid voxels (sampled every 1/16 voxel; the ends'
+    /// own cells don't count).
+    pub fn clear_arc(&self, a: Cell, b: Cell) -> bool {
+        let p0 = a.map(|v| v as f64 + 0.5);
+        let p1 = b.map(|v| v as f64 + 0.5);
+        let rise = p0[2].max(p1[2]) + 1.0 - p0[2];
+        let dz = p1[2] - p0[2];
+        let len = (p1[0] - p0[0]).hypot(p1[1] - p0[1]) + 2.0 * rise;
+        let n = (len * 16.0).ceil().max(1.0) as usize;
+        (1..n).all(|k| {
+            let t = k as f64 / n as f64;
+            let z = p0[2] + dz * t + 4.0 * (rise - dz / 2.0).max(0.0) * t * (1.0 - t);
+            let c = [
+                (p0[0] + (p1[0] - p0[0]) * t).floor() as i32,
+                (p0[1] + (p1[1] - p0[1]) * t).floor() as i32,
+                z.floor() as i32,
+            ];
+            c == a || c == b || !self.solid(c)
+        })
     }
 
     fn decode_turrets_and_gel(&mut self, paint_links: &[Link]) {
@@ -582,14 +1118,24 @@ impl Level {
     }
 
     /// Something the player and cubes can stand on or are stopped by: solid, glass, grating.
-    fn floor_under(&self, c: Cell) -> bool {
+    pub fn floor_under(&self, c: Cell) -> bool {
         self.solid(step(c, Dir::NegZ)) || self.face(c, Dir::NegZ).barrier.is_some()
     }
 
-    /// Open cell with a floor (or a glass/grating panel) under it that isn't goo: somewhere the
-    /// player can stand.
+    /// Open cell with a floor (or a glass/grating panel) under it that isn't goo or a faith
+    /// plate: somewhere the player can stand.
     pub fn standable(&self, c: Cell) -> bool {
-        !self.solid(c) && self.floor_under(c) && !self.goo(c)
+        !self.solid(c) && self.floor_under(c) && !self.goo(c) && !self.launch.contains_key(&c)
+    }
+
+    /// The faith plate (index into `plates`) in cell `c`, if any.
+    pub fn plate_at(&self, c: Cell) -> Option<usize> {
+        self.launch.get(&c).copied()
+    }
+
+    /// Whether cube item `cube` has no working dropper (it was placed loose; fizzled, it's gone).
+    pub fn loose_cube(&self, cube: i32) -> bool {
+        !self.dropper_of.contains_key(&cube)
     }
 
     /// Face between `c` and `step(c, d)` is a surface (one side solid) and is white.
@@ -600,16 +1146,41 @@ impl Level {
     /// Where something falling from open cell `c` comes to rest, and the hazard fields it
     /// falls through. `None` if it ends in goo or `c` is solid.
     pub fn fall_path(&self, c: Cell) -> Option<(Cell, u64)> {
-        if self.solid(c) {
-            return None;
-        }
+        self.fall_route(c).map(|(f, h, _)| (f, h))
+    }
+
+    /// `fall_path`, and the last faith plate (index into `plates`) that launched it on the way:
+    /// a plate in any cell it falls through sends it to its target, to fall from there. `None`
+    /// also for a plate whose arc is blocked (`Plate::clear`), and for plates launching in a
+    /// loop.
+    pub fn fall_route(&self, c: Cell) -> Option<(Cell, u64, Option<usize>)> {
         let mut f = c;
         let mut hazards = 0;
-        while !self.goo(f) && !self.floor_under(f) {
-            hazards |= self.face(f, Dir::NegZ).hazards;
-            f = step(f, Dir::NegZ);
+        let mut plate = None;
+        for _ in 0..8 {
+            if self.solid(f) {
+                return None;
+            }
+            loop {
+                if let Some(&i) = self.launch.get(&f) {
+                    if !self.plates[i].clear {
+                        return None;
+                    }
+                    plate = Some(i);
+                    break;
+                }
+                if self.goo(f) {
+                    return None;
+                }
+                if self.floor_under(f) {
+                    return Some((f, hazards, plate));
+                }
+                hazards |= self.face(f, Dir::NegZ).hazards;
+                f = step(f, Dir::NegZ);
+            }
+            f = self.plates[plate.unwrap()].target.1;
         }
-        (!self.goo(f)).then_some((f, hazards))
+        None
     }
 
     /// Where something falling from open cell `c` comes to rest. `None` if it ends in goo or
@@ -734,6 +1305,15 @@ impl Level {
                 stack.push(step(c, d));
             }
         }
+    }
+}
+
+/// A direction perpendicular to `n`.
+fn across_of(n: Dir) -> Dir {
+    if n.axis() == 0 {
+        Dir::PosY
+    } else {
+        Dir::PosX
     }
 }
 

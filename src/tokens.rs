@@ -30,12 +30,35 @@
 //!                                  the start or not; N is +z
 //! gel x y z N K splat              gel K painted from the start on the surface against N
 //! turret x y z F                   turret on the floor, facing F × 45° (0 = +x, 2 = +y)
+//! cube x y z K                     a cube placed without a dropper, resting in (x, y, z)
+//! laser x y z N O on|off           laser emitter on the surface against N, firing along N;
+//!                                  O: `center`, or the side of the face it's offset toward
+//! catcher|relay x y z N O [> T]*   laser catcher or relay, driving its targets while powered
+//! plate x y z N x y z N            faith plate on the surface against N, and its target
+//! bridge x y z N S on|off          light bridge projected along N, walkable side S
+//! funnel x y z N on|off [rev]      excursion funnel along N; rev = pulling back at the start
+//! panel|glasspanel x y z N F A on|off
+//!                                  angled panel on the face behind (x, y, z) (against N),
+//!                                  tilting toward F by A × 15° (2, 3, 4 or 6) when deployed,
+//!                                  deployed from the start or not; white if its face is
+//! flip x y z N                     flip panel on the face behind (x, y, z) (against N)
+//! stairs x y z F on|off            stairs on the floors of (x, y, z) and the next cell along F,
+//!                                  rising toward F
+//! piston x y z N B T on|off        piston platform pushing out of the surface behind (x, y, z)
+//!                                  along N: B or T cells out, up (on) or down at the start
+//! rail x y z x y z osc|on|off      rail platform travelling between the two cells (along one
+//!                                  axis): back and forth, or to the far one while active (on:
+//!                                  from the start)
 //! ```
-//! Targets `T`: `exit`, `field N` (the N-th fizzler/laser field in the sequence), or `gel N`
-//! (the N-th gel, which must be poured).
+//! A dropper may end in `wait`: it drops its cube only when its inputs are first on.
+//! Targets `T`: `exit`, `field N` (the N-th fizzler/laser field in the sequence), `gel N`
+//! (the N-th gel, which must be poured), or the N-th `laser`, `bridge`, `funnel`, `panel`,
+//! `glasspanel`, `flip`, `stairs`, `piston`, `rail` or `dropper`; `polarity N` reverses the
+//! N-th funnel.
 //!
 //! `encode` writes items in a fixed order (white, doors, panels, fields, gels, droppers,
-//! buttons, pedestals, turrets; each sorted), so `encode(decode(encode(p))) == encode(p)`. The encoding keeps
+//! buttons, pedestals, turrets, then the later items in the order above; each sorted), so
+//! `encode(decode(encode(p))) == encode(p)`. The encoding keeps
 //! what play depends on (the `Level` view), not the file's bytes: decorative items, property
 //! order and face bits that aren't on a surface are dropped. `decode` accepts items in any
 //! order and rejects anything malformed with an error instead of panicking, so it can read
@@ -46,7 +69,10 @@ use std::collections::{BTreeSet, HashSet};
 use crate::builder::Builder;
 use crate::generator::TITLE;
 use crate::geom::{rotate, step, Cell, Dir};
-use crate::level::{ButtonKind, CubeKind, HazardKind, ItemKind, Level, PaintKind, PlacedItem};
+use crate::level::{
+    ButtonKind, CubeKind, HazardKind, ItemKind, LaserKind, Level, PaintKind, PanelKind,
+    PlacedItem, ProjectorKind,
+};
 use crate::p2c::Puzzle;
 use crate::solver::DECORATIVE;
 
@@ -59,6 +85,43 @@ const PAINT_KINDS: [&str; 4] = ["bounce", "speed", "portal", "water"];
 /// Words added after the first models were trained: they go at the end of the vocabulary,
 /// so earlier tokens keep their ids.
 const LATER_WORDS: [&str; 4] = ["turret", "gel", "stream", "splat"];
+/// Words for the items added after turrets and gel, after those (`cube` was already there,
+/// as a button kind).
+const DEVICE_WORDS: [&str; 17] = [
+    "laser",
+    "catcher",
+    "relay",
+    "center",
+    "plate",
+    "bridge",
+    "funnel",
+    "rev",
+    "panel",
+    "glasspanel",
+    "flip",
+    "stairs",
+    "piston",
+    "rail",
+    "osc",
+    "polarity",
+    "wait",
+];
+/// Wire targets after `exit`, in the order `encode` writes them.
+const TARGETS: [&str; 13] = [
+    "field",
+    "gel",
+    "laser",
+    "bridge",
+    "funnel",
+    "polarity",
+    "panel",
+    "glasspanel",
+    "flip",
+    "stairs",
+    "piston",
+    "rail",
+    "dropper",
+];
 const DIRS: [(Dir, &str); 6] = [
     (Dir::PosX, "+x"),
     (Dir::NegX, "-x"),
@@ -104,6 +167,7 @@ pub fn vocab() -> Vec<String> {
         }
     }
     v.extend(LATER_WORDS.iter().chain(&PAINT_KINDS).map(|s| s.to_string()));
+    v.extend(DEVICE_WORDS.iter().map(|s| s.to_string()));
     v
 }
 
@@ -312,7 +376,12 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
         droppers.push(d);
     }
     let mut dropped = Vec::new();
+    let mut loose = Vec::new();
     for cube in level.of_kind(&ItemKind::Cube) {
+        if level.loose_cube(cube.index) {
+            loose.push((cube.cell, cube.cube_kind()));
+            continue;
+        }
         let dropper = p
             .connections
             .iter()
@@ -340,48 +409,80 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
         return Err("a dropper has no cube, or two".into());
     }
     dropped.sort();
-    for (cell, kind, _) in dropped {
+    let waits = |d: i32| {
+        level
+            .item(d)
+            .is_some_and(|d| d.props.get_i32("ITEM_PROPERTY_AUTO_DROP_CUBE") == Some(0))
+    };
+    let dropper_items: Vec<i32> = dropped.iter().map(|d| d.2).collect();
+    for (cell, kind, d) in dropped {
         out.push("dropper".into());
         out.extend(cell_tokens(cell));
         out.push(CUBE_KINDS[cube_index(kind)].into());
+        if waits(d) {
+            out.push("wait".into());
+        }
     }
 
-    // Every wire must run from a button to the exit or a field.
-    let senders: HashSet<i32> = level
-        .items
+    // The later items, as tokens with what sorts them, and their items in that order.
+    let later = later_items(&level, &loose)?;
+    // What each wire can drive: (target kind: index into `TARGETS` + 1, 0 = exit; position).
+    let mut receivers: std::collections::HashMap<i32, (usize, usize)> = Default::default();
+    if let Some(e) = exit {
+        receivers.insert(e.index, (0, 0));
+    }
+    for (i, &f) in field_items.iter().enumerate() {
+        receivers.insert(f, (1, i));
+    }
+    for (i, g) in gel_items.iter().enumerate() {
+        if let Some(g) = g {
+            receivers.insert(*g, (2, i));
+        }
+    }
+    for (kind, items) in &later.receivers {
+        let k = 1 + TARGETS.iter().position(|t| t == kind).unwrap();
+        for (i, &item) in items.iter().enumerate() {
+            receivers.insert(item, (k, i));
+        }
+    }
+    for (i, &d) in dropper_items.iter().enumerate() {
+        receivers.insert(d, (TARGETS.len(), i));
+    }
+    let polarity: Vec<(i32, (usize, usize))> = later
+        .receivers
         .iter()
-        .filter(|i| matches!(i.kind, ItemKind::FloorButton | ItemKind::PedestalButton))
-        .map(|i| i.index)
+        .filter(|(k, _)| *k == "funnel")
+        .flat_map(|(_, items)| items.iter().enumerate())
+        .map(|(i, &f)| (f, (1 + TARGETS.iter().position(|t| *t == "polarity").unwrap(), i)))
         .collect();
-    let gel_of = |item: i32| gel_items.iter().position(|&g| g == Some(item));
+    // Every wire must run from a sender to something that takes input.
     for l in &level.links {
-        let to = level.item(l.receiver).map(|i| &i.kind);
-        let to_ok = matches!(to, Some(ItemKind::ExitDoor))
-            || field_items.contains(&l.receiver)
-            || gel_of(l.receiver).is_some();
-        if !senders.contains(&l.sender) || !to_ok {
+        let from = level.item(l.sender).map(|i| &i.kind);
+        if !from.is_some_and(ItemKind::is_sender) || !receivers.contains_key(&l.receiver) {
             return Err(format!(
-                "wire {} -> {} isn't button -> exit/field/gel",
+                "wire {} -> {} isn't sender -> receiver",
                 l.sender, l.receiver
             ));
+        }
+    }
+    for l in &level.polarity_links {
+        let from = level.item(l.sender).map(|i| &i.kind);
+        if !from.is_some_and(ItemKind::is_sender) || !polarity.iter().any(|p| p.0 == l.receiver) {
+            return Err(format!("polarity wire {} -> {}", l.sender, l.receiver));
         }
     }
     let targets = |sender: i32| -> Vec<String> {
         let mut ts: BTreeSet<(usize, usize)> = BTreeSet::new();
         for l in level.links.iter().filter(|l| l.sender == sender) {
-            if let Some(i) = field_items.iter().position(|&f| f == l.receiver) {
-                ts.insert((1, i));
-            } else if let Some(i) = gel_of(l.receiver) {
-                ts.insert((2, i));
-            } else {
-                ts.insert((0, 0));
-            }
+            ts.insert(receivers[&l.receiver]);
+        }
+        for l in level.polarity_links.iter().filter(|l| l.sender == sender) {
+            ts.insert(polarity.iter().find(|p| p.0 == l.receiver).unwrap().1);
         }
         ts.into_iter()
             .flat_map(|(kind, i)| match kind {
                 0 => vec![">".to_string(), "exit".into()],
-                1 => vec![">".to_string(), "field".into(), num(i as i32)],
-                _ => vec![">".to_string(), "gel".into(), num(i as i32)],
+                k => vec![">".to_string(), TARGETS[k - 1].into(), num(i as i32)],
             })
             .collect()
     };
@@ -438,6 +539,158 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
     }
     turrets.sort();
     out.extend(turrets.into_iter().flatten());
+
+    for (tokens, sender) in later.tokens {
+        out.extend(tokens);
+        if let Some(s) = sender {
+            out.extend(targets(s));
+        }
+    }
+    Ok(out)
+}
+
+/// The items added after turrets and gel, ready to write.
+struct Later {
+    /// Each item's tokens (without wires), in order, and the item to write the wires of.
+    tokens: Vec<(Vec<String>, Option<i32>)>,
+    /// Per target word: its items in the order written.
+    receivers: Vec<(&'static str, Vec<i32>)>,
+}
+
+fn later_items(level: &Level, loose: &[(crate::geom::Cell, CubeKind)]) -> Result<Later, String> {
+    let dir = |d: Dir| dir_token(d).to_string();
+    let on = |b: bool| if b { "on" } else { "off" }.to_string();
+    // (sort key = the tokens, item, whether it sends) per section.
+    type Section = Vec<(Vec<String>, i32, bool)>;
+    let mut sections: Vec<(&'static str, Section)> = Vec::new();
+    let mut cubes: Section = loose
+        .iter()
+        .map(|&(c, k)| {
+            let mut t = vec!["cube".to_string()];
+            t.extend(cell_tokens(c));
+            t.push(CUBE_KINDS[cube_index(k)].into());
+            (t, -1, false)
+        })
+        .collect();
+    cubes.sort();
+    sections.push(("cube", cubes));
+    for (word, kind) in [
+        ("laser", LaserKind::Emitter),
+        ("catcher", LaserKind::Catcher),
+        ("relay", LaserKind::Relay),
+    ] {
+        let mut sec: Section = Vec::new();
+        for l in level.lasers.iter().filter(|l| l.kind == kind) {
+            let mut t = vec![word.to_string()];
+            t.extend(cell_tokens(l.cell));
+            t.push(dir(l.normal));
+            t.push(l.offset.map_or("center".into(), dir));
+            if kind == LaserKind::Emitter {
+                t.push(on(l.start_enabled));
+            }
+            sec.push((t, l.item, kind != LaserKind::Emitter));
+        }
+        sec.sort();
+        sections.push((word, sec));
+    }
+    let mut plates: Section = Vec::new();
+    for pl in &level.plates {
+        let mut t = vec!["plate".to_string()];
+        t.extend(cell_tokens(pl.cell));
+        t.push(dir(pl.normal));
+        t.extend(cell_tokens(pl.target.1));
+        t.push(dir(pl.target.2));
+        plates.push((t, pl.item, false));
+    }
+    plates.sort();
+    sections.push(("plate", plates));
+    for (word, kind) in [("bridge", ProjectorKind::Bridge), ("funnel", ProjectorKind::Funnel)] {
+        let mut sec: Section = Vec::new();
+        for pj in level.projectors.iter().filter(|p| p.kind == kind) {
+            let mut t = vec![word.to_string()];
+            t.extend(cell_tokens(pj.cell));
+            t.push(dir(pj.normal));
+            if kind == ProjectorKind::Bridge {
+                t.push(dir(pj.side));
+            }
+            t.push(on(pj.start_enabled));
+            if kind == ProjectorKind::Funnel && pj.start_reversed {
+                t.push("rev".into());
+            }
+            sec.push((t, pj.item, false));
+        }
+        sec.sort();
+        sections.push((word, sec));
+    }
+    for (word, kind) in [
+        ("panel", PanelKind::Angled),
+        ("glasspanel", PanelKind::Glass),
+        ("flip", PanelKind::Flip),
+    ] {
+        let mut sec: Section = Vec::new();
+        for pn in level.panels.iter().filter(|p| p.kind == kind) {
+            let mut t = vec![word.to_string()];
+            t.extend(cell_tokens(pn.cell));
+            t.push(dir(pn.normal));
+            if kind != PanelKind::Flip {
+                t.push(dir(pn.tilt));
+                t.push(num(pn.angle / 15));
+                t.push(on(pn.start_deployed));
+            }
+            sec.push((t, pn.item, false));
+        }
+        sec.sort();
+        sections.push((word, sec));
+    }
+    let mut stairs: Section = Vec::new();
+    for st in &level.stairs {
+        let mut t = vec!["stairs".to_string()];
+        t.extend(cell_tokens(st.cell));
+        t.push(dir(st.dir));
+        t.push(on(st.start_deployed));
+        stairs.push((t, st.item, false));
+    }
+    stairs.sort();
+    sections.push(("stairs", stairs));
+    let mut pistons: Section = Vec::new();
+    for ps in &level.pistons {
+        let mut t = vec!["piston".to_string()];
+        t.extend(cell_tokens(ps.cell));
+        t.push(dir(ps.normal));
+        t.push(num(ps.bottom));
+        t.push(num(ps.top));
+        t.push(on(ps.start_up));
+        pistons.push((t, ps.item, false));
+    }
+    pistons.sort();
+    sections.push(("piston", pistons));
+    let mut rails: Section = Vec::new();
+    for r in &level.rails {
+        let mut t = vec!["rail".to_string()];
+        t.extend(cell_tokens(r.cell));
+        t.extend(cell_tokens(r.end));
+        t.push(if r.oscillate {
+            "osc".into()
+        } else {
+            on(r.start_active)
+        });
+        rails.push((t, r.item, false));
+    }
+    rails.sort();
+    sections.push(("rail", rails));
+
+    let mut out = Later {
+        tokens: Vec::new(),
+        receivers: Vec::new(),
+    };
+    for (word, sec) in sections {
+        if TARGETS.contains(&word) {
+            out.receivers.push((word, sec.iter().map(|s| s.1).collect()));
+        }
+        for (t, item, sends) in sec {
+            out.tokens.push((t, sends.then_some(item)));
+        }
+    }
     Ok(out)
 }
 
@@ -581,6 +834,8 @@ enum Target {
     Exit,
     Field(i32),
     Gel(i32),
+    /// A later target word (index into `TARGETS`) and position.
+    Other(usize, i32),
 }
 
 /// Builds the puzzle a token sequence describes. Errors name the offending token.
@@ -744,6 +999,31 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
     // Each gel's dropper, if poured.
     let mut gels: Vec<Option<i32>> = Vec::new();
     let mut wires: Vec<(i32, Target)> = Vec::new();
+    // Items of the later target kinds, by `TARGETS` index.
+    let mut later: Vec<Vec<i32>> = vec![Vec::new(); TARGETS.len()];
+    let slot = |word: &str| TARGETS.iter().position(|t| *t == word).unwrap();
+    // Two directions that must be perpendicular.
+    fn across(r: &Reader, a: Dir, b: Dir) -> Result<(), String> {
+        if a.axis() == b.axis() {
+            return r.fail("directions aren't perpendicular");
+        }
+        Ok(())
+    }
+    fn wired(r: &mut Reader, sender: i32, wires: &mut Vec<(i32, Target)>) -> Result<(), String> {
+        while r.peek() == Some(">") {
+            r.pos += 1;
+            let mut words = vec!["exit", "field", "gel"];
+            words.extend(&TARGETS[2..]);
+            let target = match r.word(&words)? {
+                0 => Target::Exit,
+                1 => Target::Field(r.num(0, MAX_NUM)?),
+                2 => Target::Gel(r.num(0, MAX_NUM)?),
+                k => Target::Other(k - 1, r.num(0, MAX_NUM)?),
+            };
+            wires.push((sender, target));
+        }
+        Ok(())
+    }
     while let Some(t) = r.peek() {
         r.pos += 1;
         match t {
@@ -824,7 +1104,113 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
             "dropper" => {
                 let cell = r.cell(size)?;
                 let kind = r.word(&CUBE_KINDS)?;
-                b.cube_dropper_of(cell, kind as i32);
+                let (_, dropper) = b.cube_dropper_of(cell, kind as i32);
+                if r.peek() == Some("wait") {
+                    r.pos += 1;
+                    b.auto_drop(dropper, false);
+                }
+                later[slot("dropper")].push(dropper);
+            }
+            "cube" => {
+                let cell = r.cell(size)?;
+                let kind = r.word(&CUBE_KINDS)?;
+                b.loose_cube(cell, kind as i32);
+            }
+            "laser" | "catcher" | "relay" => {
+                let (cell, n) = (r.cell(size)?, r.dir()?);
+                let offset = if r.peek() == Some("center") {
+                    r.pos += 1;
+                    None
+                } else {
+                    let o = r.dir()?;
+                    across(&r, n, o)?;
+                    Some(o)
+                };
+                let kind = match t {
+                    "laser" => LaserKind::Emitter,
+                    "catcher" => LaserKind::Catcher,
+                    _ => LaserKind::Relay,
+                };
+                let on = kind != LaserKind::Emitter || r.word(&["on", "off"])? == 0;
+                let item = b.laser(kind, cell, n, offset, on);
+                if kind == LaserKind::Emitter {
+                    later[slot("laser")].push(item);
+                } else {
+                    wired(&mut r, item, &mut wires)?;
+                }
+            }
+            "plate" => {
+                let (cell, n) = (r.cell(size)?, r.dir()?);
+                let (target, tn) = (r.cell(size)?, r.dir()?);
+                if cell == target {
+                    return r.fail("faith plate targets its own cell");
+                }
+                b.faith_plate(cell, n, target, tn);
+            }
+            "bridge" | "funnel" => {
+                let (cell, n) = (r.cell(size)?, r.dir()?);
+                if t == "bridge" {
+                    let side = r.dir()?;
+                    across(&r, n, side)?;
+                    let on = r.word(&["on", "off"])? == 0;
+                    let item = b.light_bridge(cell, n, side, on);
+                    later[slot("bridge")].push(item);
+                } else {
+                    let on = r.word(&["on", "off"])? == 0;
+                    let rev = r.peek() == Some("rev");
+                    if rev {
+                        r.pos += 1;
+                    }
+                    let item = b.funnel(cell, n, on, rev);
+                    later[slot("funnel")].push(item);
+                    later[slot("polarity")].push(item);
+                }
+            }
+            "panel" | "glasspanel" => {
+                let (cell, n, tilt) = (r.cell(size)?, r.dir()?, r.dir()?);
+                across(&r, n, tilt)?;
+                let angle = match r.num(2, 6)? {
+                    a @ (2 | 3 | 4 | 6) => a * 15,
+                    a => return r.fail(format!("panel angle {a} isn't 2, 3, 4 or 6")),
+                };
+                let on = r.word(&["on", "off"])? == 0;
+                let white = b.white(cell, n.opposite());
+                let glass = t == "glasspanel";
+                let item = b.angled_panel(cell, n, tilt, angle, on, white, glass);
+                later[slot(t)].push(item);
+            }
+            "flip" => {
+                let (cell, n) = (r.cell(size)?, r.dir()?);
+                let item = b.flip_panel(cell, n);
+                later[slot("flip")].push(item);
+            }
+            "stairs" => {
+                let (cell, d) = (r.cell(size)?, r.dir()?);
+                if d.axis() == 2 {
+                    return r.fail("stairs rise along the floor");
+                }
+                let on = r.word(&["on", "off"])? == 0;
+                let item = b.stairs(cell, d, on);
+                later[slot("stairs")].push(item);
+            }
+            "piston" => {
+                let (cell, n) = (r.cell(size)?, r.dir()?);
+                let (lo, hi) = (r.num(0, 3)?, r.num(1, 4)?);
+                if lo >= hi {
+                    return r.fail("piston's bottom isn't below its top");
+                }
+                let on = r.word(&["on", "off"])? == 0;
+                let item = b.piston(cell, n, lo, hi, on);
+                later[slot("piston")].push(item);
+            }
+            "rail" => {
+                let (cell, end) = (r.cell(size)?, r.cell(size)?);
+                if (0..3).filter(|&a| cell[a] != end[a]).count() != 1 {
+                    return r.fail("rail track isn't one straight line");
+                }
+                let mode = r.word(&["osc", "on", "off"])?;
+                let item = b.rail(cell, end, mode == 0, mode != 2);
+                later[slot("rail")].push(item);
             }
             "button" | "pedestal" => {
                 let cell = r.cell(size)?;
@@ -840,15 +1226,7 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
                     };
                     b.pedestal(cell, timer)
                 };
-                while r.peek() == Some(">") {
-                    r.pos += 1;
-                    let target = match r.word(&["exit", "field", "gel"])? {
-                        0 => Target::Exit,
-                        1 => Target::Field(r.num(0, MAX_NUM)?),
-                        _ => Target::Gel(r.num(0, MAX_NUM)?),
-                    };
-                    wires.push((sender, target));
-                }
+                wired(&mut r, sender, &mut wires)?;
             }
             "gel" => {
                 let (cell, n) = (r.cell(size)?, r.dir()?);
@@ -894,6 +1272,17 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
             Target::Gel(i) => gels.get(i as usize).copied().flatten().ok_or(format!(
                 "a button is wired to gel {i}, which doesn't exist or isn't poured"
             ))?,
+            Target::Other(k, i) => {
+                let item = *later[k].get(i as usize).ok_or(format!(
+                    "a wire goes to {} {i}, which doesn't exist",
+                    TARGETS[k]
+                ))?;
+                if TARGETS[k] == "polarity" {
+                    b.connect_polarity(sender, item);
+                    continue;
+                }
+                item
+            }
         };
         b.connect(sender, receiver);
     }
