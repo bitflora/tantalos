@@ -189,6 +189,10 @@ def main():
         opt.load_state_dict(ck["optimizer"])
         step, best = ck["step"], ck["best_val"]
         print(f"resumed at step {step}")
+    if init or step:
+        # Otherwise a run continuing another draws the very batches that run drew first. (The
+        # validation split stays: it is seeded separately, by --seed alone.)
+        random.seed(f"{args.seed} {args.init} {step}")
     print(f"model: {model.n_params() / 1e6:.1f}M parameters on {device} ({dtype})")
 
     def lr_at(s):
