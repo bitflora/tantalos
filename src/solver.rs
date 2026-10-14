@@ -439,7 +439,14 @@ pub struct Model {
     pub lasers: u64,
     /// Devices, their bits, and how each bit follows from the state.
     pub devices: Devices,
-    bit_rules: Vec<BitRule>,
+    /// Per switch, the device bits that are on only while it is (`BitRule`).
+    switch_bits: Vec<u64>,
+    /// The bits of `BitRule::Routed`, on only while the portals carry their route too.
+    routed: u64,
+    /// Per face class, the routed bits whose projector's path ends there (`FaceClass::ends`)
+    /// and those whose route comes out of it (`FaceClass::routes`).
+    class_ends: Vec<u64>,
+    class_routes: Vec<u64>,
     /// Wired things that are on or off: devices' and laser emitters'.
     pub switches: Vec<Switch>,
     /// Laser beams; per emitter (`Beams::emitters`) its switch.
@@ -453,6 +460,9 @@ pub struct Model {
     held_back: Vec<Held>,
     /// Devices, lasers or waiting cubes: `settle` has work after any action.
     dynamic: bool,
+    /// Where the portals are can switch devices (a bridge or funnel through them) or carry a
+    /// laser.
+    portals_drive: bool,
     /// Everything in the level was modelled: an exhausted search means unsolvable.
     pub complete: bool,
     projector_kinds: Vec<ProjectorKind>,
@@ -1266,6 +1276,32 @@ impl Model {
             }
         }
         let dynamic = !devices.is_empty() || !beams.is_empty() || !held_back.is_empty();
+        let mut switch_bits = vec![0u64; switches.len()];
+        let mut routed = 0u64;
+        let mut class_ends = vec![0u64; portals.classes.len()];
+        let mut class_routes = vec![0u64; portals.classes.len()];
+        for (b, rule) in bit_rules.iter().enumerate() {
+            match *rule {
+                BitRule::Switch(sw) => switch_bits[sw] |= 1 << b,
+                BitRule::Routed {
+                    switch,
+                    projector,
+                    route,
+                } => {
+                    switch_bits[switch] |= 1 << b;
+                    routed |= 1 << b;
+                    for c in &portals.classes {
+                        if c.ends.contains(&projector) {
+                            class_ends[c.id] |= 1 << b;
+                        }
+                        if c.routes.contains(&(projector, route)) {
+                            class_routes[c.id] |= 1 << b;
+                        }
+                    }
+                }
+            }
+        }
+        let portals_drive = !beams.is_empty() || routed != 0;
         let button_sight: Vec<Vec<Masks>> = buttons
             .iter()
             .map(|b| match b.region {
@@ -1401,7 +1437,10 @@ impl Model {
             walk,
             button_sight,
             devices,
-            bit_rules,
+            switch_bits,
+            routed,
+            class_ends,
+            class_routes,
             switches,
             beams,
             emitter_switch,
@@ -1409,6 +1448,7 @@ impl Model {
             beam_end_class,
             held_back,
             dynamic,
+            portals_drive,
             complete,
             projector_kinds: level.projectors.iter().map(|p| p.kind).collect(),
             on_platform,
@@ -1807,27 +1847,22 @@ impl Model {
     /// The devices' bits, with `held` on for the moment as well.
     fn device_bits(&self, lay: &Layout, s: &[u32], held: Option<Signal>) -> u64 {
         let mut dev = 0u64;
-        let (blue, orange) = (portal(s, 0), portal(s, 1));
-        for (b, rule) in self.bit_rules.iter().enumerate() {
-            let on = match *rule {
-                BitRule::Switch(sw) => self.switch_on(lay, s, sw, held),
-                BitRule::Routed {
-                    switch,
-                    projector,
-                    route,
-                } => {
-                    let through = |a: Option<usize>, b: Option<usize>| match (a, b) {
-                        (Some(a), Some(b)) => {
-                            let (a, b) = (&self.portals.classes[a], &self.portals.classes[b]);
-                            a.ends.contains(&projector) && b.routes.contains(&(projector, route))
-                        }
-                        _ => false,
-                    };
-                    (through(blue, orange) || through(orange, blue))
-                        && self.switch_on(lay, s, switch, held)
+        for (sw, &bits) in self.switch_bits.iter().enumerate() {
+            if bits != 0 && self.switch_on(lay, s, sw, held) {
+                dev |= bits;
+            }
+        }
+        if self.routed != 0 {
+            // A route is on when one portal takes its projector's path and the other is where
+            // the route comes out.
+            let through = match (portal(s, 0), portal(s, 1)) {
+                (Some(a), Some(b)) => {
+                    let (ends, routes) = (&self.class_ends, &self.class_routes);
+                    ends[a] & routes[b] | ends[b] & routes[a]
                 }
+                _ => 0,
             };
-            dev |= (on as u64) << b;
+            dev &= !self.routed | through;
         }
         dev
     }
@@ -1836,57 +1871,57 @@ impl Model {
     /// is on, through reflection cubes at spots and through portals.
     fn beam_hits(&self, lay: &Layout, s: &[u32]) -> (u32, u32) {
         let (mut lit, mut hit) = (0u32, 0u32);
-        // Cubes at spots: spot cell -> spot.
-        let mut at: Vec<(usize, usize)> = Vec::new();
-        for (i, &code) in lay.cubes(s).iter().enumerate() {
-            if let CubeLoc::Spot(k) = self.code_loc(code) {
-                if lay.kinds[i] == CubeKind::Reflection {
-                    at.push((self.beams.spots[k].cell, k));
-                }
-            }
-        }
+        // The spot whose cell is `cell`, if a reflection cube is there.
+        let cube_at = |cell: usize| {
+            lay.cubes(s)
+                .iter()
+                .zip(&lay.kinds)
+                .find_map(|(&code, &kind)| match self.code_loc(code) {
+                    CubeLoc::Spot(k)
+                        if kind == CubeKind::Reflection && self.beams.spots[k].cell == cell =>
+                    {
+                        Some(k)
+                    }
+                    _ => None,
+                })
+        };
         let (blue, orange) = (portal(s, 0), portal(s, 1));
-        let mut stack: Vec<(usize, usize)> = Vec::new();
+        // Each beam goes one way, so follow each emitter's to its end.
         for (e, &(_, ray)) in self.beams.emitters.iter().enumerate() {
-            if self.switch_on(lay, s, self.emitter_switch[e], None) {
-                stack.push((ray, 0));
-            }
-        }
-        while let Some((ray, depth)) = stack.pop() {
-            if depth > 8 {
+            if !self.switch_on(lay, s, self.emitter_switch[e], None) {
                 continue;
             }
-            let r = &self.beams.rays[ray];
-            let mut redirected = false;
-            for ev in &r.events {
-                match *ev {
-                    Event::Receiver(k) => lit |= 1 << k,
-                    Event::Turret(t) => hit |= 1 << t,
-                    Event::Cube(sc) => {
-                        if let Some(&(_, k)) = at.iter().find(|&&(c, _)| c == sc) {
-                            stack.push((self.beams.spots[k].ray, depth + 1));
-                            redirected = true;
-                            break;
+            let mut next = Some(ray);
+            for _ in 0..=8 {
+                let Some(ray) = next.take() else { break };
+                let r = &self.beams.rays[ray];
+                for ev in &r.events {
+                    match *ev {
+                        Event::Receiver(k) => lit |= 1 << k,
+                        Event::Turret(t) => hit |= 1 << t,
+                        Event::Cube(sc) => {
+                            if let Some(k) = cube_at(sc) {
+                                next = Some(self.beams.spots[k].ray);
+                                break;
+                            }
                         }
                     }
                 }
-            }
-            if redirected {
-                continue;
-            }
-            let Some(end) = r.end else { continue };
-            let Some(&class) = self.beam_end_class.get(&end) else {
-                continue;
-            };
-            let out = if blue == Some(class) {
-                orange
-            } else if orange == Some(class) {
-                blue
-            } else {
-                None
-            };
-            if let Some(ray) = out.and_then(|o| self.portals.classes[o].beam_out) {
-                stack.push((ray, depth + 1));
+                if next.is_some() {
+                    continue;
+                }
+                let Some(end) = r.end else { break };
+                let Some(&class) = self.beam_end_class.get(&end) else {
+                    break;
+                };
+                let out = if blue == Some(class) {
+                    orange
+                } else if orange == Some(class) {
+                    blue
+                } else {
+                    None
+                };
+                next = out.and_then(|o| self.portals.classes[o].beam_out);
             }
         }
         (lit, hit)
@@ -1965,6 +2000,22 @@ impl Model {
             };
             lay.paint_masks(s, masks, self.gels[g].kind);
         }
+    }
+
+    /// Whether `settle_devices` would leave `n`, a quiet successor of settled `s`, as it is:
+    /// nothing devices, lasers or droppers read changed (only the player and cubes moved,
+    /// held or loose, or portals that drive nothing), and where they went is there.
+    fn unmoved(&self, lay: &Layout, s: &[u32], n: &[u32]) -> bool {
+        let dev = dev_of(s);
+        let there = |r: u32| self.graph.regions[r as usize].cond.holds(dev);
+        let loose = self.graph.regions.len() as u32;
+        (n[0] == s[0] || there(n[0]))
+            && (!self.portals_drive || n[BLUE..LATCHED] == s[BLUE..LATCHED])
+            && n[LATCHED] == s[LATCHED]
+            && n[LIT..CUBES] == s[LIT..CUBES]
+            && lay.cubes(s).iter().zip(lay.cubes(n)).all(|(&a, &b)| {
+                a == b || (a <= loose && b <= loose && (b == HELD || there(b - 1)))
+            })
     }
 
     /// One round of `settle` for devices and lasers.
@@ -2149,10 +2200,9 @@ impl Model {
         }
         // A `quiet` action changes nothing `settle` looks at (cubes on buttons, pedestals,
         // portals on faces under turrets or gel streams), so from a settled state it needs no
-        // settling.
-        let dynamic = self.dynamic;
+        // settling, unless devices could follow it (`unmoved`).
         let mut done = |n: &mut Vec<u32>, a: Action, quiet: bool| {
-            if !(quiet && settled && !dynamic) {
+            if !(quiet && settled && (!self.dynamic || self.unmoved(lay, s, n))) {
                 self.settle(lay, n);
             }
             if n[0] != DEAD {
