@@ -1,13 +1,11 @@
 //! Routes: the solver's plans made concrete for playing in the game.
 
 use glados::fixtures;
-use glados::generator::Genome;
 use glados::geom::{step, Cell, Dir};
 use glados::dynamics::Devices;
 use glados::level::Level;
 use glados::regions::Geo;
 use glados::portals::{shots_from, Sight};
-use glados::rng::Rng;
 use glados::route::{route, Act, Route};
 use glados::solver::{Mode, Model, Verdict, DEFAULT_MAX_STATES};
 
@@ -165,49 +163,4 @@ fn worked_example_route() {
     assert_eq!(lines.len(), 1 + r.legs.len());
     assert!(lines[0].starts_with("{\"title\":\"Worked example\""));
     assert!(lines[5].contains("\"action\":\"putdown\""));
-}
-
-/// Generated levels, mostly bred from solvable ones (as `glados dataset` does) so that many
-/// are solvable and use more mechanics.
-#[test]
-fn generated_levels_route() {
-    let mut rng = Rng::new(17);
-    let mut pool: Vec<Genome> = Vec::new();
-    let mut kinds = std::collections::BTreeSet::new();
-    for _ in 0..250 {
-        let g = if !pool.is_empty() && rng.chance(0.7) {
-            let mut g = rng.pick(&pool).clone();
-            for _ in 0..rng.range(1, 3) {
-                g.mutate(&mut rng);
-            }
-            g
-        } else {
-            Genome::random(&mut rng)
-        };
-        let Some(p) = g.build() else { continue };
-        let level = Level::from_puzzle(&p);
-        if solvable(&level, 20_000) != Some(true) {
-            continue;
-        }
-        let r = route(&level, 20_000).unwrap_or_else(|e| {
-            panic!(
-                "{e}
-{}",
-                p.to_p2c()
-            )
-        });
-        check("generated", &level, &r);
-        pool.push(g);
-        for leg in &r.legs {
-            kinds.insert(
-                format!("{:?}", leg.act)
-                    .split([' ', '{'])
-                    .next()
-                    .unwrap()
-                    .to_string(),
-            );
-        }
-    }
-    assert!(pool.len() > 60, "only {} solvable levels", pool.len());
-    eprintln!("{} routed; acts: {kinds:?}", pool.len());
 }

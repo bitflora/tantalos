@@ -249,6 +249,36 @@ pub enum Action {
     },
 }
 
+impl Action {
+    /// The same action with the portal colors the other way round.
+    fn flipped(self) -> Action {
+        match self {
+            Action::Fire {
+                color,
+                class,
+                stand_on,
+            } => Action::Fire {
+                color: color.other(),
+                class,
+                stand_on,
+            },
+            Action::Enter { color } => Action::Enter {
+                color: color.other(),
+            },
+            Action::Throw { color, to } => Action::Throw {
+                color: color.other(),
+                to,
+            },
+            Action::Dive { color, height, to } => Action::Dive {
+                color: color.other(),
+                height,
+                to,
+            },
+            a => a,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct State {
     pub region: usize,
@@ -423,6 +453,10 @@ pub struct Model {
     /// Per face class: a turret stands on it or a gel stream lands on it, so a portal there
     /// can make `settle` do something.
     special: Vec<bool>,
+    /// Per face class: a portal there does nothing on its own. Nothing can go in (no entry,
+    /// no dives), and it drives nothing (no turret, gel, projection or beam, not a panel):
+    /// it is only somewhere to come out of. Two of them make a pair no one can use.
+    inert: Vec<bool>,
     /// Per region, for the search: its slice of `graph.edges` and of `gel_moves` (both sorted
     /// by region), the face classes it may fire at (seen from the region or from a button
     /// there), the weighted buttons it can stand on to fire, its buttons and pedestals, and the
@@ -485,7 +519,8 @@ pub struct StateSpace {
     offsets: Vec<u32>,
     targets: Vec<u32>,
     uses: Vec<u32>,
-    /// How each state but the start was first reached: (state, action).
+    /// How each state but the start was first reached: (state, action), `SWAPPED` set if
+    /// the portals were swapped into `canonical` order on the way.
     parent: Vec<(u32, Action)>,
     /// Each state's region (`u32::MAX` once escaped).
     regions: Vec<u32>,
@@ -517,15 +552,7 @@ impl StateSpace {
     pub fn verdict(&self) -> Verdict {
         match self.goal.iter().position(|&g| g) {
             Some(g) if self.overflow.is_none_or(|o| o >= g) => {
-                let mut plan = Vec::new();
-                let mut i = g;
-                while i > 0 {
-                    let (p, a) = self.parent[i - 1];
-                    plan.push(a);
-                    i = p as usize;
-                }
-                plan.reverse();
-                Verdict::Solved(plan)
+                Verdict::Solved(plan_to(&self.parent, g))
             }
             None if self.complete => Verdict::Unsolvable,
             _ => Verdict::Unknown,
@@ -1390,6 +1417,22 @@ impl Model {
                 .iter()
                 .map(|c| c.turret.is_some() || c.stream.is_some())
                 .collect(),
+            inert: portals
+                .classes
+                .iter()
+                .map(|c| {
+                    c.flat.entry.is_none()
+                        && c.flat.dives.is_empty()
+                        && c.deployed.is_none()
+                        && c.turret.is_none()
+                        && c.stream.is_none()
+                        && c.gel_cell.is_none()
+                        && c.ends.is_empty()
+                        && c.routes.is_empty()
+                        && !c.beam_end
+                        && c.beam_out.is_none()
+                })
+                .collect(),
             buttons_in: by_region(buttons.len(), &|b| buttons[b].region),
             pedestals_in: by_region(pedestals.len(), &|p| pedestals[p].region),
             footholds,
@@ -1572,16 +1615,8 @@ impl Model {
             cur.clear();
             cur.extend_from_slice(table.get(next));
             if self.goal(&cx.lay, &cur) {
-                let mut plan = Vec::new();
-                let mut i = next;
-                while i > 0 {
-                    let (p, a) = parent[i - 1];
-                    plan.push(a);
-                    i = p as usize;
-                }
-                plan.reverse();
                 return Outcome {
-                    verdict: Verdict::Solved(plan),
+                    verdict: Verdict::Solved(plan_to(&parent, next)),
                     states: table.len(),
                 };
             }
@@ -1593,6 +1628,7 @@ impl Model {
             }
             let mut full = false;
             self.expand(&cx, &cur, true, &mut sc, &mut |a, n| {
+                let swapped = canonical(n);
                 let h = Table::hash(n);
                 if full || table.find(n, h).is_some() {
                     return;
@@ -1602,7 +1638,7 @@ impl Model {
                     return;
                 }
                 table.insert(n, h);
-                parent.push((next as u32, a));
+                parent.push((next as u32 | if swapped { SWAPPED } else { 0 }, a));
                 depth.push(depth[next] + 1);
             });
             if full {
@@ -1649,6 +1685,7 @@ impl Model {
             space.goal.push(self.goal(&cx.lay, &cur));
             space.regions.push(if cur[0] & ESCAPED != 0 { u32::MAX } else { cur[0] });
             self.expand(&cx, &cur, true, &mut sc, &mut |a, n| {
+                let swapped = canonical(n);
                 let h = Table::hash(n);
                 let j = match table.find(n, h) {
                     Some(j) => j,
@@ -1659,7 +1696,7 @@ impl Model {
                     }
                     None => {
                         space.depth.push(space.depth[i] + 1);
-                        space.parent.push((i as u32, a));
+                        space.parent.push((i as u32 | if swapped { SWAPPED } else { 0 }, a));
                         table.insert(n, h)
                     }
                 };
@@ -2180,7 +2217,7 @@ impl Model {
         s: &[u32],
         settled: bool,
         sc: &mut Scratch,
-        emit: &mut impl FnMut(Action, &[u32]),
+        emit: &mut impl FnMut(Action, &mut [u32]),
     ) {
         if s[0] & ESCAPED != 0 || s[0] == DEAD {
             return;
@@ -2288,8 +2325,14 @@ impl Model {
             let me = color as usize;
             let other = portal(s, color.other() as usize);
             let quiet = plain(portal(s, me)) && plain(other);
+            // Beside an inert portal, firing at another inert class only makes a pair no one
+            // can use: skip it (fire the useful portal first instead).
+            let beside_inert = other.is_some_and(|o| self.inert[o]);
             for t in self.fire_from[r].iter().filter(|_| can_fire) {
                 let c = t.class;
+                if beside_inert && self.inert[c] {
+                    continue;
+                }
                 let taken = other == Some(c) && t.single;
                 let unpainted = t
                     .needs_paint
@@ -2651,6 +2694,43 @@ impl Model {
             ),
         }
     }
+}
+
+/// Set in a parent's state index (`StateSpace::parent`) when the state reached was stored with
+/// its portals swapped.
+const SWAPPED: u32 = 1 << 31;
+
+/// Puts the portals of packed state `s` in a fixed order, as blue and orange work the same
+/// way round: (A, B) and (B, A) are one state, which halves the states a search stores. Returns
+/// whether it swapped them; after that, the actions' colors are the other way round.
+fn canonical(s: &mut [u32]) -> bool {
+    let swap = s[BLUE] > s[BLUE + 1];
+    if swap {
+        s.swap(BLUE, BLUE + 1);
+    }
+    swap
+}
+
+/// The plan to state `goal` along `parent` links, with each action's color as in the game:
+/// flipped wherever the states before it were stored with their portals swapped.
+fn plan_to(parent: &[(u32, Action)], goal: usize) -> Vec<Action> {
+    let mut steps = Vec::new();
+    let mut i = goal;
+    while i > 0 {
+        let (p, a) = parent[i - 1];
+        steps.push((a, p & SWAPPED != 0));
+        i = (p & !SWAPPED) as usize;
+    }
+    let mut flip = false;
+    steps
+        .into_iter()
+        .rev()
+        .map(|(a, swapped)| {
+            let a = if flip { a.flipped() } else { a };
+            flip ^= swapped;
+            a
+        })
+        .collect()
 }
 
 fn paint_code(face: usize, kind: PaintKind) -> u32 {
