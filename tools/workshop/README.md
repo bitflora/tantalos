@@ -13,7 +13,9 @@ python tools/workshop/check.py                    # converter vs. known puzzles 
 ```
 
 `levels.jsonl` has the fields `glados dataset` writes (`tokens`, `verdict`, `min_len`, `metrics`),
-plus `workshop_id` and `title`. `build --p2c DIR` also writes the solvable ones as `.p2c`.
+plus `workshop_id`, `title`, `subscribers` (lifetime unique) and `favorited`. Training reads the
+id as `<src:ws>` and the subscribers as `<tier:top>` (≥ 100) or `<tier:mid>` (train/data.py).
+`build --p2c DIR` also writes the solvable ones as `.p2c`.
 
 ## How it works
 

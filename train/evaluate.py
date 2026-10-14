@@ -31,7 +31,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 import sample  # noqa: E402
-from data import GROUPS, conditions, groups_in  # noqa: E402
+from data import GROUPS, PROVENANCE, conditions, groups_in  # noqa: E402
 
 SOLVABLE = "<verdict:solvable>"
 SHINGLE = 4
@@ -43,7 +43,9 @@ def realized(record):
     if "tokens" not in record:
         return None
     have = conditions(record)
-    return {g: next((t for t in have if t in tokens), None) for g, tokens in GROUPS.items()}
+    # A sampled level never has a Workshop id: provenance isn't something it can show.
+    return {g: None if g in PROVENANCE else next((t for t in have if t in tokens), None)
+            for g, tokens in GROUPS.items()}
 
 
 def size_key(tokens):
@@ -208,15 +210,18 @@ def report(ev):
         "Each value asked for on its own (with `<verdict:solvable>` except for verdicts). "
         "*Accuracy*: share of the levels the group applies to (parsed; solvable for `len` and "
         "`trips`) that have the value. *Hit*: share of all levels asked. *Unasked*: accuracy "
-        "with only `<verdict:solvable>` (no condition at all, for verdicts).",
+        "with only `<verdict:solvable>` (no condition at all, for verdicts). *Solvable*: share "
+        "of the levels asked that are solvable (the only measure for `src` and `tier`, which a "
+        "level can't show).",
         "",
-        "| condition | asked | accuracy | hit | unasked |",
-        "|---|---|---|---|---|",
+        "| condition | asked | accuracy | hit | unasked | solvable |",
+        "|---|---|---|---|---|---|",
     ]
     for c in ev["conditioning"]:
         acc = pct(c["accuracy"]) if c["measurable"] else "–"
         base = pct(c["unasked"]) if c["unasked"] is not None else "–"
-        lines.append(f"| `{c['token']}` | {c['asked']} | {acc} | {pct(c['hit'])} | {base} |")
+        solv = pct(c["solvable"]) if "solvable" in c else "–"
+        lines.append(f"| `{c['token']}` | {c['asked']} | {acc} | {pct(c['hit'])} | {base} | {solv} |")
     nov = ev["novelty"]
     m, g = nov["model_nearest"], nov["generator_nearest"]
     lines += [
@@ -372,6 +377,8 @@ def main():
                     "hits": hits,
                     "accuracy": acc,
                     "hit": hits / len(by_setting[setting]),
+                    "solvable": sum(r["verdict"] == "solvable" for r in by_setting[setting])
+                    / len(by_setting[setting]),
                     "unasked": acc0 if m0 else None,
                 }
             )

@@ -16,7 +16,8 @@ what's done. Steam's CDN drops connections now and then; requests retry with bac
 
 `build` converts every slim map (tools/workshop/convert.py), scores the tokens with
 `glados score`, and writes the dataset records (the same fields as `glados dataset`, plus
-`workshop_id` and `title`). Use --p2c DIR to also get the solvable ones as .p2c files.
+`workshop_id`, `title`, and the popularity that train/data.py's `tier` condition reads:
+`subscribers` (lifetime unique) and `favorited`). Use --p2c DIR to also get the solvable ones as .p2c files.
 """
 import argparse
 import concurrent.futures
@@ -238,10 +239,11 @@ def cmd_download(a):
 
 def cmd_build(a):
     out = Path(a.out)
-    titles = {}
+    meta = {}
     for l in open(out / "items.jsonl", encoding="utf-8"):
         r = json.loads(l)
-        titles[r["id"]] = r["title"]
+        meta[r["id"]] = {"title": r["title"], "subscribers": r.get("lifetime_subscriptions"),
+                         "favorited": r.get("favorited")}
     ids, lines, problems = [], [], {}
     with open(out / "report.jsonl", "w", encoding="utf-8") as report:
         for path in sorted((out / "bsp").glob("*.bsp")):
@@ -268,7 +270,7 @@ def cmd_build(a):
             r = json.loads(line)
             r.pop("line", None)
             r.pop("canonical", None)
-            r = {**r, "workshop_id": wid, "title": titles.get(wid, "")}
+            r = {**r, "workshop_id": wid, **meta.get(wid, {"title": ""})}
             verdicts[r["verdict"]] = verdicts.get(r["verdict"], 0) + 1
             f.write(json.dumps(r) + "\n")
     print(f"{verdicts}; {out / 'levels.jsonl'}")

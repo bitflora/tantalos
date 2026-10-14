@@ -5,7 +5,8 @@ A training sequence is
     <bos> <cond>... <sep> <level tokens>... <eos>
 
 Conditions describe the level: verdict, plan length, portal trips, cubes, size, difficulty,
-which items and shapes it has, and which mechanics its solution uses.
+which items and shapes it has, which mechanics its solution uses, and where it came from
+(generator or Workshop, and how popular the Workshop puzzle was).
 There is one slot per group, always in the same order, holding either a value or the group's
 `?` token, so the level starts at the same position however much is specified. (With slots
 simply left out, prompts with few conditions put the level where training rarely had it, and
@@ -69,6 +70,12 @@ MECHANICS = [
 MECH_GROUPS = MECHANICS[1:14]
 # Mechanics added with the later items: their groups come after all the others.
 LATER_MECH_GROUPS = MECHANICS[14:]
+# Where a level came from, not what's in it, so it can't be read off a sampled level: `src`
+# is the generator or a published Workshop puzzle (records with a `workshop_id`); `tier` is how
+# many players subscribed to that puzzle (`subscribers`, lifetime), so prompting with
+# `<src:ws> <tier:top>` asks for levels like the ones people played most.
+PROVENANCE = {"src": ["<src:gen>", "<src:ws>"], "tier": ["<tier:mid>", "<tier:top>"]}
+TOP_SUBSCRIBERS = 100
 
 # One group per condition; a sequence carries at most one token from each.
 GROUPS = {
@@ -82,6 +89,7 @@ GROUPS = {
     **{m: [f"<{m}:no>", f"<{m}:yes>"] for m in MECH_GROUPS},
     **{f: [f"<{f}:no>", f"<{f}:yes>"] for f in LATER_FEATURES},
     **{m: [f"<{m}:no>", f"<{m}:yes>"] for m in LATER_MECH_GROUPS},
+    **PROVENANCE,
 }
 # "Not specified", and the value of a group that doesn't apply (plan length of an unsolvable level).
 ANY = {group: f"<{group}:?>" for group in GROUPS}
@@ -196,6 +204,10 @@ def conditions(record):
         present = loose > 0 if f == "loosecube" else any(
             t in words[f] and (i == 0 or level[i - 1] != ">") for i, t in enumerate(level))
         out.append(GROUPS[f][int(present)])
+    workshop = "workshop_id" in record
+    out.append(GROUPS["src"][int(workshop)])
+    if workshop and record.get("subscribers") is not None:
+        out.append(GROUPS["tier"][int(record["subscribers"] >= TOP_SUBSCRIBERS)])
     return out
 
 
