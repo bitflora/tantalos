@@ -22,6 +22,7 @@ import random
 from array import array
 from pathlib import Path
 
+import numpy as np
 import torch
 
 SPECIAL = ["<pad>", "<bos>", "<sep>", "<eos>"]
@@ -105,14 +106,43 @@ def columns(level):
 
 
 def shapes(level):
-    """(wall, balcony): a column solid to the ceiling; open space under something solid."""
+    """(wall, balcony, goo): a column solid to the ceiling; open space under something solid;
+    any goo. Reads both geometry formats (`open`/`goo` boxes, or column runs)."""
+    if len(level) > 4 and level[4] in ("open", "goo"):
+        return box_shapes(level)
     height = level[3] if len(level) > 3 else None
     cols = columns(level)
     wall = any(c == [f"s{height}"] for c in cols)
     balcony = any(
         any(a[0] in "og" and b[0] == "s" for a, b in zip(c, c[1:])) for c in cols
     )
-    return wall, balcony
+    goo = any(t[0] == "g" for c in cols for t in c)
+    return wall, balcony, goo
+
+
+def box_shapes(level):
+    try:
+        size = [int(v) for v in level[1:4]]
+    except ValueError:
+        return False, False, False
+    space = np.zeros(size, dtype=bool)  # x, y, z: open or goo
+    goo, word, i = False, None, 4
+    while i < len(level):
+        if level[i] in ("open", "goo"):
+            word = level[i]
+            i += 1
+            continue
+        box = level[i:i + 6]
+        if word is None or len(box) < 6 or not all(v.isdigit() for v in box):
+            break
+        lo, hi = [int(v) for v in box[:3]], [int(v) for v in box[3:]]
+        space[lo[0]:hi[0] + 1, lo[1]:hi[1] + 1, lo[2]:hi[2] + 1] = True
+        goo |= word == "goo"
+        i += 6
+    wall = bool((~space.any(axis=2)).any())
+    below = np.maximum.accumulate(space, axis=2)  # open space at or under each cell
+    balcony = bool((below[:, :, :-1] & ~space[:, :, 1:]).any())
+    return wall, balcony, goo
 
 
 def conditions(record):
@@ -142,10 +172,10 @@ def conditions(record):
     cubes = level.count("dropper") + loose
     out.append(GROUPS["cubes"][min(cubes, 2)])
     has = set(level)
-    wall, balcony = shapes(level)
+    wall, balcony, goo = shapes(level)
     for f in FEATURES:
         if f == "goo":
-            present = any(t.startswith("g") and t[1:].isdigit() for t in level)
+            present = goo
         elif f == "wall":
             present = wall
         elif f == "balcony":

@@ -5,14 +5,30 @@
 //!
 //! ```text
 //! size X Y Z
+//! open B+                          the chamber starts solid; each box B (x0 y0 z0 x1 y1 z1,
+//!                                  corners inclusive) is carved out
+//! goo B+                           boxes of goo (carved too); they may overlap `open` boxes
+//! white D B+                       the D faces in the boxes are white
+//! black D B*                       every D face is white except those in the boxes
+//! ```
+//! A group of boxes runs until the next word that isn't a number. Only faces between a solid
+//! and an open cell are surfaces; a box may span any other faces, so boxes run across walls
+//! and gaps (a face is shared: the +z face of a cell is the -z face of the one above, so
+//! `white +z` over a solid cell paints the floor of the open cell above it). `encode` writes
+//! `open`, `goo`, then for each direction the cheaper of `white` and `black` (nothing if no D
+//! surface is white), each a greedy cover by boxes.
+//!
+//! `decode` also reads the earlier geometry format in place of `open`/`goo`:
+//! ```text
 //! <row>*               one per y: columns (x = 0, 1, ...) then `/`. A column is its runs
 //!                      bottom-up then `|`, or `=` (same as the column before it, also across
 //!                      rows). Runs: `s<n>` solid, `o<n>` open, `g<n>` goo; they add up to Z.
 //!                      Columns left out at the end of a row repeat its last one; a row that
 //!                      is just `/` repeats the row before, and rows left out at the end
-//!                      repeat the last one. So only changes cost tokens, and the model
-//!                      never has to count columns or rows exactly.
-//! white D x0 y0 z0 x1 y1 z1        the D faces of open cells in the box are white surfaces
+//!                      repeat the last one.
+//! ```
+//! (and its `white D B`, one box per `white`, is a group of one). Then the items:
+//! ```text
 //! entry x y z D                    D = the door's normal (into the room)
 //! exit x y z D [inv]               inv = starts open, closes when its inputs are on
 //! glass|grating x0 y0 z0 x1 y1 z1 N G
@@ -106,6 +122,8 @@ const DEVICE_WORDS: [&str; 17] = [
     "polarity",
     "wait",
 ];
+/// Words of the box geometry format, after the device words.
+const BOX_WORDS: [&str; 3] = ["open", "goo", "black"];
 /// Wire targets after `exit`, in the order `encode` writes them.
 const TARGETS: [&str; 13] = [
     "field",
@@ -168,6 +186,9 @@ pub fn vocab() -> Vec<String> {
     }
     v.extend(LATER_WORDS.iter().chain(&PAINT_KINDS).map(|s| s.to_string()));
     v.extend(DEVICE_WORDS.iter().map(|s| s.to_string()));
+    // The run words (`s3`, `o2`, ...) stay: the decoder still reads them, and checkpoints
+    // trained on them keep their ids.
+    v.extend(BOX_WORDS.iter().map(|s| s.to_string()));
     v
 }
 
@@ -190,7 +211,6 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
     if let Some(problem) = level.decode_problems.first() {
         return Err(problem.clone());
     }
-    let [sx, sy, sz] = level.size;
     if level.size.iter().any(|&s| s > MAX_NUM) {
         return Err(format!("chamber {:?} is bigger than {MAX_NUM}", level.size));
     }
@@ -204,61 +224,16 @@ pub fn encode(p: &Puzzle) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = vec!["size".into()];
     out.extend(cell_tokens(level.size));
 
-    let column = |x, y| -> Vec<String> {
-        let mut runs: Vec<(char, i32)> = Vec::new();
-        for z in 0..sz {
-            let c = [x, y, z];
-            let k = if level.solid(c) {
-                's'
-            } else if level.goo(c) {
-                'g'
-            } else {
-                'o'
-            };
-            match runs.last_mut() {
-                Some((last, n)) if *last == k => *n += 1,
-                _ => runs.push((k, 1)),
-            }
+    for (word, boxes) in geometry_boxes(&level) {
+        if !boxes.is_empty() {
+            out.push(word.into());
+            push_boxes(&mut out, &boxes);
         }
-        runs.iter().map(|(k, n)| format!("{k}{n}")).collect()
-    };
-    let rows: Vec<Vec<Vec<String>>> = (0..sy)
-        .map(|y| (0..sx).map(|x| column(x, y)).collect())
-        .collect();
-    // Rows after the last change repeat it; the decoder fills them in.
-    let last_change = (1..rows.len())
-        .rev()
-        .find(|&y| rows[y] != rows[y - 1])
-        .unwrap_or(0);
-    let mut prev_col: Option<Vec<String>> = None;
-    let mut prev_row: Option<&Vec<Vec<String>>> = None;
-    for row in &rows[..=last_change] {
-        if prev_row != Some(row) {
-            // Columns after the last change repeat it; `/` fills them in.
-            let keep = (1..row.len())
-                .rev()
-                .find(|&x| row[x] != row[x - 1])
-                .map_or(1, |x| x + 1);
-            for col in &row[..keep] {
-                if prev_col.as_ref() == Some(col) {
-                    out.push("=".into());
-                } else {
-                    out.extend(col.iter().cloned());
-                    out.push("|".into());
-                }
-                prev_col = Some(col.clone());
-            }
-        }
-        out.push("/".into());
-        prev_col = row.last().cloned();
-        prev_row = Some(row);
     }
-
-    for (d, lo, hi) in white_rects(&level) {
-        out.push("white".into());
+    for (d, black, boxes) in surface_boxes(&level) {
+        out.push(if black { "black" } else { "white" }.into());
         out.push(dir_token(d).into());
-        out.extend(cell_tokens(lo));
-        out.extend(cell_tokens(hi));
+        push_boxes(&mut out, &boxes);
     }
 
     let single = |kind: ItemKind, name: &str| -> Result<Option<&PlacedItem>, String> {
@@ -725,44 +700,122 @@ fn extent_box(p: &Puzzle, level: &Level, it: &PlacedItem) -> (Cell, Cell) {
     (lo, hi)
 }
 
-/// White surfaces as boxes: greedy rectangles in each plane, per direction.
-fn white_rects(level: &Level) -> Vec<(Dir, Cell, Cell)> {
+type Box3 = (Cell, Cell);
+
+fn push_boxes(out: &mut Vec<String>, boxes: &[Box3]) {
+    for (lo, hi) in boxes {
+        out.extend(cell_tokens(*lo));
+        out.extend(cell_tokens(*hi));
+    }
+}
+
+/// What a cover must do with a cell: leave it out, take it or not, or take it.
+#[derive(Clone, Copy, PartialEq)]
+enum Need {
+    Avoid,
+    Free,
+    Take,
+}
+
+/// A greedy cover by boxes of every `Take` cell, with no `Avoid` cell in any box. From each
+/// cell not yet covered (in `Level::cells` order), a box grows along +x, +y and +z, one whole
+/// slab at a time while the slab holds no `Avoid` cell; of the six axis orders, the one
+/// covering the most uncovered `Take` cells wins (the first on ties).
+fn cover(size: [i32; 3], need: impl Fn(Cell) -> Need) -> Vec<Box3> {
+    let [sx, sy, sz] = size;
+    let idx = |c: Cell| ((c[2] * sy + c[1]) * sx + c[0]) as usize;
+    let cells: Vec<Cell> = (0..sz)
+        .flat_map(|z| (0..sy).flat_map(move |y| (0..sx).map(move |x| [x, y, z])))
+        .collect();
+    let needs: Vec<Need> = cells.iter().map(|&c| need(c)).collect();
+    let mut covered = vec![false; cells.len()];
+    let in_box = cells_between;
+    const ORDERS: [[usize; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
     let mut out = Vec::new();
-    for (d, _) in DIRS {
-        let white: HashSet<Cell> = level
-            .cells()
-            .filter(|&c| !level.solid(c) && level.portal_surface(c, d))
-            .collect();
-        let (u, v) = match d.axis() {
-            0 => (1, 2),
-            1 => (0, 2),
-            _ => (0, 1),
-        };
-        let mut used: HashSet<Cell> = HashSet::new();
-        let free = |c: Cell, used: &HashSet<Cell>| white.contains(&c) && !used.contains(&c);
-        let at = |c: Cell, a: usize, k: i32| {
-            let mut c = c;
-            c[a] += k;
-            c
-        };
-        for c in level.cells() {
-            if !free(c, &used) {
-                continue;
-            }
-            let mut du = 1;
-            while free(at(c, u, du), &used) {
-                du += 1;
-            }
-            let mut dv = 1;
-            while (0..du).all(|i| free(at(at(c, u, i), v, dv), &used)) {
-                dv += 1;
-            }
-            for i in 0..du {
-                for j in 0..dv {
-                    used.insert(at(at(c, u, i), v, j));
+    for &start in &cells {
+        if needs[idx(start)] != Need::Take || covered[idx(start)] {
+            continue;
+        }
+        let mut best: Option<(usize, Box3)> = None;
+        for order in ORDERS {
+            let mut hi = start;
+            for a in order {
+                loop {
+                    if hi[a] + 1 >= size[a] {
+                        break;
+                    }
+                    let mut lo = start;
+                    lo[a] = hi[a] + 1;
+                    let mut top = hi;
+                    top[a] += 1;
+                    if in_box(lo, top).any(|c| needs[idx(c)] == Need::Avoid) {
+                        break;
+                    }
+                    hi = top;
                 }
             }
-            out.push((d, c, at(at(c, u, du - 1), v, dv - 1)));
+            let gain = in_box(start, hi)
+                .filter(|&c| needs[idx(c)] == Need::Take && !covered[idx(c)])
+                .count();
+            if best.is_none_or(|(g, _)| gain > g) {
+                best = Some((gain, (start, hi)));
+            }
+        }
+        let (_, (lo, hi)) = best.unwrap();
+        for c in in_box(lo, hi) {
+            covered[idx(c)] = true;
+        }
+        out.push((lo, hi));
+    }
+    out
+}
+
+/// `open` boxes (goo cells may be in them: goo boxes carve too) and `goo` boxes.
+fn geometry_boxes(level: &Level) -> [(&'static str, Vec<Box3>); 2] {
+    let open = cover(level.size, |c| match (level.solid(c), level.goo(c)) {
+        (true, _) => Need::Avoid,
+        (false, true) => Need::Free,
+        (false, false) => Need::Take,
+    });
+    let goo = cover(level.size, |c| {
+        if !level.solid(c) && level.goo(c) {
+            Need::Take
+        } else {
+            Need::Avoid
+        }
+    });
+    [("open", open), ("goo", goo)]
+}
+
+/// Per direction D with any white D surface, `white` boxes or (`true`) `black` ones,
+/// whichever takes fewer. A D face that isn't a surface either way (solid on both sides or
+/// open on both) can be painted anything; one that is a surface from the other side (a solid
+/// cell's D face onto an open cell) must keep its colour, since the -D boxes paint it too.
+fn surface_boxes(level: &Level) -> Vec<(Dir, bool, Vec<Box3>)> {
+    let mut out = Vec::new();
+    for (d, _) in DIRS {
+        // None: not a surface; else whether it's white and whether it's a D surface.
+        let face = |c: Cell| {
+            (level.solid(c) != level.solid(step(c, d)))
+                .then(|| (level.portal_surface(c, d), !level.solid(c)))
+        };
+        let white = cover(level.size, |c| match face(c) {
+            None => Need::Free,
+            Some((false, _)) => Need::Avoid,
+            Some((true, mine)) => if mine { Need::Take } else { Need::Free },
+        });
+        if white.is_empty() {
+            continue;
+        }
+        let black = cover(level.size, |c| match face(c) {
+            None => Need::Free,
+            Some((true, _)) => Need::Avoid,
+            Some((false, _)) => Need::Take,
+        });
+        if black.len() < white.len() {
+            out.push((d, true, black));
+        } else {
+            out.push((d, false, white));
         }
     }
     out
@@ -883,6 +936,28 @@ fn goo_sources(
     out
 }
 
+/// A group of boxes: corner pairs until the next word that isn't a number, at least `min`.
+fn read_boxes(r: &mut Reader, size: [i32; 3], min: usize) -> Result<Vec<Box3>, String> {
+    let mut out = Vec::new();
+    while r.peek().is_some_and(|t| t.bytes().all(|c| c.is_ascii_digit())) {
+        let (lo, hi) = (r.cell(size)?, r.cell(size)?);
+        if (0..3).any(|a| lo[a] > hi[a]) {
+            return r.fail("box corners are out of order");
+        }
+        out.push((lo, hi));
+    }
+    if out.len() < min {
+        return r.fail("expected a box");
+    }
+    Ok(out)
+}
+
+fn cells_between(lo: Cell, hi: Cell) -> impl Iterator<Item = Cell> {
+    (lo[2]..=hi[2]).flat_map(move |z| {
+        (lo[1]..=hi[1]).flat_map(move |y| (lo[0]..=hi[0]).map(move |x| [x, y, z]))
+    })
+}
+
 pub fn decode(text: &str) -> Result<Puzzle, String> {
     let mut r = Reader {
         toks: text.split_whitespace().collect(),
@@ -904,92 +979,112 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
                     && t[1..].bytes().all(|c| c.is_ascii_digit()))
         })
     };
-    for y in 0..sy {
-        if y > 0 && !is_geometry(r.peek()) {
-            break; // The rest repeat the last row.
-        }
-        let mut row: Vec<Vec<(char, i32)>> = Vec::new();
-        loop {
-            match r.peek() {
-                Some("/") => {
-                    r.pos += 1;
-                    break;
-                }
-                Some("=") => {
-                    r.pos += 1;
-                    match &prev_col {
-                        Some(p) => row.push(p.clone()),
-                        None => return r.fail("`=` before any column"),
+    if is_geometry(r.peek()) {
+        for y in 0..sy {
+            if y > 0 && !is_geometry(r.peek()) {
+                break; // The rest repeat the last row.
+            }
+            let mut row: Vec<Vec<(char, i32)>> = Vec::new();
+            loop {
+                match r.peek() {
+                    Some("/") => {
+                        r.pos += 1;
+                        break;
                     }
-                }
-                _ => {
-                    let mut runs = Vec::new();
-                    let mut total = 0;
-                    loop {
-                        let t = r.next("a run or `|`")?;
-                        if t == "|" {
-                            break;
+                    Some("=") => {
+                        r.pos += 1;
+                        match &prev_col {
+                            Some(p) => row.push(p.clone()),
+                            None => return r.fail("`=` before any column"),
                         }
-                        let mut chars = t.chars();
-                        let kind = chars.next().unwrap();
-                        let n = chars.as_str().parse::<i32>().ok();
-                        match (kind, n) {
-                            ('s' | 'o' | 'g', Some(n))
-                                if n >= 1 && n.to_string() == chars.as_str() =>
-                            {
-                                total += n;
-                                runs.push((kind, n));
+                    }
+                    _ => {
+                        let mut runs = Vec::new();
+                        let mut total = 0;
+                        loop {
+                            let t = r.next("a run or `|`")?;
+                            if t == "|" {
+                                break;
                             }
-                            _ => return r.fail(format!("expected a run or `|`, found {t:?}")),
+                            let mut chars = t.chars();
+                            let kind = chars.next().unwrap();
+                            let n = chars.as_str().parse::<i32>().ok();
+                            match (kind, n) {
+                                ('s' | 'o' | 'g', Some(n))
+                                    if n >= 1 && n.to_string() == chars.as_str() =>
+                                {
+                                    total += n;
+                                    runs.push((kind, n));
+                                }
+                                _ => return r.fail(format!("expected a run or `|`, found {t:?}")),
+                            }
                         }
+                        if total != sz {
+                            return r.fail(format!("column in row {y} is {total} tall, not {sz}"));
+                        }
+                        row.push(runs);
                     }
-                    if total != sz {
-                        return r.fail(format!("column in row {y} is {total} tall, not {sz}"));
-                    }
-                    row.push(runs);
+                }
+                if row.len() > sx as usize {
+                    return r.fail(format!("row {y} has more than {sx} columns"));
+                }
+                prev_col = row.last().cloned();
+            }
+            if row.is_empty() {
+                match rows.last() {
+                    Some(p) => row = p.clone(),
+                    None => return r.fail("the first row is empty"),
                 }
             }
-            if row.len() > sx as usize {
-                return r.fail(format!("row {y} has more than {sx} columns"));
+            while row.len() < sx as usize {
+                row.push(row.last().unwrap().clone());
             }
             prev_col = row.last().cloned();
+            rows.push(row);
         }
-        if row.is_empty() {
-            match rows.last() {
-                Some(p) => row = p.clone(),
-                None => return r.fail("the first row is empty"),
+        for y in 0..sy {
+            let row = rows
+                .get(y as usize)
+                .or(rows.last())
+                .expect("row 0 was read");
+            for (x, runs) in row.iter().enumerate() {
+                let x = x as i32;
+                let mut z = 0;
+                for &(kind, n) in runs {
+                    if kind != 's' {
+                        b.carve([x, y, z], [x, y, z + n - 1]);
+                    }
+                    for zz in z..z + n {
+                        match kind {
+                            'g' => {
+                                goo_cells.insert((zz, y, x));
+                            }
+                            's' => {
+                                solid_cells.insert([x, y, zz]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    z += n;
+                }
             }
         }
-        while row.len() < sx as usize {
-            row.push(row.last().unwrap().clone());
-        }
-        prev_col = row.last().cloned();
-        rows.push(row);
-    }
-    for y in 0..sy {
-        let row = rows
-            .get(y as usize)
-            .or(rows.last())
-            .expect("row 0 was read");
-        for (x, runs) in row.iter().enumerate() {
-            let x = x as i32;
-            let mut z = 0;
-            for &(kind, n) in runs {
-                if kind != 's' {
-                    b.carve([x, y, z], [x, y, z + n - 1]);
-                }
-                for zz in z..z + n {
-                    match kind {
-                        'g' => {
-                            goo_cells.insert((zz, y, x));
-                        }
-                        's' => {
-                            solid_cells.insert([x, y, zz]);
-                        }
-                        _ => {}
+    } else {
+        // Box geometry: `open` and `goo` groups, in any order.
+        while let Some(word @ ("open" | "goo")) = r.peek() {
+            r.pos += 1;
+            for (lo, hi) in read_boxes(&mut r, size, 1)? {
+                b.carve(lo, hi);
+                if word == "goo" {
+                    for c in cells_between(lo, hi) {
+                        goo_cells.insert((c[2], c[1], c[0]));
                     }
                 }
-                z += n;
+            }
+        }
+        for c in cells_between([0, 0, 0], [sx - 1, sy - 1, sz - 1]) {
+            if b.solid(c) {
+                solid_cells.insert(c);
             }
         }
     }
@@ -1027,13 +1122,15 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
     while let Some(t) = r.peek() {
         r.pos += 1;
         match t {
-            "white" => {
+            "white" | "black" => {
                 let d = r.dir()?;
-                let (lo, hi) = (r.cell(size)?, r.cell(size)?);
-                if (0..3).any(|a| lo[a] > hi[a]) {
-                    return r.fail("white box corners are out of order");
+                let black = t == "black";
+                if black {
+                    b.paint([0, 0, 0], [sx - 1, sy - 1, sz - 1], d, true);
                 }
-                b.paint(lo, hi, d, true);
+                for (lo, hi) in read_boxes(&mut r, size, usize::from(!black))? {
+                    b.paint(lo, hi, d, !black);
+                }
             }
             "entry" | "exit" => {
                 let (cell, d) = (r.cell(size)?, r.dir()?);

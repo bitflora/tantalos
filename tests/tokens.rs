@@ -62,8 +62,8 @@ fn worked_example_tokens() {
     let tokens = encode(&fixtures::worked_example()).unwrap().join(" ");
     assert_eq!(
         tokens,
-        "size 8 8 6 s1 o5 | / / / / / s3 o3 | / \
-         white +x 7 0 1 7 4 4 white -x 0 5 3 0 7 5 \
+        "size 8 8 6 open 0 0 1 7 4 5 0 5 3 7 7 5 \
+         white +x 7 0 1 7 4 4 white -x 0 5 3 7 7 5 \
          entry 4 0 1 +y exit 4 7 3 -y dropper 2 2 5 standard button 2 6 3 weighted > exit"
     );
 }
@@ -153,16 +153,30 @@ fn decoder_rejects_garbage_without_panicking() {
         "too many columns"
     );
     assert!(decode("size 1 2 2 / /").is_err(), "empty first row");
-    // Short rows repeat their last column, an empty row repeats the row before, and rows
-    // left out at the end repeat the last one.
+    assert!(decode("size 2 2 2 open").is_err(), "empty box group");
+    assert!(decode("size 2 2 2 open 0 0 0 1 1").is_err(), "short box");
+    assert!(decode("size 2 2 2 open 1 0 0 0 1 1").is_err(), "corners out of order");
+    assert!(decode("size 2 2 2 open 0 0 0 1 1 1 white +z").is_err(), "white without a box");
+    // The earlier run format still reads: short rows repeat their last column, an empty row
+    // repeats the row before, and rows left out at the end repeat the last one.
     let canonical = |t: &str| encode(&decode(t).unwrap()).unwrap().join(" ");
     assert_eq!(
         canonical("size 3 2 2 s1 o1 | o2 | / /"),
-        "size 3 2 2 s1 o1 | o2 | /"
+        "size 3 2 2 open 1 0 0 2 1 1 0 0 1 2 1 1"
     );
     assert_eq!(
         canonical("size 3 3 2 o2 | / s1 o1 | / entry 0 2 1 +y"),
-        "size 3 3 2 o2 | / s1 o1 | / entry 0 2 1 +y"
+        "size 3 3 2 open 0 0 0 2 0 1 0 1 1 2 2 1 entry 0 2 1 +y"
+    );
+    // A face is shared: `+z` over the solid layer paints the open layer's floors, which are
+    // its `-z` surfaces. A `black` group with no boxes: every face that way is white.
+    assert_eq!(
+        canonical("size 2 2 2 open 0 0 1 1 1 1 white +z 0 0 0 1 1 0"),
+        "size 2 2 2 open 0 0 1 1 1 1 black -z"
+    );
+    assert_eq!(
+        canonical("size 2 2 2 open 0 0 1 1 1 1 black +z 1 0 0 1 0 0"),
+        "size 2 2 2 open 0 0 1 1 1 1 white +z 0 0 1 1 1 1 black -z 1 0 1 1 0 1"
     );
 }
 
