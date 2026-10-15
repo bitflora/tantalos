@@ -598,6 +598,11 @@ pub struct Level {
     pub dropper_of: HashMap<i32, i32>,
     /// Faith plate cells (index into `plates`): whatever comes to them is launched.
     launch: HashMap<Cell, usize>,
+    /// The first floor button in each cell (its item index), so `Landing::at` doesn't scan
+    /// every item for each landing it builds.
+    button_at: HashMap<Cell, i32>,
+    /// The first turret in each cell (index into `turrets`), for the same reason.
+    turret_at: HashMap<Cell, usize>,
     /// What sits on each face, at `face_slot`.
     faces: Vec<FaceInfo>,
     /// Items that couldn't be decoded (bad extents, too many hazards).
@@ -681,6 +686,8 @@ impl Level {
             polarity_links,
             dropper_of: HashMap::new(),
             launch: HashMap::new(),
+            button_at: HashMap::new(),
+            turret_at: HashMap::new(),
             faces: vec![
                 FaceInfo::default();
                 3 * size.map(|s| s as usize + 1).iter().product::<usize>()
@@ -691,7 +698,21 @@ impl Level {
         level.decode_barriers(&extent_links);
         level.decode_turrets_and_gel(&paint_links);
         level.decode_devices(&extent_links, &plate_links, &box_links);
+        level.index_cells();
         level
+    }
+
+    /// Index the floor buttons and turrets by cell, for the per-landing lookups the solver's
+    /// model building makes (`Landing::at`).
+    fn index_cells(&mut self) {
+        for it in &self.items {
+            if it.kind == ItemKind::FloorButton {
+                self.button_at.entry(it.cell).or_insert(it.index);
+            }
+        }
+        for (i, t) in self.turrets.iter().enumerate() {
+            self.turret_at.entry(t.cell).or_insert(i);
+        }
     }
 
     /// Lasers, faith plates, bridges, funnels, panels, stairs, pistons, rails and loose cubes.
@@ -1131,6 +1152,16 @@ impl Level {
     /// The faith plate (index into `plates`) in cell `c`, if any.
     pub fn plate_at(&self, c: Cell) -> Option<usize> {
         self.launch.get(&c).copied()
+    }
+
+    /// The item index of the floor button in cell `c`, if any (the first, in item order).
+    pub fn floor_button_at(&self, c: Cell) -> Option<i32> {
+        self.button_at.get(&c).copied()
+    }
+
+    /// The index into `turrets` of the turret in cell `c`, if any (the first).
+    pub fn turret_at(&self, c: Cell) -> Option<usize> {
+        self.turret_at.get(&c).copied()
     }
 
     /// Whether cube item `cube` has no working dropper (it was placed loose; fizzled, it's gone).

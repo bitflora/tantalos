@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::flings;
 use crate::geom::{step, step_orders, Cell, Dir};
 use crate::lasers::Event;
-use crate::level::{BarrierKind, ItemKind, Level};
+use crate::level::{BarrierKind, Level};
 use crate::regions::{Cond, Geo, RegionGraph};
 
 /// How generous line of sight is. The solver's conservative and liberal modes differ here.
@@ -77,11 +77,8 @@ impl Landing {
         Some(Landing {
             hazards,
             region: graph.region_of(cell)?,
-            button: level
-                .of_kind(&ItemKind::FloorButton)
-                .find(|b| b.cell == cell)
-                .map(|b| b.index),
-            turret: level.turrets.iter().position(|t| t.cell == cell),
+            button: level.floor_button_at(cell),
+            turret: level.turret_at(cell),
         })
     }
 
