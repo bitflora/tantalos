@@ -15,7 +15,7 @@ must be free), and records the run in train/runs.csv. Everything lands in runs/N
 status.json (what it's doing now), run.log (each phase), train.log, evaluate.log,
 eval/report.md.
 
-Settings: data/v4 (all levels-*.jsonl) unless --data; block 1024, batch 16. A fresh run uses
+Settings: data/v5 (all levels-*.jsonl: generated, Workshop, mutants) unless --data; block 1024, batch 16. A fresh run uses
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
 in runs.csv did. Anything after `--` goes to train.py as is.
 
@@ -368,7 +368,7 @@ def main():
     p.add_argument("--hours", type=float, required=True, help="training time (evaluation comes after)")
     p.add_argument("--note", required=True, help="what the run is for (goes in train/runs.csv)")
     p.add_argument("--from", dest="from_", default=None, help="continue from this run (or .pt)")
-    p.add_argument("--data", nargs="+", default=["data/v4/levels-*.jsonl"])
+    p.add_argument("--data", nargs="+", default=["data/v5/levels-*.jsonl"])
     p.add_argument("--vocab", default=None, help="default: vocab.txt beside the first data file")
     p.add_argument("--ingame", action="store_true", help="check samples in Portal 2 afterwards")
     p.set_defaults(fn=start)

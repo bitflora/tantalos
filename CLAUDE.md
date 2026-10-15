@@ -21,9 +21,9 @@ yourself, and don't change their settings, unless the user asks you to.
 - `start` returns straight away; the run continues in the background and survives this
   session. It trains for `--hours`, picks 5 levels for play-testing (train/pick.py: copied into the Puzzle Maker folder as `glados-RUN-NNNNN`, kept in `runs/NAME/playtest`; tell the user), then evaluates (about 5 more minutes), then records itself
   in `train/runs.csv`. Without `--from` it starts a new model; with `--from OLDRUN` it continues
-  `runs/OLDRUN/best.pt`. Defaults (data/v4, learning rates, sizes) are already right: add no
+  `runs/OLDRUN/best.pt`. Defaults (data/v5, learning rates, sizes) are already right: add no
   other options unless the user names them. Anything after `--` goes to train.py.
-- Name runs short and dated by topic, e.g. `v4-fresh-2h`, `v4-cont-1h`. The name can't exist yet.
+- Name runs short and dated by topic, e.g. `v5-fresh-2h`, `v5-cont-1h`. The name can't exist yet.
 - To be told when it ends: run `wait NAME` with the Bash tool's `run_in_background`. It prints
   the final status. Don't poll in a loop; for a progress check, run `status NAME` once.
 - Only one run at a time (one GPU). `start` refuses if one is running; say so to the user.

@@ -629,6 +629,8 @@ fn run_score(args: &[String]) -> Result<()> {
                     let normal: Vec<&str> = line.split_whitespace().collect();
                     let encoded = tokens::encode(&p).map(|t| t.join(" "));
                     let canonical = encoded.as_ref().is_ok_and(|t| *t == normal.join(" "));
+                    // The length of the tokens written, which can differ from the input's.
+                    let n = encoded.as_ref().map_or(n, |t| t.split(' ').count());
                     let tokens = encoded.map_or(String::new(), |t| {
                         format!("\"tokens\":{},", dataset::json_str(&t))
                     });
