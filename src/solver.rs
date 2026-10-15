@@ -571,8 +571,18 @@ impl StateSpace {
         self.reaches_goal(USES_PEDESTAL | p as u32)
     }
 
+    /// Whether a goal can be reached without firing a portal at all: on a complete space,
+    /// whether the level is solvable with portals taken away.
+    pub fn solvable_without_portals(&self) -> bool {
+        self.reaches_goal_unless(|u| u & (3 << 30) == USES_CLASS)
+    }
+
     /// Whether a goal is reachable from the start along actions that don't use `skip`.
     fn reaches_goal(&self, skip: u32) -> bool {
+        self.reaches_goal_unless(|u| u == skip)
+    }
+
+    fn reaches_goal_unless(&self, skip: impl Fn(u32) -> bool) -> bool {
         let mut seen = vec![false; self.len()];
         let mut stack = vec![0];
         seen[0] = true;
@@ -582,7 +592,7 @@ impl StateSpace {
             }
             for e in self.offsets[i] as usize..self.offsets[i + 1] as usize {
                 let j = self.targets[e] as usize;
-                if self.uses[e] != skip && !std::mem::replace(&mut seen[j], true) {
+                if !skip(self.uses[e]) && !std::mem::replace(&mut seen[j], true) {
                     stack.push(j);
                 }
             }

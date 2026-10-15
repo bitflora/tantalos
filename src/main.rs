@@ -20,14 +20,24 @@ const USAGE: &str = "usage:
   glados tokens <file.p2c>...   the level as a token sequence (format: src/tokens.rs)
   glados vocab                  every token the format uses, one per line
   glados dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
+                 [--portals-required true|false] [--max-unsolved P]
                                 labelled token sequences as JSONL, and vocab.txt beside it
-                                (default data/levels-<seed>.jsonl)
+                                (default data/levels-<seed>.jsonl). --portals-required true:
+                                drop levels solvable without portals; --max-unsolved: most
+                                share of levels that aren't solvable
   glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [FILE]
                                 decode and solve one token sequence per line of FILE (or
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
                                 --p2c-all every one that parsed. --editor-rules off: don't
                                 call levels invalid for our model of the editor's rules
                                 (for levels the game's editor accepted, e.g. the Workshop)
+  glados mutate [--seed N] [--per-level N] [--tries N] [--max-tokens N] [--budget N]
+                [--threads N] [--out FILE] [FILE]
+                                1-3 random edits to each level of FILE (JSONL with \"tokens\",
+                                or stdin), scored with editor rules off; writes the mutants
+                                that need portals to solve, fit --max-tokens (default 1024)
+                                and differ from their parent, as JSONL with \"mutated_from\"
+                                (the parent's workshop_id, or its line) and \"edits\"
   glados editor <file.p2c|dir>...
                                 items the Puzzle Maker would mark invalid, one JSON line per file
   glados route <file.p2c>       the conservative plan made concrete for playing it in the game:
@@ -48,6 +58,7 @@ fn main() -> ExitCode {
         }
         Some("dataset") => run_dataset(&args[1..]),
         Some("score") => run_score(&args[1..]),
+        Some("mutate") => run_mutate(&args[1..]),
         Some("editor") if args.len() > 1 => editor_check(&args[1..]),
         Some("route") if args.len() == 2 => print_route(Path::new(&args[1])),
         Some("roundtrip") if args.len() > 1 => {
@@ -503,6 +514,8 @@ fn run_dataset(args: &[String]) -> Result<()> {
             "--count" => cfg.count = parse(flag, value)?,
             "--budget" => cfg.budget = parse(flag, value)?,
             "--fresh" => cfg.fresh = parse(flag, value)?,
+            "--portals-required" => cfg.portals_required = parse(flag, value)?,
+            "--max-unsolved" => cfg.max_unsolved = parse(flag, value)?,
             "--out" => out = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
         }
@@ -516,11 +529,13 @@ fn run_dataset(args: &[String]) -> Result<()> {
     std::fs::write(dir.join("vocab.txt"), tokens::vocab().join("\n") + "\n")?;
     let mut file = std::io::BufWriter::new(std::fs::File::create(&out)?);
     println!(
-        "dataset: seed {}, {} levels, budget {}, {:.0}% fresh, {} threads -> {}",
+        "dataset: seed {}, {} levels, budget {}, {:.0}% fresh, portals required {}, at most {:.0}% unsolved, {} threads -> {}",
         cfg.seed,
         cfg.count,
         cfg.budget,
         100.0 * cfg.fresh,
+        cfg.portals_required,
+        100.0 * cfg.max_unsolved,
         cfg.threads,
         out.display()
     );
@@ -642,6 +657,84 @@ fn run_score(args: &[String]) -> Result<()> {
         },
     )?;
     out.flush()?;
+    Ok(())
+}
+
+fn run_mutate(args: &[String]) -> Result<()> {
+    use glados::mutate;
+    use std::io::{BufRead, Write};
+    let mut cfg = mutate::Config::default();
+    let mut out_path = None;
+    let mut threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut rest = Vec::new();
+    for (flag, value) in flags(args, &mut rest)? {
+        match flag {
+            "--seed" => cfg.seed = parse(flag, value)?,
+            "--threads" => threads = parse(flag, value)?,
+            "--per-level" => cfg.per_level = parse(flag, value)?,
+            "--tries" => cfg.tries = parse(flag, value)?,
+            "--max-tokens" => cfg.max_tokens = parse(flag, value)?,
+            "--budget" => cfg.budget = parse(flag, value)?,
+            "--out" => out_path = Some(PathBuf::from(value)),
+            _ => return Err(format!("unknown flag {flag}
+{USAGE}").into()),
+        }
+    }
+    let input: Box<dyn BufRead + Send> = match rest.as_slice() {
+        [] | ["-"] => Box::new(std::io::BufReader::new(std::io::stdin())),
+        [file] => Box::new(std::io::BufReader::new(
+            std::fs::File::open(file).map_err(|e| format!("{file}: {e}"))?,
+        )),
+        _ => return Err(format!("mutate takes one input file
+{USAGE}").into()),
+    };
+    let mut out: Box<dyn Write> = match &out_path {
+        Some(p) => Box::new(std::io::BufWriter::new(std::fs::File::create(p)?)),
+        None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
+    };
+    let lines = input
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l))
+        .filter(|(_, l)| !l.as_ref().is_ok_and(|l| l.trim().is_empty()));
+    let start = std::time::Instant::now();
+    let mut stats: std::collections::BTreeMap<String, usize> = Default::default();
+    let (mut parents, mut kept) = (0, 0);
+    dataset::par_map_ordered(
+        lines,
+        threads,
+        |(i, line)| -> std::io::Result<_> {
+            let line = line?;
+            let mut stats = Default::default();
+            let parent = mutate::json_field(&line, "workshop_id").unwrap_or(format!("line {i}"));
+            let Some(toks) = mutate::json_field(&line, "tokens") else {
+                return Ok((parent, Vec::new(), stats));
+            };
+            let seed = cfg.seed ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let found = mutate::mutants(&toks, &cfg, seed, &mut stats);
+            Ok((parent, found, stats))
+        },
+        |r| -> Result<()> {
+            let (parent, found, s) = r?;
+            for m in &found {
+                writeln!(out, "{}", m.json(&parent))?;
+            }
+            for (k, v) in s {
+                *stats.entry(k).or_default() += v;
+            }
+            parents += 1;
+            kept += found.len();
+            if parents % 50 == 0 {
+                eprintln!("  {parents} levels, {kept} mutants in {:.1?}", start.elapsed());
+            }
+            Ok(())
+        },
+    )?;
+    out.flush()?;
+    eprintln!("mutate: {parents} levels -> {kept} mutants in {:.1?}", start.elapsed());
+    for (k, v) in &stats {
+        eprintln!("  {k}: {v}");
+    }
     Ok(())
 }
 

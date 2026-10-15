@@ -26,6 +26,7 @@ pub mod kv;
 pub mod lasers;
 pub mod level;
 pub mod metrics;
+pub mod mutate;
 pub mod p2c;
 pub mod portals;
 pub mod regions;

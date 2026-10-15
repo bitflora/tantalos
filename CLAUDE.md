@@ -19,7 +19,7 @@ yourself, and don't change their settings, unless the user asks you to.
 ```
 
 - `start` returns straight away; the run continues in the background and survives this
-  session. It trains for `--hours`, then evaluates (about 5 more minutes), then records itself
+  session. It trains for `--hours`, picks 5 levels for play-testing (train/pick.py: copied into the Puzzle Maker folder as `glados-RUN-NNNNN`, kept in `runs/NAME/playtest`; tell the user), then evaluates (about 5 more minutes), then records itself
   in `train/runs.csv`. Without `--from` it starts a new model; with `--from OLDRUN` it continues
   `runs/OLDRUN/best.pt`. Defaults (data/v4, learning rates, sizes) are already right: add no
   other options unless the user names them. Anything after `--` goes to train.py.
@@ -37,6 +37,11 @@ Reading results: the main score is **EVAL solvable %** (share of sampled levels 
 solve; higher is better). Differences under about 10 points are noise. Val loss: lower is
 better, but only comparable between runs on the same data. A run that FAILED or DIED shows the
 last lines of its log; report them, don't retry blindly.
+
+Self-training: `train/harvest.py CHECKPOINT --n N` samples levels and keeps the solvable,
+portal-requiring, novel ones in `data/harvest/RUN.jsonl`; train on them by adding that file to
+`--data` next to the usual files (see its docstring). It uses the GPU and the solver, so not
+while a run or data generation is going.
 
 Training time: one run of 2 hours beats two chained 1-hour runs. Each run's learning rate
 warms up and decays to its minimum over its own time, so a chained run starts back at a high

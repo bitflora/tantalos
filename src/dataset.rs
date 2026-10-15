@@ -30,10 +30,11 @@ pub enum Label {
     Unsolvable,
     /// Only liberal rules solve it (in this many actions), or the budget ran out (`None`).
     Uncertain(Option<usize>),
-    /// Conservative rules solve it in `min_len` actions. `metrics` is `None` if measuring
-    /// ran out of budget.
+    /// Conservative rules solve it in `min_len` actions; `needs_portals` if they can't
+    /// without firing a portal. `metrics` is `None` if measuring ran out of budget.
     Solvable {
         min_len: usize,
+        needs_portals: bool,
         metrics: Option<Metrics>,
     },
 }
@@ -62,8 +63,14 @@ impl Label {
                     s.push_str(&format!(",\"liberal_len\":{n}"));
                 }
             }
-            Label::Solvable { min_len, metrics } => {
-                s.push_str(&format!(",\"min_len\":{min_len}"));
+            Label::Solvable {
+                min_len,
+                needs_portals,
+                metrics,
+            } => {
+                s.push_str(&format!(
+                    ",\"min_len\":{min_len},\"needs_portals\":{needs_portals}"
+                ));
                 if let Some(m) = metrics {
                     s.push_str(&format!(
                         ",\"metrics\":{{\"score\":{:.4},\"portal_trips\":{},\"shortest_plans\":{},\
@@ -153,6 +160,7 @@ pub fn label_with(puzzle: &Puzzle, budget: usize, seed: u64, editor_rules: bool)
             };
             return Label::Solvable {
                 min_len: plan.len(),
+                needs_portals: !space.solvable_without_portals(),
                 metrics,
             };
         }
@@ -267,6 +275,10 @@ pub struct Config {
     pub fresh: f64,
     /// Solvable genomes kept as parents, biased toward high `Metrics::score`.
     pub pool: usize,
+    /// Drop solvable levels that can be solved without portals (and don't breed from them).
+    pub portals_required: bool,
+    /// Most share of the emitted levels that aren't solvable; the rest are dropped.
+    pub max_unsolved: f64,
 }
 
 impl Default for Config {
@@ -278,6 +290,8 @@ impl Default for Config {
             threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
             fresh: 0.3,
             pool: 2000,
+            portals_required: false,
+            max_unsolved: 1.0,
         }
     }
 }
@@ -337,7 +351,7 @@ pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
     let mut pool: Vec<(Genome, f64)> = Vec::new();
     let mut reserves: Vec<Vec<Genome>> = vec![Vec::new(); crate::metrics::MECHANICS.len()];
     let mut seen = HashSet::new();
-    let mut emitted = 0;
+    let (mut emitted, mut unsolved) = (0, 0);
     if cfg.count == 0 {
         return;
     }
@@ -408,6 +422,19 @@ pub fn generate(cfg: &Config, mut emit: impl FnMut(&Sample)) {
             s.tokens.hash(&mut h);
             if !seen.insert(h.finish()) {
                 continue;
+            }
+            match &s.label {
+                Label::Solvable { needs_portals, .. } => {
+                    if cfg.portals_required && !needs_portals {
+                        continue;
+                    }
+                }
+                _ => {
+                    if (unsolved + 1) as f64 > cfg.max_unsolved * (emitted + 1) as f64 {
+                        continue;
+                    }
+                    unsolved += 1;
+                }
             }
             // Parents drift toward interesting levels: a newcomer replaces a random member
             // if it scores at least as well (or 1 time in 4 anyway, to stay diverse).

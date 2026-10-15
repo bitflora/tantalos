@@ -188,6 +188,7 @@ fn labels_match_the_solver() {
             solvable,
             Label::Solvable {
                 min_len: 5,
+                needs_portals: true,
                 metrics: Some(_)
             }
         ),
@@ -195,7 +196,7 @@ fn labels_match_the_solver() {
     );
     assert!(solvable
         .json_fields()
-        .starts_with("\"verdict\":\"solvable\",\"min_len\":5,\"metrics\":{"));
+        .starts_with("\"verdict\":\"solvable\",\"min_len\":5,\"needs_portals\":true,\"metrics\":{"));
     assert_eq!(label(&fixtures::goo_pit(), BUDGET, 0), Label::Unsolvable);
 }
 
@@ -212,6 +213,8 @@ fn small(threads: usize) -> Config {
         threads,
         fresh: 0.3,
         pool: 50,
+        portals_required: false,
+        max_unsolved: 1.0,
     }
 }
 
@@ -230,6 +233,26 @@ fn dataset_is_distinct_and_deterministic() {
     assert_eq!(distinct.len(), 60);
     assert_eq!(one, run(4));
     assert!(one.iter().any(|l| l.contains("\"verdict\":\"solvable\"")));
+}
+
+#[test]
+fn dataset_filters_portal_free_and_caps_unsolved() {
+    let cfg = Config {
+        portals_required: true,
+        max_unsolved: 0.2,
+        ..small(4)
+    };
+    let mut verdicts = Vec::new();
+    generate(&cfg, |s| match &s.label {
+        Label::Solvable { needs_portals, .. } => {
+            assert!(needs_portals, "{}", s.json());
+            verdicts.push(true);
+        }
+        _ => verdicts.push(false),
+    });
+    assert_eq!(verdicts.len(), 60);
+    let unsolved = verdicts.iter().filter(|&&v| !v).count();
+    assert!(unsolved > 0 && unsolved <= 12, "{unsolved} of 60 unsolved");
 }
 
 #[test]

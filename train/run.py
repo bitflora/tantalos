@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
 PY = sys.executable
 GLADOS = ROOT / "target" / "release" / "glados.exe"
-ACTIVE = ("starting", "training", "evaluating", "ingame")
+ACTIVE = ("starting", "training", "picking", "evaluating", "ingame")
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: no console pops up, none is needed
 DETACH = NO_WINDOW | 0x00000200  # | CREATE_NEW_PROCESS_GROUP
 BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB: outlive the session that started it
@@ -210,6 +210,10 @@ def pipeline(d):
         phase("training", s["train"] + ["--until", until], "train.log")
         if not (d / "best.pt").exists():
             raise RuntimeError("training wrote no best.pt; see train.log")
+        try:  # always: 5 levels to play-test; a failure here never sinks the run
+            phase("picking", ["train/pick.py", str(d)], "pick.log")
+        except RuntimeError as e:
+            say(f"{e} (carrying on)")
         phase("evaluating", s["evaluate"], "evaluate.log")
         if s.get("ingame"):
             try:
@@ -282,7 +286,7 @@ def describe(d):
             if "Game-valid, of levels our checker passes" in l:
                 lines.append("  in game: " + l.strip("-* ").replace("**", ""))
     if state in ("failed", "died"):
-        log = {"evaluating": "evaluate.log", "ingame": "ingame.log"}.get(s.get("state"), "train.log")
+        log = {"picking": "pick.log", "evaluating": "evaluate.log", "ingame": "ingame.log"}.get(s.get("state"), "train.log")
         lines.append(f"  last lines of {log}:")
         lines += ["    " + l for l in tail(d / log).splitlines()]
     if state in ("done", "failed", "died", "stopped"):

@@ -231,6 +231,14 @@ Support these, in rough order of how many top-rated puzzles they block (1,798-pu
 
 Each one needs a token in src/tokens.rs, decoding in src/level.rs, solver support, and a matching rule in tools/workshop/convert.py.
 
+## TODO: check the solver against Workshop maps it can't solve
+
+The 2026-10-14 bulk build (`out/workshop/levels.jsonl`, 5,378 converted) gave 837 solvable, 1,610 unsolvable, 2,108 uncertain and 789 invalid. Published maps were completed by their authors, so unsolvable and uncertain mean a solver or converter gap, not a bad puzzle.
+- **Uncertain (2,108)**: probably the search budget. Rerun `fetch.py build --budget <larger>` on them, then look at which stay uncertain.
+- **Unsolvable (1,610)**: sample some, play the author's solution in game (`train/play.py`), and find which item or mechanic the solver lacks. Start with the assumptions in README "Unverified" (panel hinge, bridge height, funnels, rails).
+- **Invalid (789)**: check whether the converter or the editor-rules model is wrong.
+- Fixes in `src/`, or in `tools/workshop/convert.py` for conversion bugs, then rebuild. Each recovered level adds training data (`data/ws2`).
+
 ### Phases (add after phase 5)
 | Phase | Work | Est. |
 |---|---|---|
