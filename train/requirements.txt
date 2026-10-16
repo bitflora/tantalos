@@ -5,3 +5,4 @@
 #   .venv/Scripts/pip install -r train/requirements.txt
 torch>=2.4
 numpy
+pillow

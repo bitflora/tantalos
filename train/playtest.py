@@ -3,17 +3,23 @@
 Generated levels carry a fixed creation time (src/builder.rs keeps fixtures byte-stable), so
 the editor lists them all as made on Oct 8 2025. Copies get Timestamp_Created/_Modified set
 to now, a second apart in argument order so the editor's date sort keeps that order. Files
-are named glados-<source name>.p2c unless the name already starts with glados-.
+are named glados-<source name>.p2c unless the name already starts with glados-. Each copy gets
+a preview image (<name>.jpg, train/preview.py: floor plan and item list) for the editor's Open
+screen, and its Description lists the items.
 
     python train/playtest.py out/sample/p2c/00003.p2c favorites/laser.p2c
     python train/playtest.py out/sample/p2c --prefix v3-          # glados-v3-00001.p2c, ...
     python train/playtest.py --restamp                            # fix glados-* already copied in
+    python train/playtest.py --previews                           # add previews to glados-* there
 """
 import argparse, re, time
 from pathlib import Path
 
+import preview
+
 PUZZLES = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Portal 2\portal2\puzzles\76561197975512835")
 STAMP = re.compile(r'("Timestamp_(?:Created|Modified)"\s+)"0x[0-9A-Fa-f]{16}"')
+DESCRIPTION = re.compile(r'("Description"\s+)"[^"]*"')
 
 
 def restamp(text, when):
@@ -27,13 +33,28 @@ def write(path, text):
     path.write_bytes(text.encode("utf-8"))
 
 
+def add_preview(path):
+    """Write path's .jpg preview and put its item list in the Description."""
+    text = path.read_bytes().decode("utf-8")
+    write(path, DESCRIPTION.sub(lambda m: f'{m[1]}"{preview.summary(path)}"', text, count=1))
+    preview.write(path, name=path.stem.removeprefix("glados-"))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("levels", nargs="*", help=".p2c files or directories of them")
     ap.add_argument("--prefix", default="", help="goes between glados- and the source name")
     ap.add_argument("--restamp", action="store_true",
                     help="instead, restamp the glados-*.p2c already in the folder with their copy time")
+    ap.add_argument("--previews", action="store_true",
+                    help="instead, add previews to the glados-*.p2c already in the folder")
     args = ap.parse_args()
+
+    if args.previews:
+        for f in sorted(PUZZLES.glob("glados-*.p2c")):
+            add_preview(f)
+            print(f.with_suffix(".jpg").name)
+        return
 
     if args.restamp:
         for f in sorted(PUZZLES.glob("glados-*.p2c")):
@@ -47,6 +68,7 @@ def main():
     for i, f in enumerate(files):
         name = f.name if f.name.startswith("glados-") else f"glados-{args.prefix}{f.name}"
         write(PUZZLES / name, restamp(f.read_bytes().decode("utf-8"), now + i))
+        add_preview(PUZZLES / name)
         print(PUZZLES / name)
 
 
