@@ -4,8 +4,8 @@ A training sequence is
 
     <bos> <cond>... <sep> <level tokens>... <eos>
 
-Conditions describe the level: verdict, plan length, portal trips, cubes, size, difficulty,
-which items and shapes it has, which mechanics its solution uses, and where it came from
+Conditions describe the level: verdict, plan length (or an upper bound on it), portal trips,
+cubes, size, difficulty, which items and shapes it has, which mechanics its solution uses, and where it came from
 (generator or Workshop, and how popular the Workshop puzzle was).
 There is one slot per group, always in the same order, holding either a value or the group's
 `?` token, so the level starts at the same position however much is specified. (With slots
@@ -76,10 +76,14 @@ LATER_MECH_GROUPS = MECHANICS[14:]
 # `<src:ws> <tier:top>` asks for levels like the ones people played most.
 PROVENANCE = {"src": ["<src:gen>", "<src:ws>"], "tier": ["<tier:mid>", "<tier:top>"]}
 TOP_SUBSCRIBERS = 100
+# Verdicts. `published`: a Workshop puzzle our solver couldn't confirm (unsolvable or out of
+# budget). It passed the game's editor and was published, so it is taken as solvable, but its
+# plan length and metrics are unknown, so it gets none.
+VERDICTS = ("solvable", "uncertain", "unsolvable", "invalid", "published")
 
 # One group per condition; a sequence carries at most one token from each.
 GROUPS = {
-    "verdict": [f"<verdict:{v}>" for v in ("solvable", "uncertain", "unsolvable", "invalid")],
+    "verdict": [f"<verdict:{v}>" for v in VERDICTS],
     "len": [f"<len:{lo}-{hi}>" if hi < 10**9 else f"<len:{lo}+>" for lo, hi in LEN_BUCKETS],
     "trips": ["<trips:0>", "<trips:1>", "<trips:2+>"],
     "cubes": ["<cubes:0>", "<cubes:1>", "<cubes:2+>"],
@@ -90,6 +94,10 @@ GROUPS = {
     **{f: [f"<{f}:no>", f"<{f}:yes>"] for f in LATER_FEATURES},
     **{m: [f"<{m}:no>", f"<{m}:yes>"] for m in LATER_MECH_GROUPS},
     **PROVENANCE,
+    # An upper bound on the plan length, same buckets as `len`: the actions a reverse-generated
+    # level's construction spends (`constructed_len`). The level is solvable by construction,
+    # so this holds even where the solver ran out of budget and `len` is unknown.
+    "maxlen": [f"<maxlen:{lo}-{hi}>" if hi < 10**9 else f"<maxlen:{lo}+>" for lo, hi in LEN_BUCKETS],
 }
 # "Not specified", and the value of a group that doesn't apply (plan length of an unsolvable level).
 ANY = {group: f"<{group}:?>" for group in GROUPS}
@@ -157,14 +165,20 @@ def conditions(record):
     """Condition tokens for one dataset record, one per group that applies."""
     level = record["tokens"].split()
     verdict = record["verdict"]
-    if verdict not in ("solvable", "uncertain", "unsolvable"):
+    if record.get("assumed"):  # ws3 before `published`: made-up plan length and chain depth
+        verdict = "published"
+    if verdict not in VERDICTS:
         verdict = "invalid"
+    # A reverse-generated level is solvable by construction, whatever the solver managed.
+    reverse = record.get("src") == "reverse"
+    if reverse and verdict in ("uncertain", "unsolvable"):
+        verdict = "solvable"
     out = [f"<verdict:{verdict}>"]
     metrics = record.get("metrics") or {}
-    if verdict == "solvable":
-        n = record["min_len"]
-        lo, hi = next(b for b in LEN_BUCKETS if b[0] <= n <= b[1])
-        out.append(GROUPS["len"][LEN_BUCKETS.index((lo, hi))])
+    if reverse and verdict == "solvable" and record.get("constructed_len") is not None:
+        out.append(GROUPS["maxlen"][len_bucket(record["constructed_len"])])
+    if verdict == "solvable" and record.get("min_len") is not None:
+        out.append(GROUPS["len"][len_bucket(record["min_len"])])
         trips = metrics.get("portal_trips")
         if trips is not None:
             out.append(GROUPS["trips"][min(trips, 2)])
@@ -209,6 +223,10 @@ def conditions(record):
     if workshop and record.get("subscribers") is not None:
         out.append(GROUPS["tier"][int(record["subscribers"] >= TOP_SUBSCRIBERS)])
     return out
+
+
+def len_bucket(n):
+    return next(i for i, (lo, hi) in enumerate(LEN_BUCKETS) if lo <= n <= hi)
 
 
 def loose_cubes(level):

@@ -314,7 +314,7 @@ def main():
     known = groups_in(vocab)
     for group in known:
         for t in GROUPS[group]:
-            if t != SOLVABLE:
+            if t != SOLVABLE and t in vocab.stoi:  # older checkpoints lack later values
                 settings.append((t, [t] if group == "verdict" else [SOLVABLE, t], args.n_cond))
 
     lines, owner = [], []
@@ -368,6 +368,8 @@ def main():
     conditioning = []
     for group in known:
         for t in GROUPS[group]:
+            if t not in vocab.stoi:
+                continue
             setting = "baseline" if t == SOLVABLE else t
             measurable, hits, acc = accuracy(setting, group, t)
             ref = "unconditioned" if group == "verdict" else "baseline"

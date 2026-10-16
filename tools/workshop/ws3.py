@@ -4,10 +4,9 @@
 
 Workshop puzzles passed the game's editor and were published, so they are taken as solvable
 even where our solver says `unsolvable` (it doesn't model every trick) or `uncertain` (its
-budget ran out). Those get an assumed label: verdict solvable, plan length and difficulty
-(chain depth) 20% below the largest among the levels the solver did solve, no metrics beyond
-that, and "assumed": true with the solver's own verdict in "solver_verdict". `invalid` and
-`unsupported` levels are left out (the converter got them wrong).
+budget ran out). Those get verdict `published` (train/data.py: solvable, plan length and metrics
+unknown) with no plan length or metrics, and the solver's own verdict in "solver_verdict".
+`invalid` and `unsupported` levels are left out (the converter got them wrong).
 
 Levels are deduplicated by tokens. data/ws2's test levels stay held out and its train levels
 stay in train; new puzzles go to test when md5(workshop_id) % 9 == 0 (about 11%, like ws2).
@@ -40,13 +39,6 @@ def main():
     a = ap.parse_args()
     out = Path(a.out)
     levels = [json.loads(l) for l in open(a.src, encoding="utf-8") if l.strip()]
-    solved = [r for r in levels if r["verdict"] == "solvable"]
-    max_len = max(r["min_len"] for r in solved)
-    max_depth = max(r["metrics"]["chain_depth"] for r in solved if r.get("metrics"))
-    assumed_len, assumed_depth = round(0.8 * max_len), round(0.8 * max_depth, 2)
-    print(f"{len(solved)} solved: longest plan {max_len}, deepest chain {max_depth}; "
-          f"assumed plan length {assumed_len}, chain depth {assumed_depth}")
-
     old_test, old_train = ids(ROOT / "data/ws2/test.jsonl"), ids(ROOT / "data/ws2/train.jsonl")
     seen, counts = set(), Counter()
     split = {"train": [], "test": []}
@@ -65,9 +57,7 @@ def main():
         r["n_tokens"] = n
         if r["verdict"] in TRUSTED:
             r = {k: v for k, v in r.items() if k not in ("liberal_len", "metrics", "min_len")}
-            r.update(verdict="solvable", min_len=assumed_len, needs_portals=True,
-                     metrics={"chain_depth": assumed_depth},
-                     assumed=True, solver_verdict=r["verdict"])
+            r.update(verdict="published", solver_verdict=r["verdict"])
         wid = r["workshop_id"]
         if wid in old_test:
             name = "test"
