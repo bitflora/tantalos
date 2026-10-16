@@ -297,20 +297,33 @@ fn construct_rw(seed: u64, rooms: i32, rw: i32) -> Built {
     }
 }
 
+/// Everything one generated level carries out of a worker thread: the label, the tokens and
+/// the few `Built` fields the JSONL line needs. The puzzle itself is dropped here (only its
+/// `--dump` text is kept), so results waiting to be written in order stay small.
+struct Generated {
+    dump: Option<String>,
+    constructed: usize,
+    size: [i32; 3],
+    gates: usize,
+    gadgets: Vec<Gadget>,
+    tokens: Vec<String>,
+    label: Label,
+}
+
 /// The JSONL body fields, plus the reverse-specific ones.
-fn json_line(built: &Built, tokens: &[String], label: &Label) -> String {
-    let gadgets: Vec<String> = built
+fn json_line(g: &Generated) -> String {
+    let names: Vec<String> = g
         .gadgets
         .iter()
         .map(|g| format!("\"{}\"", g.name()))
         .collect();
     format!(
         "{{{},\"src\":\"reverse\",\"constructed_len\":{},\"rooms\":{},\"gates\":{},\"gadget\":[{}]}}",
-        dataset::json_body(tokens, built.size, label),
-        built.constructed,
-        built.gadgets.len(),
-        built.gates(),
-        gadgets.join(","),
+        dataset::json_body(&g.tokens, g.size, &g.label),
+        g.constructed,
+        g.gadgets.len(),
+        g.gates,
+        names.join(","),
     )
 }
 
@@ -320,6 +333,7 @@ struct Args {
     rooms: i32,
     rooms_max: Option<i32>,
     budget: usize,
+    threads: usize,
     out: Option<PathBuf>,
     dump: Option<PathBuf>,
     require_solvable: bool,
@@ -332,6 +346,7 @@ const USAGE: &str = "usage: reverse [options]   (cargo run --release --bin rever
   --rooms-max N          most rooms per chamber (default: same as --rooms); each level draws a
                          count in [--rooms, --rooms-max]
   --budget N             solver state budget for labelling (default 50000)
+  --threads N            levels to label at once (default: all cores)
   --out FILE             write JSONL (default: stdout)
   --dump DIR             also write each chamber as DIR/reverse-<seed>-<i>.p2c
   --require-solvable     only emit chambers the solver proves solvable";
@@ -343,6 +358,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         rooms: 3,
         rooms_max: None,
         budget: 50_000,
+        threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
         out: None,
         dump: None,
         require_solvable: false,
@@ -380,6 +396,10 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             "--budget" => {
                 a.budget = num(args.get(i + 1), "--budget")? as usize;
+                i += 2;
+            }
+            "--threads" => {
+                a.threads = num(args.get(i + 1), "--threads")? as usize;
                 i += 2;
             }
             "--out" => {
@@ -462,41 +482,70 @@ fn main() -> std::process::ExitCode {
     };
 
     let mut stats = Stats::default();
-    for i in 0..a.count {
-        let seed = a.seed.wrapping_add(i as u64);
-        let rooms = Rng::new(seed ^ 0x51_ed_0000).range(rmin, rmax);
-        let built = construct(seed, rooms);
-        stats.built += 1;
-        let tokens = match tokens::encode(&built.puzzle) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("seed {seed}: does not encode: {e}");
-                continue;
+    // Levels are independent, and labelling (the solver) is nearly all of the time, so label
+    // them on every core and write the lines in input order: the output is the same whatever
+    // `threads` is.
+    let done: Result<(), std::convert::Infallible> = dataset::par_map_ordered(
+        (0..a.count).map(|i| (i, a.seed.wrapping_add(i as u64))),
+        a.threads,
+        |(i, seed)| {
+            let rooms = Rng::new(seed ^ 0x51_ed_0000).range(rmin, rmax);
+            let built = construct(seed, rooms);
+            let made = match tokens::encode(&built.puzzle) {
+                Ok(tokens) => {
+                    let label = dataset::label(&built.puzzle, a.budget, seed);
+                    let dump = a.dump.as_ref().map(|_| built.puzzle.to_p2c());
+                    Ok(Generated {
+                        dump,
+                        constructed: built.constructed,
+                        size: built.size,
+                        gates: built.gates(),
+                        gadgets: built.gadgets,
+                        tokens,
+                        label,
+                    })
+                }
+                Err(e) => Err(e),
+            };
+            (i, seed, made)
+        },
+        |(i, seed, made)| {
+            stats.built += 1;
+            let g = match made {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("seed {seed}: does not encode: {e}");
+                    return Ok(());
+                }
+            };
+            stats.encoded += 1;
+            match &g.label {
+                Label::Solvable { min_len, .. } => {
+                    stats.solvable += 1;
+                    stats.min_len_sum += *min_len;
+                }
+                Label::Uncertain(_) => stats.uncertain += 1,
+                Label::Unsolvable => stats.unsolvable += 1,
+                Label::Invalid(_) => stats.invalid += 1,
+                Label::Unsupported(_) => stats.unsupported += 1,
             }
-        };
-        stats.encoded += 1;
-        let label = dataset::label(&built.puzzle, a.budget, seed);
-        match &label {
-            Label::Solvable { min_len, .. } => {
-                stats.solvable += 1;
-                stats.min_len_sum += *min_len;
+            if a.require_solvable && !matches!(g.label, Label::Solvable { .. }) {
+                return Ok(());
             }
-            Label::Uncertain(_) => stats.uncertain += 1,
-            Label::Unsolvable => stats.unsolvable += 1,
-            Label::Invalid(_) => stats.invalid += 1,
-            Label::Unsupported(_) => stats.unsupported += 1,
-        }
-        if a.require_solvable && !matches!(label, Label::Solvable { .. }) {
-            continue;
-        }
-        if let Some(dir) = &a.dump {
-            let path = dir.join(format!("reverse-{seed}-{i}.p2c"));
-            if let Err(e) = std::fs::write(&path, built.puzzle.to_p2c()) {
-                eprintln!("{}: {e}", path.display());
+            if let (Some(dir), Some(text)) = (&a.dump, &g.dump) {
+                let path = dir.join(format!("reverse-{seed}-{i}.p2c"));
+                if let Err(e) = std::fs::write(&path, text) {
+                    eprintln!("{}: {e}", path.display());
+                }
             }
-        }
-        writeln!(out, "{}", json_line(&built, &tokens, &label)).expect("write output");
-        stats.emitted += 1;
+            writeln!(out, "{}", json_line(&g)).expect("write output");
+            stats.emitted += 1;
+            Ok(())
+        },
+    );
+    match done {
+        Ok(()) => {}
+        Err(never) => match never {},
     }
     out.flush().ok();
 
