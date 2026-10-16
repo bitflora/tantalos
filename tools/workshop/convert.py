@@ -546,7 +546,13 @@ def convert(bsp):
         for i in bsp.model_brushes(model):
             contents, sides = all_brushes[i]
             mats = {m.lower() for _, _, m in sides}
+            # Under a lift's shaft the compiler covers its pit with grate strips (4 x 44 x 128,
+            # black-metal edges, slotted for the arm) 16 units below the floor: 84 of 84 such
+            # brushes in 1,507 Workshop maps sat at a lift. Read as grating, they put a panel
+            # in the lift's track and the editor rejected the lift.
             if any("metalgrate" in m for m in mats) and contents & CONTENTS_GRATE:
+                if any("black_wall_metal" in m for m in mats):
+                    continue
                 kind = "grating"
             elif any(("/glass/" in m or "glasswindow" in m) and not m.startswith("tools/") for m in mats) \
                     and contents & CONTENTS_WINDOW:
