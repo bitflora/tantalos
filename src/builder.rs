@@ -591,8 +591,10 @@ impl Builder {
 
     /// An angled panel (`glass`: the clear one) on the face behind open `cell` (against
     /// `normal`), tilting toward `tilt` by `angle` degrees (30, 45, 60 or 90) when deployed.
-    /// ASSUMPTION: `ITEM_PROPERTY_ANGLED_PANEL_TYPE` counts 30° = 1 ... 90° = 4 (the default
-    /// type 2 goes with the default 45° animation).
+    /// `ITEM_PROPERTY_ANGLED_PANEL_TYPE` only picks the editor's model: editoritems lists them
+    /// 90°, 60°, 45°, 30°, so 90° = 0 ... 30° = 3 (the default type 2 goes with the default
+    /// 45° animation). Past 3 the editor reads a model index from beyond its table and
+    /// crashes drawing a retracted panel. The compiled level follows the animation only.
     #[allow(clippy::too_many_arguments)]
     pub fn angled_panel(
         &mut self,
@@ -611,10 +613,10 @@ impl Builder {
             "ITEM_PANEL_ANGLED"
         };
         let ty = match angle {
-            30 => 1,
+            30 => 3,
             45 => 2,
-            60 => 3,
-            _ => 4,
+            60 => 1,
+            _ => 0,
         };
         self.add_raw(
             kind,
@@ -750,7 +752,14 @@ impl Builder {
             (cell, [-90, 0, 0]),
             (end, [0, -90, 90]),
         ];
-        let up = up.filter(|&n| n != Self::rail_up(t) && n.axis() != a);
+        // The style map's rail runs level: turned about z, its parts don't fit a lift, which
+        // the editor never stops flagging (repeating its invalid sound, 2026-10-16). A lift is
+        // built like any other surface's rail, on the wall `rail_up` puts it on by default.
+        let up = if a == 2 {
+            Some(up.unwrap_or(Self::rail_up(t)))
+        } else {
+            up.filter(|&n| n != Self::rail_up(t) && n.axis() != a)
+        };
         let parts: Vec<(Cell, [i32; 3])> = match up {
             None => style.map(|(c, g)| (c, [g[0], g[1] + turn, g[2]])).to_vec(),
             Some(n) => {

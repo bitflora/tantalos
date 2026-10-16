@@ -363,7 +363,8 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
     launch_game, the game is restarted every `restart_every` levels and after a crash (exports
     slow from ~0.15 s to ~0.6 s over the first 150 levels of a session, and neither
     puzzlemaker_new_chamber nor reopening the editor helps; a restart takes ~17 s); a level that
-    crashed it is recorded as "crash", and it gives up after `max_crashes` crashes (default: 10,
+    crashed it is recorded as "crash" (one that hung it, "hang", and the game is ended), and it
+    gives up after `max_crashes` crashes and hangs (default: 10,
     or 5% of the levels to check if more; sampled levels crash the editor ~2.6% of the time).
     Otherwise it uses the
     game already running, on console `port`, with the editor open. Raises GameUnavailable if
@@ -419,7 +420,15 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
                     if r["verdict"] == "timeout":  # alive but silent: give it one more go
                         r = check_one(path, next(seq), con, pid, timeout)
                     if r["verdict"] == "timeout":
-                        raise GameUnavailable(f"the game stopped answering at {path}")
+                        if not launch_game:
+                            raise GameUnavailable(f"the game stopped answering at {path}")
+                        # Some levels hang the editor (repeating its invalid sound forever,
+                        # e.g. a lift written with a level rail's angles): end it and go on.
+                        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+                        end = time.time() + 60  # it takes a while to go, and launch refuses till then
+                        while time.time() < end and game_process() is not None:
+                            time.sleep(1)
+                        r = {"file": str(path), "verdict": "hang", "stage": r["stage"]}
                     return r
 
                 def canary_flagged():
@@ -432,9 +441,10 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
                     path = todo.popleft()
                     r = one(path)
                     checked += 1
-                    if r["verdict"] == "crash":
+                    if r["verdict"] in ("crash", "hang"):
                         crashes += 1
-                        progress(f"the game crashed on {path} ({crashes} so far)")
+                        what = "crashed" if r["verdict"] == "crash" else "hung"
+                        progress(f"the game {what} on {path} ({crashes} so far)")
                         write([r])  # the levels before it go round again: no canary after them
                         todo.extendleft(reversed([Path(x["file"]) for x in pending]))
                         pending = []
