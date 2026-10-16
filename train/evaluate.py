@@ -331,7 +331,10 @@ def main():
     t = time.time()
     results = sample.score(lines, args.glados, args.budget, out / "p2c" if args.p2c else None)
     score_s = time.time() - t
-    if any(r["verdict"] != "unparsed" and "tokens" not in r for r in results):
+    # A parsed level whose tokens can't be re-encoded has no "tokens" (the later code skips it);
+    # only a binary that never reports them is stale.
+    parsed_rows = [r for r in results if r["verdict"] != "unparsed"]
+    if parsed_rows and not any("tokens" in r for r in parsed_rows):
         sys.exit("glados score didn't report canonical tokens: rebuild it (cargo build --release)")
     with open(out / "samples.jsonl", "w", encoding="utf-8") as f:
         for name, line, r in zip(owner, lines, results):
