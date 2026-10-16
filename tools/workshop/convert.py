@@ -20,7 +20,7 @@ Puzzle Maker's compiler leaves the puzzle readable in the map:
   info_target, or a helper trigger launching straight up). Panels and stairs: their arms and
   steps, with the instance's angles (local +x: tilt / rising direction) and their branches'
   InitialValue. Pistons: the platform's func_movelinear and its level counters. Rails: the
-  track's func_movelinear (movedir, movedistance) from its model's cell. Loose cubes: `cube<N>`
+  track's func_movelinear (movedir, movedistance) from its own cell. Loose cubes: `cube<N>`
   instances' prop_weighted_cube (CubeType).
 
 Only what the token format can say is recovered: BEEmod items and the like make the map
@@ -886,8 +886,16 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
         model = inst.one("prop_dynamic", "-track_lift_model")
         d = dir_of(vec(track.d.get("movedir", "0 0 0")), (1, 0, 0), inst.name)
         n = round(float(track.d.get("movedistance", "0")) / CELL)
-        start = cell_of(add(model.origin(), UP, 4))
+        # The model's origin is on a face of the item's voxel (on a wall rail, its top face);
+        # the platform's movelinear sits 68 units from it, inside the voxel. Behind the start
+        # cell the compiler always leaves a hollow (553/553 rails in data/ws3). The platform
+        # starts `startposition` of the way along its track (tokens can't say; ours start at 0).
+        at = round(float(track.d.get("startposition", "0")) * n)
+        start = add(cell_of(track.origin()), d, -at)
         end = add(start, d, n)
+        back = tuple(-v for v in inst.up())
+        for k in range(n + 1):
+            embed(add(start, d, k), back)
         oscillate = bool(inst.direct("logic_branch", "-branch_active"))
         if oscillate:
             mode = "osc"
