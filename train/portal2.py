@@ -358,11 +358,14 @@ def check_one(path, n, con, pid, timeout=20, settle=0.1):
 
 
 def check(files, out_path, launch_game=False, timeout=20, progress=print, restart_every=100,
-          max_crashes=10, port=None, password="", canary_every=50, max_bad=3):
+          max_crashes=None, port=None, password="", canary_every=50, max_bad=3):
     """Check .p2c files, appending one JSON line each to out_path (resumable). With
     launch_game, the game is restarted every `restart_every` levels and after a crash (exports
     slow from ~0.15 s to ~0.6 s over the first 150 levels of a session, and neither
-    puzzlemaker_new_chamber nor reopening the editor helps; a restart takes ~17 s); a level that crashed it is recorded as "crash". Otherwise it uses the
+    puzzlemaker_new_chamber nor reopening the editor helps; a restart takes ~17 s); a level that
+    crashed it is recorded as "crash", and it gives up after `max_crashes` crashes (default: 10,
+    or 5% of the levels to check if more; sampled levels crash the editor ~2.6% of the time).
+    Otherwise it uses the
     game already running, on console `port`, with the editor open. Raises GameUnavailable if
     the game can't be used.
 
@@ -379,6 +382,8 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
     todo = collections.deque(f for f in files if str(f) not in done)
     total = len(todo)
     progress(f"{total} to check ({len(done)} already in {out_path})")
+    if max_crashes is None:
+        max_crashes = max(10, total // 20)
     if not todo:
         return
     saved = {p: p.read_bytes() for p in autosaves()}

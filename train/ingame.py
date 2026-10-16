@@ -12,6 +12,9 @@ checks them in the game (train/portal2.py) and compares. Writes
 - data/ingame/invalid.jsonl: game-invalid levels as training records (verdict "invalid"). The
   game's word is final, so retrain.sh trains on this file without relabelling it.
 
+If it stops early (the game crashed too often, ...), run it again with --resume to keep the
+levels already checked.
+
 If the game can't be used (already running, a different build, ...) it says so in the
 report and exits 0, so an unattended run carries on.
 """
@@ -90,6 +93,10 @@ def main():
     ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados.exe"))
     ap.add_argument("--store", default=str(ROOT / "data" / "ingame"))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--resume", action="store_true",
+                    help="keep the levels already checked in <out>/game.jsonl (same samples and options)")
+    ap.add_argument("--max-crashes", type=int, default=None,
+                    help="give up after this many game crashes (default 10, or 5%% of the levels if more)")
     ap.add_argument("--no-launch", action="store_true",
                     help="use a game you started with -insecure -netconport PORT -netconpassword PW")
     ap.add_argument("--port", type=int, help="with --no-launch: its -netconport")
@@ -118,18 +125,21 @@ def main():
         return
 
     p2c = out / "p2c"
-    if p2c.exists():
-        for f in p2c.glob("*.p2c"):
-            f.unlink()
-    subprocess.run([str(Path(a.glados).resolve()), "score", "--budget", "1", "--p2c-all", str(p2c)],
-                   input="\n".join(r["tokens"] for r in picked) + "\n",
-                   capture_output=True, text=True, check=True)
     files = [p2c / f"{i:05}.p2c" for i in range(1, len(picked) + 1)]
     results_path = out / "game.jsonl"
-    results_path.unlink(missing_ok=True)
+    if not (a.resume and all(f.exists() for f in files)):
+        if a.resume:
+            print("can't resume: the .p2c files don't match these levels; starting over", flush=True)
+        if p2c.exists():
+            for f in p2c.glob("*.p2c"):
+                f.unlink()
+        subprocess.run([str(Path(a.glados).resolve()), "score", "--budget", "1", "--p2c-all", str(p2c)],
+                       input="\n".join(r["tokens"] for r in picked) + "\n",
+                       capture_output=True, text=True, check=True)
+        results_path.unlink(missing_ok=True)
     report_path = out / "report.md"
     try:
-        portal2.check(files, results_path, launch_game=not a.no_launch,
+        portal2.check(files, results_path, launch_game=not a.no_launch, max_crashes=a.max_crashes,
                       progress=lambda s: print(s, flush=True), port=a.port, password=a.password)
     except portal2.GameUnavailable as e:
         text = f"## In-game editor check\n\nSkipped: Portal 2 unavailable ({e}).\n"

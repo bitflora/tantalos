@@ -580,6 +580,7 @@ impl Genome {
             return None;
         }
         let mut used: Vec<Cell> = vec![entry, exit];
+        let doors = [entry, exit];
         b.entry(entry, self.entry.side.opposite());
         let exit = b.exit(exit, self.exit.side.opposite());
 
@@ -846,26 +847,37 @@ impl Genome {
                     len,
                     oscillate,
                 } => {
-                    let Some(c) = column(at) else { continue };
-                    let track_of = |d: Dir| -> Vec<Cell> {
-                        (0..=len.clamp(1, 5))
-                            .map(|k| {
-                                let v = d.vector();
-                                [c[0] + v[0] * k, c[1] + v[1] * k, c[2]]
-                            })
-                            .collect()
+                    // The platform runs along the wall on its left (Builder::rail), which the
+                    // editor wants solid the whole way: start from that wall.
+                    let track_of = |d: Dir| -> Option<Vec<Cell>> {
+                        let c = to_wall(at, turn_by(d, 1), 0)?;
+                        let v = d.vector();
+                        let t: Vec<Cell> = (0..=len.clamp(1, 5))
+                            .map(|k| [c[0] + v[0] * k, c[1] + v[1] * k, c[2]])
+                            .collect();
+                        let walled = t.iter().all(|&x| open(x) && !open(step(x, turn_by(d, 1))));
+                        // Nor beside or over a door, whose frame takes the wall around it.
+                        let near_door = |x: &Cell| {
+                            doors.iter().any(|e| (0..3).all(|a| (x[a] - e[a]).abs() <= 1))
+                        };
+                        (walled && !t.iter().any(near_door)).then_some(t)
                     };
-                    let crosses = |d: Dir| {
-                        let t = track_of(d);
-                        t.iter().all(|&x| open(x)) && t.iter().any(|&x| open(step(x, Dir::NegZ)))
-                    };
-                    let dir = [dir, turn_by(dir, 1), turn_by(dir, 2), turn_by(dir, 3)]
+                    let crosses = |t: &Vec<Cell>| t.iter().any(|&x| open(step(x, Dir::NegZ)));
+                    let tracks: Vec<Vec<Cell>> = [dir, turn_by(dir, 1), turn_by(dir, 2), turn_by(dir, 3)]
                         .into_iter()
-                        .find(|&d| crosses(d))
-                        .unwrap_or(dir);
-                    let track = track_of(dir);
-                    let clear = track.iter().all(|&t| open(t) && open(step(t, Dir::PosZ)));
-                    if !clear || track.iter().any(|t| swept.contains(t)) || !claim(c) {
+                        .filter_map(track_of)
+                        .collect();
+                    let Some(track) = tracks.iter().find(|t| crosses(t)).or(tracks.first()).cloned()
+                    else {
+                        continue;
+                    };
+                    let c = track[0];
+                    let clear = track.iter().all(|&t| open(step(t, Dir::PosZ)));
+                    // It takes its whole track: nothing else may stand there.
+                    if !clear
+                        || track.iter().any(|t| swept.contains(t))
+                        || !track.iter().fold(true, |free, &t| claim(t) && free)
+                    {
                         continue;
                     }
                     let r = b.rail(c, *track.last().unwrap(), oscillate, true);

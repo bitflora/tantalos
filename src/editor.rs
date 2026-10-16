@@ -164,6 +164,38 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
         }
     }
 
+    // Items mounted on a voxel of a door's frame (beside or above it on the same wall). In
+    // in-game checks (2026-10-16) the game flagged all 152 lasers, catchers, funnels, flip
+    // panels and rails there, but only 5 of 51 light bridges, so bridges are left out.
+    for door in level
+        .items
+        .iter()
+        .filter(|d| matches!(d.kind, ItemKind::EntryDoor | ItemKind::ExitDoor))
+    {
+        let frame: HashSet<Cell> = embedded(door).into_iter().collect();
+        for it in &level.items {
+            if matches!(
+                it.kind,
+                ItemKind::EntryDoor
+                    | ItemKind::ExitDoor
+                    | ItemKind::LightBridge
+                    | ItemKind::Glass
+                    | ItemKind::Grating
+                    | ItemKind::Fizzler
+                    | ItemKind::LaserField
+            ) {
+                continue;
+            }
+            let Some(n) = it.normal else { continue };
+            if target_name(&it.kind).is_some()
+                && it.normal == door.normal
+                && frame.contains(&step(it.cell, n.opposite()))
+            {
+                flags.pair(door, it, "on-door-frame");
+            }
+        }
+    }
+
     for it in &level.items {
         match it.kind {
             // Goo is placed on a floor.
@@ -197,6 +229,17 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
         }
     }
 
+    // A rail platform runs along a wall: the voxel behind it (against its up) must be solid
+    // at every cell of its track. In-game checks of 873 rails (2026-10-16, runs/v5-fresh-8h):
+    // all 775 with a gap in that wall were flagged, and every rail the game accepted had it.
+    for r in &level.rails {
+        let Some(it) = level.item(r.item) else { continue };
+        let Some(n) = it.normal else { continue };
+        if r.track().iter().any(|&c| !level.solid(step(c, n.opposite()))) {
+            flags.add(it, "rail-off-wall");
+        }
+    }
+
     // Later items each take their cell (stairs two): two can't share one, nor stand where a
     // door, button, dropper or turret does. Items mounted on different faces of a cell (a
     // laser on a wall over a floor panel) aren't told apart; ASSUMPTION until checked in-game.
@@ -205,6 +248,11 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
         let cells: Vec<Cell> = match it.kind {
             ItemKind::Stairs => match level.stairs.iter().find(|s| s.item == it.index) {
                 Some(s) => vec![s.cell, step(s.cell, s.dir)],
+                None => vec![it.cell],
+            },
+            // A rail platform takes its whole track.
+            ItemKind::Rail => match level.rails.iter().find(|r| r.item == it.index) {
+                Some(r) => r.track(),
                 None => vec![it.cell],
             },
             ItemKind::LaserEmitter
@@ -272,6 +320,19 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                     _ => continue,
                 };
                 flags.pair(it, panel, rule);
+            }
+        }
+    }
+
+    // Glass and grating in a stairs cell, on any of its sides (167 of 167 flags agreed with
+    // the game, 2026-10-16). Panels on a neighbour's face against the stairs are fine.
+    for s in &level.stairs {
+        let Some(st) = level.item(s.item) else { continue };
+        let cells = [s.cell, step(s.cell, s.dir)];
+        for b in &level.barriers {
+            let Some(panel) = level.item(b.item) else { continue };
+            if b.faces.iter().any(|(c, _)| cells.contains(c)) {
+                flags.pair(st, panel, "panel-in-stairs");
             }
         }
     }

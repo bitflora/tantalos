@@ -166,3 +166,24 @@ fn genomes_produce_turrets_and_gel() {
     }
     assert!(turrets > 20 && gels > 20 && wired > 2, "{turrets} {gels} {wired}");
 }
+
+#[test]
+fn genomes_mount_rails_on_walls() {
+    let mut rng = Rng::new(55);
+    let (mut levels, mut rails) = (0, 0);
+    for _ in 0..600 {
+        let mut g = Genome::random(&mut rng);
+        for _ in 0..10 {
+            g.mutate(&mut rng);
+        }
+        let Some(p) = g.build() else { continue };
+        let level = Level::from_puzzle(&p);
+        // build() drops levels the editor would refuse, so rails off a wall cost the whole
+        // level; enough must still get placed.
+        let flags = glados::editor::editor_flags(&level);
+        assert!(flags.iter().all(|f| f.name != "raillift"), "{flags:?}");
+        levels += 1;
+        rails += level.rails.len();
+    }
+    assert!(rails > 15, "{levels} levels, {rails} rails");
+}

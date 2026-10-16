@@ -426,7 +426,7 @@ pub fn piston_bridge() -> Puzzle {
     b.build()
 }
 
-/// A goo trench three wide; an oscillating rail platform crosses it.
+/// A goo trench three wide; an oscillating rail platform on its +y wall crosses it.
 pub fn rail_ferry() -> Puzzle {
     let mut b = Builder::new("Rail ferry", [9, 3, 4]);
     b.carve([0, 0, 1], [8, 2, 3]);
@@ -434,7 +434,7 @@ pub fn rail_ferry() -> Puzzle {
     b.goo([4, 1, 0]);
     b.entry([0, 1, 1], Dir::PosX);
     b.exit([8, 1, 1], Dir::NegX);
-    b.rail([3, 1, 1], [5, 1, 1], true, true);
+    b.rail([3, 2, 1], [5, 2, 1], true, true);
     b.build()
 }
 
