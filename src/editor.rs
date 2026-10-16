@@ -15,6 +15,14 @@
 //! fields like floor buttons, until in-game checks say otherwise. So are the items added after
 //! them (lasers, faith plates, bridges, funnels, panels, stairs, pistons, rails), which also
 //! can't anchor on goo, and two of which can't share a cell.
+//!
+//! Published Workshop levels all passed the real editor, so they show what it allows: where
+//! they break a rule here and the in-game checks don't contradict them (2026-10-16), the rule
+//! was narrowed (turrets, splats and relays in fields; turrets and wall lasers sharing cells;
+//! parallel fields; goo on goo). Not where the in-game checks disagree with the Workshop or
+//! can't tell the cases apart (a floor button sharing a cell with a light bridge, a field on
+//! the door side of an exit door's cell, a pedestal in a field's end cell, pedestals against
+//! glass).
 
 use crate::geom::{rotate, step, Cell, Dir};
 use crate::level::{BarrierKind, ItemKind, Level, PlacedItem};
@@ -121,17 +129,18 @@ fn pedestal_side(item: &PlacedItem) -> Option<Dir> {
 /// next to face `f`.
 fn hit_by_field(item: &PlacedItem, f: Dir) -> bool {
     match item.kind {
-        // Turrets, gel and later items: not checked in-game yet; assumed to collide like a
-        // floor button.
+        // Turrets, gel splats and laser relays: the game flagged none of the 11 in fields
+        // (in-game check of runs/v5-fresh-8h, 2026-10-16), and 43 Workshop levels have some.
+        ItemKind::Turret | ItemKind::PaintSplat | ItemKind::LaserRelay => false,
+        // Items that stay on their surface are clear of a field on the cell's far face, like
+        // doors (in 22 Workshop levels; ASSUMPTION, none in the in-game checks).
         ItemKind::FloorButton
-        | ItemKind::CubeDropper
-        | ItemKind::Turret
-        | ItemKind::PaintSplat
-        | ItemKind::PaintDropper
-        | ItemKind::LaserEmitter
-        | ItemKind::LaserCatcher
-        | ItemKind::LaserRelay
         | ItemKind::FaithPlate
+        | ItemKind::LaserEmitter
+        | ItemKind::LaserCatcher => item.normal != Some(f),
+        // Other later items: assumed to collide like a floor button.
+        ItemKind::CubeDropper
+        | ItemKind::PaintDropper
         | ItemKind::LightBridge
         | ItemKind::Funnel
         | ItemKind::AngledPanel
@@ -144,6 +153,32 @@ fn hit_by_field(item: &PlacedItem, f: Dir) -> bool {
         ItemKind::PedestalButton => pedestal_side(item) == Some(f),
         _ => false,
     }
+}
+
+/// Pairs of items that may share a cell after all. Turrets collide only with physics
+/// (editoritems.txt) and share cells with floor panels, pistons, faith plates and wall items
+/// in 95 Workshop levels; the game flagged a turret only on stairs and rails. Laser emitters
+/// and catchers sit in their wall: on another face of the cell they leave lasers, doors and
+/// pedestal buttons alone (121 Workshop levels; in-game, 0 of 2 pedestals flagged), but not
+/// pistons or stairs, which the game flagged.
+fn share_ok(a: &PlacedItem, b: &PlacedItem) -> bool {
+    let ok = |a: &PlacedItem, b: &PlacedItem| match a.kind {
+        ItemKind::Turret => !matches!(b.kind, ItemKind::Stairs | ItemKind::Rail),
+        ItemKind::LaserEmitter | ItemKind::LaserCatcher => {
+            a.normal != b.normal
+                && matches!(
+                    b.kind,
+                    ItemKind::LaserEmitter
+                        | ItemKind::LaserCatcher
+                        | ItemKind::LaserRelay
+                        | ItemKind::EntryDoor
+                        | ItemKind::ExitDoor
+                        | ItemKind::PedestalButton
+                )
+        }
+        _ => false,
+    };
+    ok(a, b) || ok(b, a)
 }
 
 /// Everything the editor would flag in this level.
@@ -198,8 +233,13 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
 
     for it in &level.items {
         match it.kind {
-            // Goo is placed on a floor.
-            ItemKind::Goo if !level.solid(step(it.cell, Dir::NegZ)) => {
+            // Goo is placed on a floor, or on another goo item: one fills a single layer, so
+            // deep goo is a stack of them (1,085 deep goo bodies in Workshop levels, 2 to 21
+            // deep; ASSUMPTION, the in-game checks only had goo over goo without an item).
+            ItemKind::Goo
+                if !level.solid(step(it.cell, Dir::NegZ))
+                    && !goo_items.contains(&step(it.cell, Dir::NegZ)) =>
+            {
                 flags.add(it, "goo-not-on-floor")
             }
             // Only cubes and gel splats may anchor on goo (CanAnchorOnGoo).
@@ -288,7 +328,9 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                         )
                     };
                     // Older pairs are the existing rules' business.
-                    if later(&it.kind) || later(&level.items[j].kind) {
+                    if (later(&it.kind) || later(&level.items[j].kind))
+                        && !share_ok(&level.items[j], it)
+                    {
                         flags.pair(&level.items[j], it, "shared-cell");
                     }
                 }
@@ -357,8 +399,8 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                 flags.pair(panel, field, "glass-across-field");
             }
         }
-        // Fields through the same cells: parallel ones (any kinds), or a fizzler crossing a
-        // laser field (8 of 10 and 15 of 17 flags agreed).
+        // Fields through the same cells: parallel ones, or a fizzler crossing a laser field
+        // (15 of 17 flags agreed).
         for h2 in &level.hazards[i + 1..] {
             let Some(other) = level.item(h2.item) else { continue };
             let Some(&(_, f2)) = h2.faces.first() else { continue };
@@ -366,7 +408,25 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                 continue;
             }
             let parallel = f2 == f || f2 == f.opposite();
-            if parallel || h.kind != h2.kind {
+            // Parallel ones collide only if they're the same kind in the same plane: a
+            // fizzler and a laser field stacked in one plane are a common Workshop trick
+            // (120 levels; the game passed the pair it saw), and fields in different
+            // planes of the same cells don't touch.
+            let plane = |&(c, d): &(Cell, Dir)| {
+                if d.is_positive() {
+                    (c, d)
+                } else {
+                    (step(c, d), d.opposite())
+                }
+            };
+            let planes: HashSet<(Cell, Dir)> = h.faces.iter().map(plane).collect();
+            let same_plane = h2.faces.iter().any(|x| planes.contains(&plane(x)));
+            let collide = if parallel {
+                h.kind == h2.kind && same_plane
+            } else {
+                h.kind != h2.kind
+            };
+            if collide {
                 flags.pair(field, other, "fields-overlap");
             }
         }

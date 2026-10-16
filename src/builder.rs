@@ -1,7 +1,9 @@
 //! Build puzzles in code. Item property lists copy what the retail editor writes
 //! (taken from real v14 files), so the output should open in the Puzzle Maker.
 
-use crate::geom::{angles_for_up, angles_mapping, step, Cell, Dir};
+use crate::geom::{
+    angles_for_up, angles_mapping, angles_mapping_pitches, step, up_from_angles, Cell, Dir,
+};
 use crate::level::LaserKind;
 use crate::p2c::{Connection, Item, Props, Puzzle, Section, Voxels};
 
@@ -263,6 +265,13 @@ impl Builder {
             ],
             &[],
         )
+    }
+
+    /// Turns pedestal button `item` so that its column stands against side `side` of its cell
+    /// (local -x; `pedestal` puts it against -x).
+    pub fn turn_pedestal(&mut self, item: i32, side: Dir) -> &mut Self {
+        let angles = angles_mapping([-1, 0, 0], side, [0, 0, 1], Dir::PosZ);
+        self.set_prop(item, "Angles", &vec3(angles))
     }
 
     fn link(&mut self, sender: i32, receiver: i32, kind: &str) {
@@ -704,10 +713,62 @@ impl Builder {
     /// A rail platform: a floor in open `cell` travelling along a straight track to `end`.
     /// Angles and extents copy the style map's rail (track toward -y), turned about z; a
     /// vertical one keeps those and travels up or down (ASSUMPTION: `TRAVEL_DIRECTION` pitch).
+    /// It runs along the wall on its left (a vertical one: its up is -x).
     pub fn rail(&mut self, cell: Cell, end: Cell, oscillate: bool, start_active: bool) -> i32 {
+        self.rail_on(cell, end, oscillate, start_active, None)
+    }
+
+    /// The up `rail` gives a platform travelling along `t`: away from the wall it runs on.
+    pub fn rail_up(t: Dir) -> Dir {
+        let turn = if t.axis() == 2 { 0 } else { yaw(t) - 270 };
+        up_from_angles([90.0, f64::from(180 + turn), 0.0]).expect("axis-aligned")
+    }
+
+    /// `rail`, mounted on the surface against `up` (perpendicular to the track) instead:
+    /// Workshop rails run on either wall, floors and ceilings (ASSUMPTION: `TRAVEL_DIRECTION`
+    /// as in `rail`; the editor checks a platform with its up, `Level` reads the track from
+    /// the extents).
+    pub fn rail_on(
+        &mut self,
+        cell: Cell,
+        end: Cell,
+        oscillate: bool,
+        start_active: bool,
+        up: Option<Dir>,
+    ) -> i32 {
         let a = (0..3).find(|&a| end[a] != cell[a]).unwrap_or(0);
         let t = Dir::from_axis(a, end[a] > cell[a]);
         let turn = if a == 2 { 0 } else { yaw(t) - 270 };
+        // The platform and its four extents, each pointing along the mounting surface (the
+        // one at `end` along the track), as (cell, angles). The style map's, turned about z;
+        // on another surface, built the way the style map's are: a wall platform has pitch 90
+        // and its up away from the wall (as on every Workshop rail), extents have that up too.
+        let style = [
+            (cell, [90, 180, 0]),
+            (cell, [90, 180, 0]),
+            (cell, [0, 90, -90]),
+            (cell, [-90, 0, 0]),
+            (end, [0, -90, 90]),
+        ];
+        let up = up.filter(|&n| n != Self::rail_up(t) && n.axis() != a);
+        let parts: Vec<(Cell, [i32; 3])> = match up {
+            None => style.map(|(c, g)| (c, [g[0], g[1] + turn, g[2]])).to_vec(),
+            Some(n) => {
+                let point = |forward: Dir| {
+                    angles_mapping_pitches([0, 90, -90, 180], [1, 0, 0], forward, [0, 0, 1], n)
+                };
+                // For the style map's rail this is down: its extents go down, back, up, along.
+                let side = n.cross(t).expect("perpendicular").opposite();
+                let platform = if n.axis() == 2 { t } else { Dir::NegZ };
+                vec![
+                    (cell, point(platform)),
+                    (cell, point(side)),
+                    (cell, point(t.opposite())),
+                    (cell, point(side.opposite())),
+                    (end, point(t)),
+                ]
+            }
+        };
         let dist = (end[a] - cell[a]).abs() * 128;
         let direction = match t {
             Dir::PosZ => "-90 0 0".to_string(),
@@ -717,7 +778,7 @@ impl Builder {
         let r = self.add_raw(
             "ITEM_RAIL_PLATFORM",
             cell,
-            [90, 180 + turn, 0],
+            parts[0].1,
             "0 0 0",
             true,
             &[
@@ -736,13 +797,7 @@ impl Builder {
             ],
             &[],
         );
-        for (c, angles) in [
-            (cell, [90, 180, 0]),
-            (cell, [0, 90, -90]),
-            (cell, [-90, 0, 0]),
-            (end, [0, -90, 90]),
-        ] {
-            let angles = [angles[0], angles[1] + turn, angles[2]];
+        for &(c, angles) in &parts[1..] {
             let e = self.add_raw("ITEM_RAIL_PLATFORM_EXTENT", c, angles, "0 0 0", false, &[], &[]);
             self.link(r, e, "CONNECTION_BARRIER_ANCHOR_TO_EXTENT");
         }

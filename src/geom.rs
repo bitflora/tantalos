@@ -130,8 +130,19 @@ pub fn up_from_angles(angles: [f64; 3]) -> Option<Dir> {
 /// Angles (multiples of 90 degrees) that turn local axis `a` to `wa` and local axis `b` to `wb`.
 /// Searches pitch first so wall items come out like the editor's (pitch +-90).
 pub fn angles_mapping(a: [i32; 3], wa: Dir, b: [i32; 3], wb: Dir) -> [i32; 3] {
+    angles_mapping_pitches([0, -90, 90, 180], a, wa, b, wb)
+}
+
+/// `angles_mapping`, trying pitches in the given order.
+pub fn angles_mapping_pitches(
+    pitches: [i32; 4],
+    a: [i32; 3],
+    wa: Dir,
+    b: [i32; 3],
+    wb: Dir,
+) -> [i32; 3] {
     const STEPS: [i32; 4] = [0, -90, 90, 180];
-    for p in STEPS {
+    for p in pitches {
         for y in STEPS {
             for r in STEPS {
                 let ang = [p, y, r].map(f64::from);

@@ -892,11 +892,12 @@ enum Target {
 }
 
 /// Builds the puzzle a token sequence describes. Errors name the offending token.
-/// The fewest goo items whose flood (sideways and down, see `Level`) covers exactly
-/// `goo` (cells as (z, y, x)): one per group of goo cells joined sideways at one height that
-/// goo from above doesn't already flow into, on the group's first cell with a floor under it
-/// (the editor only takes goo on a floor) and, if it can, no item in it (`taken`). Items the
-/// flood reaches, like a door or button, then aren't standing in a goo item.
+/// Goo items whose flood (sideways and down, see `Level`) covers exactly `goo` (cells as
+/// (z, y, x)): one per group of goo cells joined sideways at one height that goo from above
+/// doesn't already flow into, on the group's first cell with a floor under it and, if it can,
+/// no item in it (`taken`). Items the flood reaches, like a door or button, then aren't
+/// standing in a goo item. The editor only takes goo on a floor or on more goo, so a group
+/// over deeper goo gets a stack of items down to the floor, on the cell that needs the fewest.
 fn goo_sources(
     goo: &BTreeSet<(i32, i32, i32)>,
     solid: &HashSet<Cell>,
@@ -924,14 +925,34 @@ fn goo_sources(
             continue;
         }
         group.sort();
-        let floored = |&&(z, y, x): &&(i32, i32, i32)| z == 0 || solid.contains(&[x, y, z - 1]);
-        let free = |c: &&(i32, i32, i32)| !taken.contains(&[c.2, c.1, c.0]);
-        let (z, y, x) = *group
-            .iter()
-            .find(|c| floored(c) && free(c))
-            .or_else(|| group.iter().find(floored))
-            .unwrap_or(&group[0]);
-        out.push([x, y, z]);
+        // Over deep goo, the cells below down to the floor, which get goo items too.
+        let stack = |&(z, y, x): &(i32, i32, i32)| -> Option<Vec<(i32, i32, i32)>> {
+            let mut out = Vec::new();
+            let mut z = z - 1;
+            while z >= 0 && !solid.contains(&[x, y, z]) {
+                if !goo.contains(&(z, y, x)) {
+                    return None;
+                }
+                out.push((z, y, x));
+                z -= 1;
+            }
+            Some(out)
+        };
+        let free = |c: &(i32, i32, i32)| !taken.contains(&[c.2, c.1, c.0]);
+        let best = |need_free: bool| {
+            group
+                .iter()
+                .filter_map(|c| Some((c, stack(c)?)))
+                .filter(|(c, s)| !need_free || (free(c) && s.iter().all(free)))
+                .min_by_key(|(_, s)| s.len())
+        };
+        match best(true).or_else(|| best(false)) {
+            Some((&(z, y, x), s)) => {
+                out.push([x, y, z]);
+                out.extend(s.into_iter().map(|(z, y, x)| [x, y, z]));
+            }
+            None => out.push([group[0].2, group[0].1, group[0].0]),
+        }
     }
     out
 }
@@ -1094,6 +1115,7 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
     // Each gel's dropper, if poured.
     let mut gels: Vec<Option<i32>> = Vec::new();
     let mut wires: Vec<(i32, Target)> = Vec::new();
+    let mut pedestals: Vec<i32> = Vec::new();
     // Items of the later target kinds, by `TARGETS` index.
     let mut later: Vec<Vec<i32>> = vec![Vec::new(); TARGETS.len()];
     let slot = |word: &str| TARGETS.iter().position(|t| *t == word).unwrap();
@@ -1306,7 +1328,26 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
                     return r.fail("rail track isn't one straight line");
                 }
                 let mode = r.word(&["osc", "on", "off"])?;
-                let item = b.rail(cell, end, mode == 0, mode != 2);
+                // Tokens don't say what the platform is mounted on: the editor wants it solid
+                // all along the track (editor.rs). The wall on its left if it is, else
+                // another wall, the floor or the ceiling that is.
+                let a = (0..3).find(|&a| cell[a] != end[a]).unwrap_or(0);
+                let t = Dir::from_axis(a, end[a] > cell[a]);
+                let track: Vec<Cell> = (0..=(end[a] - cell[a]).abs())
+                    .map(|k| {
+                        let mut c = cell;
+                        c[a] += k * (end[a] - cell[a]).signum();
+                        c
+                    })
+                    .collect();
+                let left = Builder::rail_up(t);
+                let up = [left, left.opposite()]
+                    .into_iter()
+                    .chain(Dir::HORIZONTAL)
+                    .chain([Dir::PosZ, Dir::NegZ])
+                    .filter(|d| d.axis() != a)
+                    .find(|&d| track.iter().all(|&c| b.solid(step(c, d.opposite()))));
+                let item = b.rail_on(cell, end, mode == 0, mode != 2, up);
                 later[slot("rail")].push(item);
             }
             "button" | "pedestal" => {
@@ -1321,7 +1362,9 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
                     } else {
                         Some(r.num(3, 30)? as u32)
                     };
-                    b.pedestal(cell, timer)
+                    let item = b.pedestal(cell, timer);
+                    pedestals.push(item);
+                    item
                 };
                 wired(&mut r, sender, &mut wires)?;
             }
@@ -1350,8 +1393,23 @@ pub fn decode(text: &str) -> Result<Puzzle, String> {
             other => return r.fail(format!("unexpected {other:?}")),
         }
     }
+    let level = Level::from_puzzle(&b.build());
+    // Tokens don't say which side of its cell a pedestal's column stands on either. The editor
+    // won't have it against a glass or grating panel or in a field there (editor.rs): -x if
+    // that's clear, else another side that is.
+    for &item in &pedestals {
+        let Some(it) = level.item(item) else { continue };
+        let faces = level.barriers.iter().flat_map(|b| &b.faces);
+        let faces = faces.chain(level.hazards.iter().flat_map(|h| &h.faces));
+        let blocked: Vec<Dir> = faces.filter(|(c, _)| *c == it.cell).map(|&(_, d)| d).collect();
+        if let Some(&side) = Dir::HORIZONTAL.iter().find(|d| !blocked.contains(d)) {
+            if side != Dir::NegX {
+                b.turn_pedestal(item, side);
+            }
+        }
+    }
     // Cells other items stand in, which the editor won't let goo share.
-    let taken: HashSet<Cell> = Level::from_puzzle(&b.build())
+    let taken: HashSet<Cell> = level
         .items
         .iter()
         .filter(|i| i.kind.is_mounted())

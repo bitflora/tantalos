@@ -371,9 +371,16 @@ fn nothing_may_sit_in_a_fields_sweep() {
     // and the exit door beside its emitters on the mounting wall, were marked misplaced and the
     // level wouldn't build. Panels shaped like these built fine on their own.
     const ROOM: &str = "size 6 6 4 s1 o3 | / entry 2 0 1 +y exit 3 5 1 -y";
-    let p = field_problems(&format!(
-        "{ROOM} fizzler 2 5 1 -y +z 3 on pedestal 2 5 1 inf"
-    ));
+    let tokens = format!("{ROOM} fizzler 2 5 1 -y +z 3 on pedestal 2 5 1 inf");
+    let mut puzzle = glados::tokens::decode(&tokens).unwrap();
+    // That pedestal's column stood on the field's side; decoding turns it away (tokens don't
+    // say which side it's on), so turn it back.
+    let p = Level::from_puzzle(&puzzle).mount_problems();
+    assert!(!p.iter().any(|m| m.contains("button")), "{p:?}");
+    for it in puzzle.items.iter_mut().filter(|i| i.kind() == "ITEM_BUTTON_PEDESTAL") {
+        it.set("Angles", "0 0 0");
+    }
+    let p = Level::from_puzzle(&puzzle).mount_problems();
     assert!(p.iter().any(|m| m.contains("doorentry") && m.contains("in-field")), "{p:?}");
     assert!(p.iter().any(|m| m.contains("button") && m.contains("in-field")), "{p:?}");
     // Not caught: a door beside a field's emitters, and a grating panel across a field's
@@ -404,4 +411,30 @@ fn nothing_may_sit_in_a_fields_sweep() {
     for (name, p) in fixtures::all() {
         assert!(Level::from_puzzle(&p).mount_problems().is_empty(), "{name}");
     }
+}
+
+#[test]
+fn workshop_tricks_the_editor_allows() {
+    const OPEN: &str = "size 6 6 4 s1 o3 | / entry 0 0 1 +y exit 5 5 1 -y";
+    let rules = |extra: &str| -> Vec<String> { field_problems(&format!("{OPEN} {extra}")) };
+    // A fizzler and a laser field stacked in one plane (the game passed both it saw), and
+    // two fizzlers in different planes of the same cells.
+    let p = rules("fizzler 2 5 1 -y +z 3 on laserfield 2 5 1 -y +z 3 on");
+    assert!(!p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
+    let p = rules("fizzler 2 5 1 -y +z 3 on fizzler 2 5 3 -y -z 3 on");
+    assert!(!p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
+    // Two fizzlers in one plane still collide (2 of 2 in the game).
+    let p = rules("fizzler 2 5 1 -y +z 3 on fizzler 2 5 2 -y +z 2 on");
+    assert!(p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
+    // Turrets and gel splats in a field's sweep.
+    let p = rules("fizzler 2 5 1 -y +z 3 on turret 2 4 1 0 gel 2 3 1 +z bounce splat");
+    assert!(!p.iter().any(|m| m.contains("in-field")), "{p:?}");
+    // A turret on a floor panel; a laser on one wall of a cell, its catcher on another.
+    let p = rules(
+        "turret 3 2 1 0 panel 3 2 1 +z +y 2 off laser 4 3 1 -x center on catcher 4 3 1 -y center",
+    );
+    assert!(!p.iter().any(|m| m.contains("shared-cell")), "{p:?}");
+    // But not a turret on stairs.
+    let p = rules("turret 3 2 1 0 stairs 3 2 1 +y off");
+    assert!(p.iter().any(|m| m.contains("shared-cell")), "{p:?}");
 }

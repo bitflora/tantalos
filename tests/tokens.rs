@@ -3,7 +3,8 @@
 use glados::dataset::{self, generate, label, Config, Label};
 use glados::fixtures;
 use glados::generator::Genome;
-use glados::level::Level;
+use glados::geom::Dir;
+use glados::level::{ItemKind, Level};
 use glados::p2c::Puzzle;
 use glados::rng::Rng;
 use glados::solver::{judge, Judgement};
@@ -270,4 +271,67 @@ fn goo_items_sit_on_the_floor_of_their_run() {
     // Goo over open air has no floor to stand on.
     let floating = "size 2 1 4 s1 o3 | o1 g1 o2 | / entry 0 0 1 +x exit 0 0 2 +x";
     assert!(!goo_problems(floating).is_empty());
+}
+
+#[test]
+fn deep_goo_is_a_stack_of_goo_items() {
+    // A two-deep goo pit: the editor fills one layer per goo item and takes goo only on a floor
+    // or on more goo, so the decoder stacks two items in it.
+    let line = "size 3 1 5 s2 o3 | g2 o3 | s2 o3 | / entry 0 0 2 +x exit 2 0 2 -x";
+    let level = Level::from_puzzle(&decode(line).unwrap());
+    let goo: Vec<[i32; 3]> = level.of_kind(&ItemKind::Goo).map(|i| i.cell).collect();
+    assert_eq!(goo, vec![[1, 0, 1], [1, 0, 0]]);
+    assert!(level.goo([1, 0, 0]) && level.goo([1, 0, 1]) && !level.goo([1, 0, 2]));
+    let problems = level.mount_problems();
+    assert!(!problems.iter().any(|p| p.contains("goo")), "{problems:?}");
+}
+
+#[test]
+fn rails_mount_on_a_solid_side() {
+    // Tokens don't say which wall a rail platform runs on. Along the room's +x wall,
+    // travelling +y, the wall on its left is open but the one on its right is solid.
+    const ROOM: &str = "size 6 6 4 s1 o3 | / entry 2 0 1 +y exit 3 5 1 -y";
+    let level = Level::from_puzzle(&decode(&format!("{ROOM} rail 5 1 1 5 3 1 osc")).unwrap());
+    let rail = level.of_kind(&ItemKind::Rail).next().unwrap();
+    assert_eq!(rail.normal, Some(Dir::NegX));
+    assert_eq!(level.rails[0].end, [5, 3, 1]);
+    let problems = level.mount_problems();
+    assert!(problems.is_empty(), "{problems:?}");
+    // With its left wall solid it keeps the usual mounting, angles and all.
+    let left = decode(&format!("{ROOM} rail 5 3 1 5 1 1 osc")).unwrap();
+    let mut b = glados::builder::Builder::new(glados::generator::TITLE, [6, 6, 4]);
+    b.rail([5, 3, 1], [5, 1, 1], true, true);
+    let angles = |p: &Puzzle| -> Vec<Option<[f64; 3]>> {
+        p.items
+            .iter()
+            .filter(|i| i.kind().starts_with("ITEM_RAIL"))
+            .map(|i| i.angles())
+            .collect()
+    };
+    assert_eq!(angles(&left), angles(&b.build()));
+    // On the other wall the platform has the editor's pitch 90 and its up away from it.
+    let right = decode(&format!("{ROOM} rail 0 3 1 0 1 1 osc")).unwrap();
+    assert_eq!(angles(&right)[0], Some([90.0, 0.0, 0.0]));
+    // Mid-room, over the floor: mounted on the floor.
+    let level = Level::from_puzzle(&decode(&format!("{ROOM} rail 2 2 1 2 4 1 off")).unwrap());
+    assert_eq!(level.of_kind(&ItemKind::Rail).next().unwrap().normal, Some(Dir::PosZ));
+    assert!(level.mount_problems().is_empty());
+}
+
+#[test]
+fn pedestals_turn_away_from_panels() {
+    // Tokens don't say which side a pedestal's column is on. With glass on the -x side of its
+    // cell it stands against another side, which the editor allows.
+    const ROOM: &str = "size 6 6 4 s1 o3 | / entry 2 0 1 +y exit 3 5 1 -y";
+    let line = format!("{ROOM} glass 2 2 1 2 2 1 -x +z pedestal 2 2 1 inf > exit");
+    let level = Level::from_puzzle(&decode(&line).unwrap());
+    let problems = level.mount_problems();
+    assert!(problems.is_empty(), "{problems:?}");
+    let pedestal = level.of_kind(&ItemKind::PedestalButton).next().unwrap();
+    assert_eq!(pedestal.angles.and_then(|a| glados::geom::rotate(a, [-1, 0, 0])), Some(Dir::PosX));
+    // Without the glass it keeps -x.
+    let line = format!("{ROOM} pedestal 2 2 1 inf > exit");
+    let level = Level::from_puzzle(&decode(&line).unwrap());
+    let pedestal = level.of_kind(&ItemKind::PedestalButton).next().unwrap();
+    assert_eq!(pedestal.angles, Some([0.0, 0.0, 0.0]));
 }
