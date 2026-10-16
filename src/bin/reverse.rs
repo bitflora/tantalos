@@ -27,8 +27,8 @@
 //! button on that ledge fed by a cube lifted through the portal (`cube_button`); a ledge pedestal
 //! *and* a cube on a floor button, so the gate is an AND (`two_buttons`); or a latching pedestal
 //! across a goo trench, reached with a floor-level portal pair (`goo_crossing`). Every gadget
-//! needs at least one portal trip and ends in a sender that latches, so the way opens and stays
-//! open.
+//! needs at least one portal trip. Every sender latches except `timed`'s pedestal, whose gate
+//! opens only for a dash: the player must be through it before the timer runs out.
 //!
 //! Growing goal-first (place the exit and its gate, then prepend the room before it, ...) is the
 //! reverse-play direction: the forward plan is the construction read backwards. Difficulty is a
@@ -98,7 +98,7 @@ enum Gadget {
     CubeButton,
     /// A pedestal on the ledge AND a cube on a floor button; the gate needs both (AND).
     TwoButtons,
-    /// A floor button across a goo trench: portal over the goo, then press.
+    /// A latching pedestal across a two-cell goo trench: portal over the goo, then press.
     GooCrossing,
 }
 
@@ -119,10 +119,13 @@ impl Gadget {
         Gadget::TwoButtons,
     ];
 
-    /// Actions the construction itself spends on this room; an upper bound on its cost.
+    /// Actions the construction itself spends on this room, ending at its gate (or the exit);
+    /// an upper bound on its cost. Walking on through an open gate costs one more, except after
+    /// `Timed`, whose dash ends past the gate (see `construct`).
     fn actions(self) -> usize {
         match self {
-            Gadget::Latch | Gadget::Timed => 5,
+            Gadget::Latch => 5,
+            Gadget::Timed => 4,
             Gadget::CubeButton => 6,
             Gadget::TwoButtons => 7,
             Gadget::GooCrossing => 4,
@@ -150,8 +153,9 @@ impl Gadget {
     }
 }
 
-/// Seconds a `Timed` pedestal stays on. Long enough to drop to the doorway on foot; short
-/// enough that the dash is the point of the room.
+/// Seconds a `Timed` pedestal stays on. The dash (drop off the ledge, walk to the doorway) is
+/// about 3 s, so this leaves room for the gate panel's fold animation, which the solver doesn't
+/// model; short enough that the dash is still the point of the room.
 const TIMED_SECONDS: u32 = 8;
 
 /// The ledge (a balcony at the back) and the two walls a portal pair needs: a white wall at
@@ -192,8 +196,9 @@ fn build_room(b: &mut Builder, s: i32, e: i32, gadget: Gadget) -> Vec<i32> {
             vec![button, pedestal]
         }
         Gadget::GooCrossing => {
-            // A goo trench across the room; white walls on both sides at floor level (the
-            // doorway's own cell is left solid so it stays a surface), and the button beyond.
+            // A goo trench two cells wide (one cell could be jumped) across the room; white walls
+            // on both sides at floor level (the doorway's own cell is left solid so it stays a
+            // surface), and the pedestal beyond.
             let mid = s + 1;
             b.carve([mid, 0, 0], [mid + 1, D - 1, 0]);
             b.goo([mid, DOOR_Y, 0]);
@@ -229,9 +234,15 @@ impl Built {
 fn construct(seed: u64, rooms: i32) -> Built {
     assert!(rooms >= 1);
     let rw = fit_width(rooms).expect("too many rooms for the 32-cell limit");
+    construct_rw(seed, rooms, rw)
+}
+
+/// `construct` with room width `rw` (RW_MIN..=RW_MAX) instead of the widest that fits.
+fn construct_rw(seed: u64, rooms: i32, rw: i32) -> Built {
+    assert!(rooms >= 1 && (RW_MIN..=RW_MAX).contains(&rw));
     let mut rng = Rng::new(seed);
     let width = (rooms - 1) * (rw + 1) + rw;
-    let mut b = Builder::new("Reverse chamber", [width, D, H]);
+    let mut b = Builder::new(&format!("Reverse {seed}"), [width, D, H]);
 
     // Carve the rooms.
     for k in 0..rooms {
@@ -253,6 +264,9 @@ fn construct(seed: u64, rooms: i32) -> Built {
         let gadget = *rng.pick(Gadget::menu(rw));
         let room_senders = build_room(&mut b, s, e, gadget);
         constructed += gadget.actions();
+        if k < rooms - 1 && gadget != Gadget::Timed {
+            constructed += 1;
+        }
         gadgets.push(gadget);
 
         // The gate to the next room: a deployed panel filling the doorway, wired to this
@@ -291,14 +305,8 @@ fn json_line(built: &Built, tokens: &[String], label: &Label) -> String {
         .map(|g| format!("\"{}\"", g.name()))
         .collect();
     format!(
-        "{{\"tokens\":{},\"n_tokens\":{},\"size\":[{},{},{}],{},\"src\":\"reverse\",\
-         \"constructed_len\":{},\"rooms\":{},\"gates\":{},\"gadget\":[{}]}}",
-        dataset::json_str(&tokens.join(" ")),
-        tokens.len(),
-        built.size[0],
-        built.size[1],
-        built.size[2],
-        label.json_fields(),
+        "{{{},\"src\":\"reverse\",\"constructed_len\":{},\"rooms\":{},\"gates\":{},\"gadget\":[{}]}}",
+        dataset::json_body(tokens, built.size, label),
         built.constructed,
         built.gadgets.len(),
         built.gates(),
@@ -317,7 +325,7 @@ struct Args {
     require_solvable: bool,
 }
 
-const USAGE: &str = "usage: glados-reverse [options]
+const USAGE: &str = "usage: reverse [options]   (cargo run --release --bin reverse -- ...)
   --seed N               base seed (default 0)
   --count N              levels to build (default 100)
   --rooms N              fewest rooms per chamber, >= 1 (default 3); the difficulty dial
@@ -345,6 +353,13 @@ fn parse(args: &[String]) -> Result<Args, String> {
             .parse()
             .map_err(|_| format!("{what}: not a number"))
     };
+    // A room count: 1..=32 (more never fit the 32-cell limit; `main` checks the exact bound).
+    let rooms = |v: Option<&String>, what: &str| -> Result<i32, String> {
+        match num(v, what)? {
+            n @ 1..=32 => Ok(n as i32),
+            n => Err(format!("{what} {n}: must be 1..=32")),
+        }
+    };
     while i < args.len() {
         match args[i].as_str() {
             "--seed" => {
@@ -356,11 +371,11 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--rooms" => {
-                a.rooms = num(args.get(i + 1), "--rooms")?.max(1) as i32;
+                a.rooms = rooms(args.get(i + 1), "--rooms")?;
                 i += 2;
             }
             "--rooms-max" => {
-                a.rooms_max = Some(num(args.get(i + 1), "--rooms-max")?.max(1) as i32);
+                a.rooms_max = Some(rooms(args.get(i + 1), "--rooms-max")?);
                 i += 2;
             }
             "--budget" => {
@@ -544,39 +559,76 @@ mod tests {
     }
 
     /// Every room's button(s) wire to exactly one gate (the panel to the next room, or the
-    /// exit in the last room): one `> exit`, and at least one `> panel` per non-final room.
+    /// exit in the last room): each sender has one `>`, every panel gets one, and the exit
+    /// gets the last room's.
     #[test]
     fn gates_are_wired_in_series() {
-        for rooms in 1..=4 {
-            let built = construct(1, rooms);
-            assert_eq!(built.gadgets.len(), rooms as usize);
-            assert_eq!(built.gates(), (rooms - 1) as usize);
-            let toks = tokens::encode(&built.puzzle).expect("encodes");
-            let wires = |recv: &str| {
-                toks.windows(2)
-                    .filter(|w| w[0] == ">" && w[1] == recv)
-                    .count()
-            };
-            assert!((1..=2).contains(&wires("exit")), "rooms={rooms}");
-            assert!(wires("panel") >= (rooms - 1) as usize, "rooms={rooms}");
+        for seed in 0..8 {
+            for rooms in 1..=4 {
+                let built = construct(seed, rooms);
+                assert_eq!(built.gadgets.len(), rooms as usize);
+                assert_eq!(built.gates(), (rooms - 1) as usize);
+                let toks = tokens::encode(&built.puzzle).expect("encodes");
+                let senders = |g: &Gadget| if *g == Gadget::TwoButtons { 2 } else { 1 };
+                let total: usize = built.gadgets.iter().map(senders).sum();
+                let last = senders(built.gadgets.last().unwrap());
+                let arrows: Vec<usize> = (0..toks.len()).filter(|&i| toks[i] == ">").collect();
+                let ctx = format!("seed={seed} rooms={rooms}");
+                assert_eq!(arrows.len(), total, "{ctx}: one wire per sender");
+                let to_exit = arrows.iter().filter(|&&i| toks[i + 1] == "exit").count();
+                assert_eq!(to_exit, last, "{ctx}: the last room gates the exit");
+                let panels: std::collections::BTreeSet<&str> = arrows
+                    .iter()
+                    .filter(|&&i| toks[i + 1] == "panel")
+                    .map(|&i| toks[i + 2].as_str())
+                    .collect();
+                assert_eq!(panels.len(), (rooms - 1) as usize, "{ctx}: every panel is wired");
+            }
         }
     }
 
-    /// Every gadget kind is reachable and every constructed chamber is solvable.
-    #[test]
-    fn every_gadget_is_solvable() {
+    /// Every gadget kind is reachable at width `rw`, every chamber is solvable, and the
+    /// construction's own plan length bounds the solver's minimum.
+    fn check_solvable(rw: i32, seeds: u64) {
         let mut seen = std::collections::HashSet::new();
-        for seed in 0..40 {
-            let built = construct(seed, 2);
+        for seed in 0..seeds {
+            let built = construct_rw(seed, 2, rw);
             seen.extend(built.gadgets.iter().copied());
             tokens::encode(&built.puzzle).expect("encodes");
             match dataset::label(&built.puzzle, 300_000, seed) {
-                Label::Solvable { .. } => {}
-                other => panic!("seed {seed}: {other:?}"),
+                Label::Solvable { min_len, .. } => {
+                    assert!(
+                        min_len <= built.constructed,
+                        "rw={rw} seed {seed} {:?}: min_len {min_len} > constructed {}",
+                        built.gadgets,
+                        built.constructed
+                    );
+                    // The gates are shut, so no shot reaches the last room from the first:
+                    // the earlier rooms cost something too.
+                    let last = built.gadgets.last().unwrap().actions();
+                    assert!(
+                        min_len > last,
+                        "rw={rw} seed {seed} {:?}: min_len {min_len} skips the earlier rooms",
+                        built.gadgets
+                    );
+                }
+                other => panic!("rw={rw} seed {seed} {:?}: {other:?}", built.gadgets),
             }
         }
-        for g in Gadget::ALL {
-            assert!(seen.contains(&g), "gadget {g:?} was never drawn");
+        for g in Gadget::menu(rw) {
+            assert!(seen.contains(g), "rw={rw}: gadget {g:?} was never drawn");
         }
+    }
+
+    #[test]
+    fn every_gadget_is_solvable() {
+        check_solvable(RW_MAX, 40);
+    }
+
+    /// The narrow rooms that 5- and 6-room chambers get.
+    #[test]
+    fn narrow_rooms_are_solvable() {
+        check_solvable(RW_MIN, 40);
+        check_solvable(RW_MIN + 1, 40);
     }
 }

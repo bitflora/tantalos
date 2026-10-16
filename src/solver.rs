@@ -474,6 +474,9 @@ pub struct Model {
     /// Hazards that are fizzlers, and those that are laser fields.
     pub fizzlers: u64,
     pub lasers: u64,
+    /// Per panel that can stop shots: its device bit and its bit in shot masks
+    /// (`Sight::panel_shift`).
+    panel_shots: Vec<(usize, u64)>,
     /// Devices, their bits, and how each bit follows from the state.
     pub devices: Devices,
     /// Per switch, the device bits that are on only while it is (`BitRule`).
@@ -1053,6 +1056,8 @@ impl Model {
             .enumerate()
             .filter(|(_, h)| h.kind == HazardKind::Fizzler)
             .fold(0u64, |m, (i, _)| m | 1 << i);
+        // Deployed 90° panels stop shots too: their mask bits come after the hazards'.
+        let panel_shift = Some(level.hazards.len() as u32);
         let rules = match mode {
             Mode::Conservative => Rules {
                 cube_steps: false,
@@ -1063,6 +1068,7 @@ impl Model {
                     switchable_hazards,
                     strict_grazing: true,
                     corner_targets: false,
+                    panel_shift,
                 },
                 turret_sight,
                 run_past_turrets: false,
@@ -1077,6 +1083,7 @@ impl Model {
                     switchable_hazards,
                     strict_grazing: false,
                     corner_targets: true,
+                    panel_shift,
                 },
                 turret_sight,
                 run_past_turrets: true,
@@ -1284,6 +1291,13 @@ impl Model {
             WalkGraph::default()
         };
         let portals = Portals::build(geo, &graph, rules.sight, &extras);
+        // (device bit, shot mask bit) of each panel that stops shots while deployed.
+        let panel_shots: Vec<(usize, u64)> = (0..level.panels.len())
+            .filter_map(|i| {
+                let k = rules.sight.panel_shift? + i as u32;
+                Some((devices.panel_bit[i], 1u64.checked_shl(k)?))
+            })
+            .collect();
         let beam_end_class: HashMap<Face, usize> = portals
             .classes
             .iter()
@@ -1451,6 +1465,7 @@ impl Model {
             footholds,
             knock_from,
             fizzlers: kind_mask(HazardKind::Fizzler),
+            panel_shots,
             lasers: kind_mask(HazardKind::LaserField),
             exit_masks,
             pouring: (0..gels.len())
@@ -1541,6 +1556,12 @@ impl Model {
     pub fn hazards_on_in(&self, s: &State, held: Option<Signal>) -> u64 {
         let cx = self.context();
         self.hazards_on(&cx.lay, &self.pack(&cx.lay, s), held)
+    }
+
+    /// `shot_stops` in state `s`: a shot with mask `m` is clear when `m & stops == 0`.
+    pub fn shot_stops_in(&self, s: &State, held: Option<Signal>) -> u64 {
+        let cx = self.context();
+        self.shot_stops(&cx.lay, &self.pack(&cx.lay, s), held)
     }
 
     /// Which device bits are bridges (direct or through a portal), moving platforms (pistons
@@ -1999,6 +2020,23 @@ impl Model {
         (lit, hit)
     }
 
+    /// The shot mask bits that stop a shot now: fizzlers that are on and deployed panels.
+    fn shot_stops(&self, lay: &Layout, s: &[u32], held: Option<Signal>) -> u64 {
+        let mut stops = self.hazards_on(lay, s, held) & self.fizzlers;
+        if !self.panel_shots.is_empty() {
+            let dev = match held {
+                None => dev_of(s),
+                Some(_) => self.device_bits(lay, s, held),
+            };
+            for &(bit, m) in &self.panel_shots {
+                if dev & (1 << bit) != 0 {
+                    stops |= m;
+                }
+            }
+        }
+        stops
+    }
+
     /// Bit `h`: hazard `h` is on.
     fn hazards_on(&self, lay: &Layout, s: &[u32], held: Option<Signal>) -> u64 {
         let mut on = 0;
@@ -2349,12 +2387,12 @@ impl Model {
         sc.foot.clear();
         for &b in &self.footholds[r] {
             if !cubes.contains(&self.button_code(b)) {
-                let on = self.hazards_on(lay, s, Some(Signal::Floor(b)));
-                sc.foot.push((b, on));
+                sc.foot.push((b, self.shot_stops(lay, s, Some(Signal::Floor(b)))));
             }
         }
-        // Whether one of the shots with these masks gets past the fizzlers.
-        let clear = |masks: &Masks, on: u64| masks.iter().any(|&m| m & on & self.fizzlers == 0);
+        // Whether one of the shots with these masks gets past the fizzlers and panels.
+        let stops = self.shot_stops(lay, s, None);
+        let clear = |masks: &Masks, stops: u64| masks.iter().any(|&m| m & stops == 0);
         let plain = |p: Option<usize>| p.is_none_or(|c| !self.special[c]);
         for color in Color::BOTH {
             let me = color as usize;
@@ -2389,12 +2427,12 @@ impl Model {
                     (Some(v), true) => (&v[r], v[r].contains(&0)),
                     _ => (&class.visible_from[r], t.open),
                 };
-                let stand_on = if open || clear(visible, on) {
+                let stand_on = if open || clear(visible, stops) {
                     Some(None)
                 } else {
                     sc.foot
                         .iter()
-                        .find(|&&(b, on)| clear(&self.button_sight[b][c], on))
+                        .find(|&&(b, stops)| clear(&self.button_sight[b][c], stops))
                         .map(|&(b, _)| Some(b))
                 };
                 if let Some(stand_on) = stand_on {

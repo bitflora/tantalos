@@ -803,7 +803,7 @@ impl<'a> Grounder<'a> {
                 stand_on,
             } => {
                 let k = color as usize;
-                let on = model.hazards_on_in(s, stand_on.map(Signal::Floor));
+                let stops = model.shot_stops_in(s, stand_on.map(Signal::Floor));
                 let faces = &model.portals.classes[class].faces;
                 let other = h.portals[1 - k];
                 // A shot along a wall from close to it rarely lands in the game: first look for
@@ -838,9 +838,9 @@ impl<'a> Grounder<'a> {
                             Some((cell, point, facing)) => portals::point_shot(
                                 level, c, eye, cell, point, facing, rules.sight,
                             )
-                            .is_some_and(|m| m & on & model.fizzlers == 0),
+                            .is_some_and(|m| m & stops == 0),
                             None => portals::shots_from(level, c, eye, *f, rules.sight)
-                                .any(|m| m & on & model.fizzlers == 0),
+                                .any(|m| m & stops == 0),
                         };
                         let (eye, face) = portals::eye_points(level, c)
                             .into_iter()

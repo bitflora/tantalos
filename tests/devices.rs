@@ -217,3 +217,24 @@ fn decoder_checks_device_geometry() {
         1
     );
 }
+
+#[test]
+fn deployed_panel_gate_stops_shots() {
+    use glados::portals::{shots, Sight};
+    let level = Level::from_puzzle(&fixtures::panel_gate());
+    // Standing on its -x hinge edge, the panel at (3, 1, 1) stands across the face to (2, 1, 1).
+    assert_eq!(level.face([2, 1, 1], Dir::PosX).panel, Some(0));
+    assert_eq!(level.face([3, 1, 1], Dir::NegX).panel, Some(0));
+    let sight = |panel_shift| Sight {
+        blocking_hazards: 0,
+        switchable_hazards: 0,
+        strict_grazing: true,
+        corner_targets: false,
+        panel_shift,
+    };
+    // From the near side, the far end wall: clear only while the panel is down.
+    let far = ([6, 1, 1], Dir::PosX);
+    let masks: Vec<u64> = shots(&level, [1, 1, 1], far, sight(Some(5))).collect();
+    assert!(!masks.is_empty() && masks.iter().all(|&m| m == 1 << 5), "{masks:?}");
+    assert!(shots(&level, [1, 1, 1], far, sight(None)).any(|m| m == 0));
+}

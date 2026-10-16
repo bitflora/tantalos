@@ -306,16 +306,22 @@ pub struct Sample {
 impl Sample {
     /// One JSONL line (no newline).
     pub fn json(&self) -> String {
-        format!(
-            "{{\"tokens\":{},\"n_tokens\":{},\"size\":[{},{},{}],{}}}",
-            json_str(&self.tokens.join(" ")),
-            self.tokens.len(),
-            self.genome.size[0],
-            self.genome.size[1],
-            self.genome.size[2],
-            self.label.json_fields()
-        )
+        format!("{{{}}}", json_body(&self.tokens, self.genome.size, &self.label))
     }
+}
+
+/// The fields of a dataset line, without the braces: `tokens`, `n_tokens`, `size`, then the
+/// label's. Other writers (src/bin/reverse.rs) append their own fields after it.
+pub fn json_body(tokens: &[String], size: [i32; 3], label: &Label) -> String {
+    format!(
+        "\"tokens\":{},\"n_tokens\":{},\"size\":[{},{},{}],{}",
+        json_str(&tokens.join(" ")),
+        tokens.len(),
+        size[0],
+        size[1],
+        size[2],
+        label.json_fields()
+    )
 }
 
 fn sample(genome: &Genome, budget: usize, seed: u64) -> Option<Sample> {

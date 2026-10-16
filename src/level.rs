@@ -569,6 +569,9 @@ pub struct FaceInfo {
     pub barrier: Option<BarrierKind>,
     /// Bit `i` = `Level::hazards[i]` has a field here.
     pub hazards: u64,
+    /// The angled or glass panel (index in `Level::panels`) that, deployed at 90°, stands
+    /// across this face (on its hinge edge; `dynamics`). It stops shots while deployed.
+    pub panel: Option<usize>,
 }
 
 pub const MAX_HAZARDS: usize = 64;
@@ -698,8 +701,21 @@ impl Level {
         level.decode_barriers(&extent_links);
         level.decode_turrets_and_gel(&paint_links);
         level.decode_devices(&extent_links, &plate_links, &box_links);
+        level.mark_panel_faces();
         level.index_cells();
         level
+    }
+
+    /// `FaceInfo::panel`: the face each 90° angled or glass panel stands across when deployed.
+    fn mark_panel_faces(&mut self) {
+        for (i, p) in self.panels.iter().enumerate() {
+            if p.kind == PanelKind::Flip || p.angle != 90 {
+                continue;
+            }
+            if let Some(f) = self.face_slot(p.cell, p.hinge()) {
+                self.faces[f].panel.get_or_insert(i);
+            }
+        }
     }
 
     /// Index the floor buttons and turrets by cell, for the per-landing lookups the solver's

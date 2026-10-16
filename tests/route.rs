@@ -34,12 +34,14 @@ fn legal_walk(geo: Geo, from: Cell, cells: &[Cell]) -> bool {
 fn check(name: &str, level: &Level, r: &Route) {
     let devices = Devices::build(level).unwrap();
     let geo = Geo::new(level, &devices.dyn_);
-    // Line of sight as the conservative rules see it, fizzlers aside (`route` checks those).
+    // Line of sight as the conservative rules see it, fizzlers and deployed panels aside
+    // (`route` checks those).
     let sight = Sight {
         blocking_hazards: 0,
         switchable_hazards: u64::MAX,
         strict_grazing: true,
         corner_targets: false,
+        panel_shift: None,
     };
     let mut player = r.start.player;
     assert_eq!(player, level.entry().unwrap().cell, "{name}");

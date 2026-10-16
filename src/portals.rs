@@ -17,7 +17,9 @@
 //! - Panels (`dynamics`): a flip panel's face takes portals only while its white side is out;
 //!   flipping it clears a portal on it. A portal on an angled panel stays on it as it moves; a
 //!   deployed 90° panel's face looks across its hinge edge, a tilted one flings along its tilted
-//!   normal.
+//!   normal. A deployed 90° angled or glass panel stands across the face on its hinge edge and
+//!   stops shots through it (`Sight::panel_shift`). ASSUMPTION: a deployed 30°-60° panel lets
+//!   shots past it (it only covers part of its cell).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -40,6 +42,10 @@ pub struct Sight {
     pub strict_grazing: bool,
     /// Also aim at four points inset from the face's corners, not just its centre.
     pub corner_targets: bool,
+    /// Deployed 90° panels (`FaceInfo::panel`) stop shots: a shot past panel `i` is clear and
+    /// has bit `panel_shift + i` in its mask, for the solver to check against the panels'
+    /// state (past bit 63 they don't stop shots). `None`: panels never stop shots.
+    pub panel_shift: Option<u32>,
 }
 
 impl Sight {
@@ -48,6 +54,7 @@ impl Sight {
         switchable_hazards: 0,
         strict_grazing: true,
         corner_targets: false,
+        panel_shift: None,
     };
 }
 
@@ -605,7 +612,7 @@ pub fn shots_from(
 }
 
 /// Whether a shot crossing from `c` to its neighbour in `d` gets through, and if so the
-/// switchable hazards it crosses.
+/// switchable hazards and panels it crosses.
 fn crossing(level: &Level, c: Cell, d: Dir, sight: Sight) -> Option<u64> {
     let n = step(c, d);
     if level.solid(n) {
@@ -613,7 +620,11 @@ fn crossing(level: &Level, c: Cell, d: Dir, sight: Sight) -> Option<u64> {
     }
     let f = level.face(c, d);
     let blocked = f.barrier == Some(BarrierKind::Glass) || f.hazards & sight.blocking_hazards != 0;
-    (!blocked).then_some(f.hazards & sight.switchable_hazards)
+    let panel = match (f.panel, sight.panel_shift) {
+        (Some(i), Some(k)) => 1u64.checked_shl(k + i as u32).unwrap_or(0),
+        _ => 0,
+    };
+    (!blocked).then_some(f.hazards & sight.switchable_hazards | panel)
 }
 
 /// Walks the voxels the segment from `p0` (in cell `eye`) to `p1` crosses (Amanatides & Woo),
