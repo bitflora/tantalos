@@ -272,10 +272,10 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
     for i in 0..cubes.len() {
         let mut fewer = cubes.clone();
         fewer.remove(i);
-        model.start.cubes = fewer;
+        model.set_start_cubes(fewer);
         unnecessary_cubes += solvable(model) as usize;
     }
-    model.start.cubes = cubes;
+    model.set_start_cubes(cubes);
     let classes = model.portals.classes.len();
     let mut necessary_classes = 0;
     let fired = |c: usize| {

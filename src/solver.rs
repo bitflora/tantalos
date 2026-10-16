@@ -418,6 +418,9 @@ pub struct Model {
     pub pedestals: Vec<Pedestal>,
     pub hazards: Vec<HazardInfo>,
     pub start: State,
+    /// How states are packed. It depends only on the model's cubes, so it is built once in
+    /// `new`; `set_start_cubes` rebuilds it when the metrics ablate one.
+    layout: Layout,
     pub exit_region: usize,
     pub exit_cell: Cell,
     exit_inputs: Vec<Signal>,
@@ -1418,7 +1421,7 @@ impl Model {
                 .filter(|(_, h)| h.kind == kind)
                 .fold(0u64, |m, (i, _)| m | 1 << i)
         };
-        Ok(Model {
+        let mut model = Model {
             edge_range: ranges(&edge_from),
             gel_move_range: ranges(&gel_move_from),
             fire_from,
@@ -1484,6 +1487,7 @@ impl Model {
                 lit: 0,
                 dev: 0,
             },
+            layout: Layout::empty(),
             exit_region,
             exit_inputs,
             tosses,
@@ -1505,12 +1509,14 @@ impl Model {
             complete,
             projector_kinds: level.projectors.iter().map(|p| p.kind).collect(),
             on_platform,
-        })
+        };
+        model.layout = model.layout_for(&model.start.cubes);
+        Ok(model)
     }
 
     /// The start state: paint from splats without droppers, then whatever the droppers pour.
     pub fn initial(&self) -> State {
-        let cx = self.context(&self.start.cubes);
+        let cx = self.context();
         self.unpack(&cx.lay, &self.initial_packed(&cx))
     }
 
@@ -1520,7 +1526,7 @@ impl Model {
 
     /// Whether a pouring gel stream goes through a portal in state `s`.
     pub fn redirected(&self, s: &State) -> bool {
-        let cx = self.context(&s.cubes);
+        let cx = self.context();
         let s = self.pack(&cx.lay, s);
         (0..self.gels.len()).any(|g| {
             self.gels[g].dropper.is_some()
@@ -1533,7 +1539,7 @@ impl Model {
     /// Bit `h`: hazard `h` is on in state `s`, with `held` on for the moment as well (a running
     /// timed pedestal, or a floor button the player stands on).
     pub fn hazards_on_in(&self, s: &State, held: Option<Signal>) -> u64 {
-        let cx = self.context(&s.cubes);
+        let cx = self.context();
         self.hazards_on(&cx.lay, &self.pack(&cx.lay, s), held)
     }
 
@@ -1575,18 +1581,18 @@ impl Model {
     }
 
     pub fn exit_open(&self, s: &State) -> bool {
-        let cx = self.context(&s.cubes);
+        let cx = self.context();
         self.exit_open_with(&cx.lay, &self.pack(&cx.lay, s), None)
     }
 
     pub fn is_goal(&self, s: &State) -> bool {
-        let cx = self.context(&s.cubes);
+        let cx = self.context();
         self.goal(&cx.lay, &self.pack(&cx.lay, s))
     }
 
     /// Every action possible in state `s`, with the state it leads to.
     pub fn successors(&self, s: &State) -> Vec<(Action, State)> {
-        let cx = self.context(&s.cubes);
+        let cx = self.context();
         let s = self.pack(&cx.lay, s);
         let mut settled = s.clone();
         self.settle(&cx.lay, &mut settled);
@@ -1613,7 +1619,7 @@ impl Model {
     }
 
     fn search(&self, max_states: usize, max_len: Option<usize>) -> Outcome {
-        let cx = self.context(&self.start.cubes);
+        let cx = self.context();
         let mut table = Table::new(cx.lay.len);
         let start = self.initial_packed(&cx);
         table.insert(&start, Table::hash(&start));
@@ -1672,7 +1678,7 @@ impl Model {
     /// Explores every reachable state (up to `max_states`), past goals too: metrics need the
     /// whole graph to find dead ends.
     pub fn explore(&self, max_states: usize) -> StateSpace {
-        let cx = self.context(&self.start.cubes);
+        let cx = self.context();
         let mut table = Table::new(cx.lay.len);
         let start = self.initial_packed(&cx);
         table.insert(&start, Table::hash(&start));
@@ -1719,8 +1725,17 @@ impl Model {
         space
     }
 
-    /// How states with these cubes are packed, and the turrets that exist.
-    fn context(&self, cubes: &[Cube]) -> Ctx {
+    /// Replace the model's cubes and repack states to match. The metrics remove one cube at a
+    /// time to test whether the level still solves.
+    pub fn set_start_cubes(&mut self, cubes: Vec<Cube>) {
+        self.start.cubes = cubes;
+        let layout = self.layout_for(&self.start.cubes);
+        self.layout = layout;
+    }
+
+    /// How states with these cubes are packed. Only the cubes' kinds and homes matter, and every
+    /// reachable state shares them, so this is built once and cached in `self.layout`.
+    fn layout_for(&self, cubes: &[Cube]) -> Layout {
         // Cubes are sorted, so interchangeable ones are next to each other.
         let ids: Vec<(CubeKind, CubeLoc)> = cubes.iter().map(|c| (c.kind, c.home)).collect();
         let mut group = vec![(0, 0); ids.len()];
@@ -1732,20 +1747,30 @@ impl Model {
             }
         }
         let paint = CUBES + ids.len();
+        Layout {
+            homes: ids.iter().map(|&(_, home)| self.loc_code(home)).collect(),
+            kinds: ids.iter().map(|&(kind, _)| kind).collect(),
+            group,
+            paint,
+            len: paint + self.paint_faces.len().div_ceil(16),
+        }
+    }
+
+    /// The turrets that exist, as a bit per turret. Metrics switch them off, so this is not part
+    /// of the cached layout.
+    fn turret_mask(&self) -> u32 {
+        self.turret_enabled
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e)
+            .fold(0u32, |m, (i, _)| m | 1 << i)
+    }
+
+    /// How states are packed, and the turrets that exist.
+    fn context(&self) -> Ctx<'_> {
         Ctx {
-            lay: Layout {
-                homes: ids.iter().map(|&(_, home)| self.loc_code(home)).collect(),
-                kinds: ids.iter().map(|&(kind, _)| kind).collect(),
-                group,
-                paint,
-                len: paint + self.paint_faces.len().div_ceil(16),
-            },
-            turrets: self
-                .turret_enabled
-                .iter()
-                .enumerate()
-                .filter(|(_, &e)| e)
-                .fold(0u32, |m, (i, _)| m | 1 << i),
+            lay: &self.layout,
+            turrets: self.turret_mask(),
         }
     }
 
@@ -1839,7 +1864,7 @@ impl Model {
         }
     }
 
-    fn initial_packed(&self, cx: &Ctx) -> Vec<u32> {
+    fn initial_packed(&self, cx: &Ctx<'_>) -> Vec<u32> {
         let mut s = self.pack(&cx.lay, &self.start);
         for (g, gel) in self.gels.iter().enumerate() {
             if gel.dropper.is_none() && self.gel_enabled[g] {
@@ -2223,7 +2248,7 @@ impl Model {
     /// state the search finds is.
     fn expand(
         &self,
-        cx: &Ctx,
+        cx: &Ctx<'_>,
         s: &[u32],
         settled: bool,
         sc: &mut Scratch,
@@ -2232,7 +2257,7 @@ impl Model {
         if s[0] & ESCAPED != 0 || s[0] == DEAD {
             return;
         }
-        let lay = &cx.lay;
+        let lay = cx.lay;
         let r = s[0] as usize;
         let dev = dev_of(s);
         let cubes = lay.cubes(s);
@@ -2492,7 +2517,7 @@ impl Model {
     #[allow(clippy::too_many_arguments)]
     fn dash(
         &self,
-        cx: &Ctx,
+        cx: &Ctx<'_>,
         s: &[u32],
         p: usize,
         cell: Cell,
@@ -2503,7 +2528,7 @@ impl Model {
         let Some(&start) = self.walk.node.get(&cell) else {
             return;
         };
-        let lay = &cx.lay;
+        let lay = cx.lay;
         let timed = Some(Signal::Pedestal(p));
         let on = self.hazards_on(lay, s, timed);
         let dev = if self.devices.is_empty() {
@@ -2797,6 +2822,17 @@ struct Layout {
 }
 
 impl Layout {
+    /// A layout with no cubes and no paint, before `Model::new` fills it in.
+    fn empty() -> Layout {
+        Layout {
+            kinds: Vec::new(),
+            homes: Vec::new(),
+            group: Vec::new(),
+            paint: CUBES,
+            len: CUBES,
+        }
+    }
+
     fn cubes<'a>(&self, s: &'a [u32]) -> &'a [u32] {
         &s[CUBES..self.paint]
     }
@@ -2894,8 +2930,8 @@ pub struct DeviceKinds {
 }
 
 /// What a search needs besides the model: how it packs states, and the turrets that exist.
-struct Ctx {
-    lay: Layout,
+struct Ctx<'a> {
+    lay: &'a Layout,
     turrets: u32,
 }
 
