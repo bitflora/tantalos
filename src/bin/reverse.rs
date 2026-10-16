@@ -19,10 +19,16 @@
 //! A chamber is a row of `rooms` along +x, each `rw` wide, separated by a solid wall with one
 //! one-cell doorway. A deployed angled panel fills each doorway, wired to a button in the room
 //! *before* it: a deployed panel is solid, so it blocks the player and portal shots until the
-//! room's button folds it, and every further panel is still deployed. Inside a room the button
-//! sits on a two-voxel ledge reachable only through a portal pair (a white wall at floor level
-//! and a white wall at ledge level), so each room needs at least one portal trip. The last
-//! room's button is wired to the exit door.
+//! room's button folds it, and every further panel is still deployed. The last room's button is
+//! wired to the exit door.
+//!
+//! What a room demands is its **gadget** (`build_room`), drawn per room from a menu: a latching
+//! or timed pedestal on a two-voxel ledge reached by a portal pair (`latch`, `timed`); a floor
+//! button on that ledge fed by a cube lifted through the portal (`cube_button`); a ledge pedestal
+//! *and* a cube on a floor button, so the gate is an AND (`two_buttons`); or a latching pedestal
+//! across a goo trench, reached with a floor-level portal pair (`goo_crossing`). Every gadget
+//! needs at least one portal trip and ends in a sender that latches, so the way opens and stays
+//! open.
 //!
 //! Growing goal-first (place the exit and its gate, then prepend the room before it, ...) is the
 //! reverse-play direction: the forward plan is the construction read backwards. Difficulty is a
@@ -33,8 +39,9 @@
 //! # Output
 //! One JSON object per line, the same schema `glados dataset` writes (`tokens`, `n_tokens`,
 //! `size`, `verdict`, and for solvable levels `min_len`, `needs_portals`, `metrics`), plus
-//! `"src":"reverse"` and `"constructed_len"` (actions the construction spends; an upper bound on
-//! the true minimum). `train/data.py` reads it as-is; the extra keys are ignored.
+//! `"src":"reverse"`, `"constructed_len"` (actions the construction spends; an upper bound on the
+//! true minimum), `"rooms"`, `"gates"`, and `"gadget"` (the per-room gadget names).
+//! `train/data.py` reads it as-is; the extra keys are ignored.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -79,21 +86,124 @@ fn fit_width(rooms: i32) -> Option<i32> {
     (rw >= RW_MIN).then_some(rw)
 }
 
-/// How a room's button is pressed; both end with the player standing on the ledge (z=LEDGE_Z).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How a room's button is pressed; all end with the player standing on the ledge (z=LEDGE_Z),
+/// except `GooCrossing`, which crosses a goo trench on foot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Gadget {
-    /// A latching pedestal on the ledge: fire, fire, enter, press, drop.
+    /// A latching pedestal on the ledge.
     Latch,
-    /// A floor button on the ledge fed by a cube lifted from the floor: fire, fire, pick up,
-    /// enter, put down, drop.
+    /// A timed pedestal on the ledge: press it and drop to the doorway before it re-arms.
+    Timed,
+    /// A floor button on the ledge, fed by a cube carried through the portal.
     CubeButton,
+    /// A pedestal on the ledge AND a cube on a floor button; the gate needs both (AND).
+    TwoButtons,
+    /// A floor button across a goo trench: portal over the goo, then press.
+    GooCrossing,
 }
 
 impl Gadget {
+    /// All gadgets, in a stable order, for the width-dependent menu.
+    const ALL: [Gadget; 5] = [
+        Gadget::Latch,
+        Gadget::Timed,
+        Gadget::CubeButton,
+        Gadget::TwoButtons,
+        Gadget::GooCrossing,
+    ];
+    /// Gadgets that fit a narrow room (the goo trench needs a longer room).
+    const NARROW: [Gadget; 4] = [
+        Gadget::Latch,
+        Gadget::Timed,
+        Gadget::CubeButton,
+        Gadget::TwoButtons,
+    ];
+
+    /// Actions the construction itself spends on this room; an upper bound on its cost.
     fn actions(self) -> usize {
         match self {
-            Gadget::Latch => 5,
+            Gadget::Latch | Gadget::Timed => 5,
             Gadget::CubeButton => 6,
+            Gadget::TwoButtons => 7,
+            Gadget::GooCrossing => 4,
+        }
+    }
+
+    /// The gadgets worth drawing from at room width `rw`.
+    fn menu(rw: i32) -> &'static [Gadget] {
+        if rw >= 5 {
+            &Gadget::ALL
+        } else {
+            &Gadget::NARROW
+        }
+    }
+
+    /// Short name for the JSON output.
+    fn name(self) -> &'static str {
+        match self {
+            Gadget::Latch => "latch",
+            Gadget::Timed => "timed",
+            Gadget::CubeButton => "cube_button",
+            Gadget::TwoButtons => "two_buttons",
+            Gadget::GooCrossing => "goo_crossing",
+        }
+    }
+}
+
+/// Seconds a `Timed` pedestal stays on. Long enough to drop to the doorway on foot; short
+/// enough that the dash is the point of the room.
+const TIMED_SECONDS: u32 = 8;
+
+/// The ledge (a balcony at the back) and the two walls a portal pair needs: a white wall at
+/// floor level on the near side and a white wall at ledge level on the far side.
+fn ledge_walls(b: &mut Builder, s: i32, e: i32) {
+    b.fill([e - 1, LEDGE_Y, 1], [e, LEDGE_Y + 1, LEDGE_H]);
+    b.paint([s, LEDGE_Y, 1], [s, LEDGE_Y + 1, LEDGE_H], Dir::NegX, true);
+    b.paint(
+        [e, LEDGE_Y, LEDGE_Z],
+        [e, LEDGE_Y + 1, LEDGE_Z + 1],
+        Dir::PosX,
+        true,
+    );
+}
+
+/// Realises one room's gadget in x range `s..=e` and returns the senders that gate the next
+/// room (more than one for `TwoButtons`, so the gate is an AND).
+fn build_room(b: &mut Builder, s: i32, e: i32, gadget: Gadget) -> Vec<i32> {
+    match gadget {
+        Gadget::Latch => {
+            ledge_walls(b, s, e);
+            vec![b.pedestal([e - 1, LEDGE_Y, LEDGE_Z], None)]
+        }
+        Gadget::Timed => {
+            ledge_walls(b, s, e);
+            vec![b.pedestal([e - 1, LEDGE_Y, LEDGE_Z], Some(TIMED_SECONDS))]
+        }
+        Gadget::CubeButton => {
+            ledge_walls(b, s, e);
+            b.cube_dropper([s + 1, LEDGE_Y, H - 1]);
+            vec![b.floor_button([e - 1, LEDGE_Y, LEDGE_Z])]
+        }
+        Gadget::TwoButtons => {
+            ledge_walls(b, s, e);
+            b.cube_dropper([s + 1, 1, H - 1]);
+            let button = b.floor_button([s + 1, DOOR_Y, 1]);
+            let pedestal = b.pedestal([e - 1, LEDGE_Y, LEDGE_Z], None);
+            vec![button, pedestal]
+        }
+        Gadget::GooCrossing => {
+            // A goo trench across the room; white walls on both sides at floor level (the
+            // doorway's own cell is left solid so it stays a surface), and the button beyond.
+            let mid = s + 1;
+            b.carve([mid, 0, 0], [mid + 1, D - 1, 0]);
+            b.goo([mid, DOOR_Y, 0]);
+            b.paint([s, 0, 1], [s, 1, 2], Dir::NegX, true);
+            b.paint([s, 4, 1], [s, 5, 2], Dir::NegX, true);
+            b.paint([e, 0, 1], [e, 1, 2], Dir::PosX, true);
+            b.paint([e, 4, 1], [e, 5, 2], Dir::PosX, true);
+            // A latching pedestal (a bare floor button would release as the player walks on
+            // to the doorway, and there is no cube here to hold it down).
+            vec![b.pedestal([e - 1, DOOR_Y, 1], None)]
         }
     }
 }
@@ -136,47 +246,34 @@ fn construct(seed: u64, rooms: i32) -> Built {
 
     let mut gadgets = Vec::new();
     let mut constructed = 0;
-    let mut senders: Vec<i32> = Vec::new();
+    let mut senders: Vec<Vec<i32>> = Vec::new();
     for k in 0..rooms {
         let s = room_start(k, rw);
         let e = s + rw - 1;
-
-        // The ledge (a balcony at the back) and the two walls a portal pair needs: a white wall
-        // at floor level on the near side and a white wall at ledge level on the far side.
-        b.fill([e - 1, LEDGE_Y, 1], [e, LEDGE_Y + 1, LEDGE_H]);
-        b.paint([s, LEDGE_Y, 1], [s, LEDGE_Y + 1, LEDGE_H], Dir::NegX, true);
-        b.paint([e, LEDGE_Y, LEDGE_Z], [e, LEDGE_Y + 1, LEDGE_Z + 1], Dir::PosX, true);
-
-        let gadget = if rng.chance(0.5) {
-            Gadget::Latch
-        } else {
-            Gadget::CubeButton
-        };
-        let sender = match gadget {
-            Gadget::Latch => b.pedestal([e - 1, LEDGE_Y, LEDGE_Z], None),
-            Gadget::CubeButton => {
-                b.cube_dropper([s + 1, LEDGE_Y, H - 1]);
-                b.floor_button([e - 1, LEDGE_Y, LEDGE_Z])
-            }
-        };
+        let gadget = *rng.pick(Gadget::menu(rw));
+        let room_senders = build_room(&mut b, s, e, gadget);
         constructed += gadget.actions();
         gadgets.push(gadget);
-        senders.push(sender);
 
         // The gate to the next room: a deployed panel filling the doorway, wired to this
-        // room's button so it folds (and the way opens) only once the button is pressed.
+        // room's button(s) so it folds (and the way opens) only once they are pressed.
         if k < rooms - 1 {
             let sep = e + 1;
             let panel = b.angled_panel([sep, DOOR_Y, 1], Dir::PosZ, Dir::PosX, 90, true, false, false);
-            b.connect(sender, panel);
+            for &sender in &room_senders {
+                b.connect(sender, panel);
+            }
         }
+        senders.push(room_senders);
     }
 
     b.entry([0, DOOR_Y, 1], Dir::PosX);
     let last = room_start(rooms - 1, rw) + rw - 1;
     let exit = b.exit([last, DOOR_Y, 1], Dir::NegX);
-    // The last room's button gates the exit itself.
-    b.connect(*senders.last().expect("at least one room"), exit);
+    // The last room's button(s) gate the exit itself.
+    for &sender in senders.last().expect("at least one room") {
+        b.connect(sender, exit);
+    }
 
     Built {
         puzzle: b.build(),
@@ -188,9 +285,14 @@ fn construct(seed: u64, rooms: i32) -> Built {
 
 /// The JSONL body fields, plus the reverse-specific ones.
 fn json_line(built: &Built, tokens: &[String], label: &Label) -> String {
+    let gadgets: Vec<String> = built
+        .gadgets
+        .iter()
+        .map(|g| format!("\"{}\"", g.name()))
+        .collect();
     format!(
         "{{\"tokens\":{},\"n_tokens\":{},\"size\":[{},{},{}],{},\"src\":\"reverse\",\
-         \"constructed_len\":{},\"rooms\":{},\"gates\":{}}}",
+         \"constructed_len\":{},\"rooms\":{},\"gates\":{},\"gadget\":[{}]}}",
         dataset::json_str(&tokens.join(" ")),
         tokens.len(),
         built.size[0],
@@ -200,6 +302,7 @@ fn json_line(built: &Built, tokens: &[String], label: &Label) -> String {
         built.constructed,
         built.gadgets.len(),
         built.gates(),
+        gadgets.join(","),
     )
 }
 
@@ -207,7 +310,7 @@ struct Args {
     seed: u64,
     count: usize,
     rooms: i32,
-    rooms_max: i32,
+    rooms_max: Option<i32>,
     budget: usize,
     out: Option<PathBuf>,
     dump: Option<PathBuf>,
@@ -230,7 +333,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         seed: 0,
         count: 100,
         rooms: 3,
-        rooms_max: 3,
+        rooms_max: None,
         budget: 50_000,
         out: None,
         dump: None,
@@ -257,7 +360,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
                 i += 2;
             }
             "--rooms-max" => {
-                a.rooms_max = num(args.get(i + 1), "--rooms-max")?.max(1) as i32;
+                a.rooms_max = Some(num(args.get(i + 1), "--rooms-max")?.max(1) as i32);
                 i += 2;
             }
             "--budget" => {
@@ -319,7 +422,8 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     }
-    let (rmin, rmax) = (a.rooms.min(a.rooms_max), a.rooms.max(a.rooms_max));
+    let rooms_max = a.rooms_max.unwrap_or(a.rooms);
+    let (rmin, rmax) = (a.rooms.min(rooms_max), a.rooms.max(rooms_max));
     match fit_width(rmax) {
         Some(rw) => eprintln!(
             "reverse: {rmin}..{rmax} room(s), room width {rw}, chambers up to {} wide",
@@ -439,9 +543,8 @@ mod tests {
         );
     }
 
-    /// Every room's button is wired to exactly one gate (the panel to the next room, or the
-    /// exit in the last room), so the chamber is a chain with no way around: one `>` wire and
-    /// one `> panel` per non-final room, plus one `> exit`.
+    /// Every room's button(s) wire to exactly one gate (the panel to the next room, or the
+    /// exit in the last room): one `> exit`, and at least one `> panel` per non-final room.
     #[test]
     fn gates_are_wired_in_series() {
         for rooms in 1..=4 {
@@ -449,18 +552,31 @@ mod tests {
             assert_eq!(built.gadgets.len(), rooms as usize);
             assert_eq!(built.gates(), (rooms - 1) as usize);
             let toks = tokens::encode(&built.puzzle).expect("encodes");
-            let arrows = toks.iter().filter(|t| *t == ">").count();
-            let to_panel = toks
-                .windows(2)
-                .filter(|w| w[0] == ">" && w[1] == "panel")
-                .count();
-            let to_exit = toks
-                .windows(2)
-                .filter(|w| w[0] == ">" && w[1] == "exit")
-                .count();
-            assert_eq!(arrows, rooms as usize, "rooms={rooms}: one wire per room");
-            assert_eq!(to_panel, (rooms - 1) as usize, "rooms={rooms}");
-            assert_eq!(to_exit, 1, "rooms={rooms}");
+            let wires = |recv: &str| {
+                toks.windows(2)
+                    .filter(|w| w[0] == ">" && w[1] == recv)
+                    .count()
+            };
+            assert!((1..=2).contains(&wires("exit")), "rooms={rooms}");
+            assert!(wires("panel") >= (rooms - 1) as usize, "rooms={rooms}");
+        }
+    }
+
+    /// Every gadget kind is reachable and every constructed chamber is solvable.
+    #[test]
+    fn every_gadget_is_solvable() {
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..40 {
+            let built = construct(seed, 2);
+            seen.extend(built.gadgets.iter().copied());
+            tokens::encode(&built.puzzle).expect("encodes");
+            match dataset::label(&built.puzzle, 300_000, seed) {
+                Label::Solvable { .. } => {}
+                other => panic!("seed {seed}: {other:?}"),
+            }
+        }
+        for g in Gadget::ALL {
+            assert!(seen.contains(&g), "gadget {g:?} was never drawn");
         }
     }
 }
