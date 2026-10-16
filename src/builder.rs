@@ -725,9 +725,9 @@ impl Builder {
     }
 
     /// `rail`, mounted on the surface against `up` (perpendicular to the track) instead:
-    /// Workshop rails run on either wall, floors and ceilings (ASSUMPTION: `TRAVEL_DIRECTION`
-    /// as in `rail`; the editor checks a platform with its up, `Level` reads the track from
-    /// the extents).
+    /// Workshop rails run on either wall, floors and ceilings. In-game, the editor took 192 of
+    /// 312 such rails, and all but 5 of the rest break rules in editor.rs (2026-10-16).
+    /// ASSUMPTION: `TRAVEL_DIRECTION` as in `rail` (`Level` reads the track from the extents).
     pub fn rail_on(
         &mut self,
         cell: Cell,

@@ -274,19 +274,6 @@ fn goo_items_sit_on_the_floor_of_their_run() {
 }
 
 #[test]
-fn deep_goo_is_a_stack_of_goo_items() {
-    // A two-deep goo pit: the editor fills one layer per goo item and takes goo only on a floor
-    // or on more goo, so the decoder stacks two items in it.
-    let line = "size 3 1 5 s2 o3 | g2 o3 | s2 o3 | / entry 0 0 2 +x exit 2 0 2 -x";
-    let level = Level::from_puzzle(&decode(line).unwrap());
-    let goo: Vec<[i32; 3]> = level.of_kind(&ItemKind::Goo).map(|i| i.cell).collect();
-    assert_eq!(goo, vec![[1, 0, 1], [1, 0, 0]]);
-    assert!(level.goo([1, 0, 0]) && level.goo([1, 0, 1]) && !level.goo([1, 0, 2]));
-    let problems = level.mount_problems();
-    assert!(!problems.iter().any(|p| p.contains("goo")), "{problems:?}");
-}
-
-#[test]
 fn rails_mount_on_a_solid_side() {
     // Tokens don't say which wall a rail platform runs on. Along the room's +x wall,
     // travelling +y, the wall on its left is open but the one on its right is solid.

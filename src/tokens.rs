@@ -892,12 +892,11 @@ enum Target {
 }
 
 /// Builds the puzzle a token sequence describes. Errors name the offending token.
-/// Goo items whose flood (sideways and down, see `Level`) covers exactly `goo` (cells as
-/// (z, y, x)): one per group of goo cells joined sideways at one height that goo from above
-/// doesn't already flow into, on the group's first cell with a floor under it and, if it can,
-/// no item in it (`taken`). Items the flood reaches, like a door or button, then aren't
-/// standing in a goo item. The editor only takes goo on a floor or on more goo, so a group
-/// over deeper goo gets a stack of items down to the floor, on the cell that needs the fewest.
+/// The fewest goo items whose flood (sideways and down, see `Level`) covers exactly
+/// `goo` (cells as (z, y, x)): one per group of goo cells joined sideways at one height that
+/// goo from above doesn't already flow into, on the group's first cell with a floor under it
+/// (the editor only takes goo on a floor) and, if it can, no item in it (`taken`). Items the
+/// flood reaches, like a door or button, then aren't standing in a goo item.
 fn goo_sources(
     goo: &BTreeSet<(i32, i32, i32)>,
     solid: &HashSet<Cell>,
@@ -925,34 +924,14 @@ fn goo_sources(
             continue;
         }
         group.sort();
-        // Over deep goo, the cells below down to the floor, which get goo items too.
-        let stack = |&(z, y, x): &(i32, i32, i32)| -> Option<Vec<(i32, i32, i32)>> {
-            let mut out = Vec::new();
-            let mut z = z - 1;
-            while z >= 0 && !solid.contains(&[x, y, z]) {
-                if !goo.contains(&(z, y, x)) {
-                    return None;
-                }
-                out.push((z, y, x));
-                z -= 1;
-            }
-            Some(out)
-        };
-        let free = |c: &(i32, i32, i32)| !taken.contains(&[c.2, c.1, c.0]);
-        let best = |need_free: bool| {
-            group
-                .iter()
-                .filter_map(|c| Some((c, stack(c)?)))
-                .filter(|(c, s)| !need_free || (free(c) && s.iter().all(free)))
-                .min_by_key(|(_, s)| s.len())
-        };
-        match best(true).or_else(|| best(false)) {
-            Some((&(z, y, x), s)) => {
-                out.push([x, y, z]);
-                out.extend(s.into_iter().map(|(z, y, x)| [x, y, z]));
-            }
-            None => out.push([group[0].2, group[0].1, group[0].0]),
-        }
+        let floored = |&&(z, y, x): &&(i32, i32, i32)| z == 0 || solid.contains(&[x, y, z - 1]);
+        let free = |c: &&(i32, i32, i32)| !taken.contains(&[c.2, c.1, c.0]);
+        let (z, y, x) = *group
+            .iter()
+            .find(|c| floored(c) && free(c))
+            .or_else(|| group.iter().find(floored))
+            .unwrap_or(&group[0]);
+        out.push([x, y, z]);
     }
     out
 }

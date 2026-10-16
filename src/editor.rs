@@ -19,7 +19,7 @@
 //! Published Workshop levels all passed the real editor, so they show what it allows: where
 //! they break a rule here and the in-game checks don't contradict them (2026-10-16), the rule
 //! was narrowed (turrets, splats and relays in fields; turrets and wall lasers sharing cells;
-//! parallel fields; goo on goo). Not where the in-game checks disagree with the Workshop or
+//! parallel fields). Not where the in-game checks disagree with the Workshop or
 //! can't tell the cases apart (a floor button sharing a cell with a light bridge, a field on
 //! the door side of an exit door's cell, a pedestal in a field's end cell, pedestals against
 //! glass).
@@ -233,13 +233,10 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
 
     for it in &level.items {
         match it.kind {
-            // Goo is placed on a floor, or on another goo item: one fills a single layer, so
-            // deep goo is a stack of them (1,085 deep goo bodies in Workshop levels, 2 to 21
-            // deep; ASSUMPTION, the in-game checks only had goo over goo without an item).
-            ItemKind::Goo
-                if !level.solid(step(it.cell, Dir::NegZ))
-                    && !goo_items.contains(&step(it.cell, Dir::NegZ)) =>
-            {
+            // Goo is placed on a floor, not on goo: the game flagged all 7 goo items stacked
+            // on goo items (2026-10-16). How Workshop levels get deep goo (1,085 bodies, up
+            // to 21 deep) is unknown.
+            ItemKind::Goo if !level.solid(step(it.cell, Dir::NegZ)) => {
                 flags.add(it, "goo-not-on-floor")
             }
             // Only cubes and gel splats may anchor on goo (CanAnchorOnGoo).
@@ -375,6 +372,39 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
             let Some(panel) = level.item(b.item) else { continue };
             if b.faces.iter().any(|(c, _)| cells.contains(c)) {
                 flags.pair(st, panel, "panel-in-stairs");
+            }
+        }
+    }
+
+    // A rail platform's track can't hold glass or grating (on any side of a cell) or a field,
+    // nor run over a door's frame. In-game checks of runs/v5-fresh-8h and of its levels with
+    // rails moved to other surfaces (2026-10-16): 222 of 222, 80 of 80 and 83 of 83 flags
+    // agreed with the game.
+    for r in &level.rails {
+        let Some(rail) = level.item(r.item) else { continue };
+        let track = r.track();
+        for b in &level.barriers {
+            let Some(panel) = level.item(b.item) else { continue };
+            if b.faces.iter().any(|(c, _)| track.contains(c)) {
+                flags.pair(rail, panel, "panel-in-rail-track");
+            }
+        }
+        for h in &level.hazards {
+            let Some(field) = level.item(h.item) else { continue };
+            if h.faces.iter().any(|(c, _)| track.contains(c)) {
+                flags.pair(rail, field, "field-in-rail-track");
+            }
+        }
+        if let Some(n) = rail.normal {
+            for door in level
+                .items
+                .iter()
+                .filter(|d| matches!(d.kind, ItemKind::EntryDoor | ItemKind::ExitDoor))
+            {
+                let frame: HashSet<Cell> = embedded(door).into_iter().collect();
+                if track.iter().any(|&c| frame.contains(&step(c, n.opposite()))) {
+                    flags.pair(rail, door, "rail-on-door-frame");
+                }
             }
         }
     }
