@@ -120,6 +120,23 @@ pub fn label(puzzle: &Puzzle, budget: usize, seed: u64) -> Label {
 
 /// `label`, optionally skipping our editor rules (see `Level::mount_problems_with`).
 pub fn label_with(puzzle: &Puzzle, budget: usize, seed: u64, editor_rules: bool) -> Label {
+    label_known(puzzle, budget, seed, editor_rules, None)
+}
+
+/// `label_with`, plus `known`: a solution length the caller has established by construction (the
+/// reverse generator does — see `bin/reverse.rs`). If the conservative search overflows `budget`
+/// before it reaches a goal, the level is reported `Solvable` at `known` rather than `Uncertain`.
+/// Big levels are exactly that case: their reachable state space runs to millions of states, far
+/// past any budget worth paying, yet the construction already knows the way out. A level the
+/// search actually *proves* unsolvable is still `Unsolvable`; only an unfinished search is
+/// overridden, and then the liberal model isn't consulted.
+pub fn label_known(
+    puzzle: &Puzzle,
+    budget: usize,
+    seed: u64,
+    editor_rules: bool,
+    known: Option<usize>,
+) -> Label {
     let level = Level::from_puzzle(puzzle);
     let problems = level.mount_problems_with(editor_rules);
     if !problems.is_empty() {
@@ -166,6 +183,15 @@ pub fn label_with(puzzle: &Puzzle, budget: usize, seed: u64, editor_rules: bool)
         }
         strict => strict,
     };
+    // The conservative search ran out of budget before it reached a goal. A caller that built the
+    // level knows a solution, so trust it; every reverse gadget needs at least one portal trip.
+    if let (Verdict::Unknown, Some(n)) = (&strict, known) {
+        return Label::Solvable {
+            min_len: n,
+            needs_portals: true,
+            metrics: None,
+        };
+    }
     drop(space);
     let liberal = Model::new(&level, Mode::Liberal).expect("same problems as conservative");
     match liberal.solve(budget).verdict {
