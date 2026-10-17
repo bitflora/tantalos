@@ -7,13 +7,21 @@
     .venv/Scripts/python train/run.py stop v4-a
     .venv/Scripts/python train/run.py list            # recent rows of train/runs.csv
     .venv/Scripts/python train/run.py note v4-a "what it showed"
+    .venv/Scripts/python train/run.py ingame v4-a     # redo the Portal 2 steps if they were skipped
 
-`start` returns at once: the run carries on in the background, detached, and survives the
-terminal or session that started it. It trains (train.py) for --hours, evaluates best.pt
-(evaluate.py, about 5 minutes), with --ingame checks the samples in Portal 2 (ingame.py; the game
-must be free), and records the run in train/runs.csv. Everything lands in runs/NAME:
-status.json (what it's doing now), run.log (each phase), train.log, evaluate.log,
-eval/report.md.
+`start` builds target/release/glados.exe, then returns: the run carries on in the background,
+detached, and survives the terminal or session that started it. Every run does every step, in
+order, with nothing to remember:
+  1. train (train.py) for --hours
+  2. evaluate best.pt (evaluate.py, about 5 minutes)
+  3. check the evaluation's levels in Portal 2's own editor (ingame.py, about 15 minutes). It
+     launches the game itself, unless the game is already running (someone playing): then it
+     is skipped, and `status` says INCOMPLETE until `run.py ingame NAME` redoes it.
+  4. pick 5 levels for play-testing (pick.py), checked in Portal 2 too, and copy them into the
+     Puzzle Maker folder as glados-NAME-NNNNN
+  5. record the run in train/runs.csv
+Everything lands in runs/NAME: status.json (what it's doing now), run.log (each phase),
+train.log, evaluate.log, ingame.log, pick.log, eval/report.md.
 
 Settings: data/v5 (all levels-*.jsonl: generated, Workshop, mutants) unless --data; block 1024, batch 16. A fresh run uses
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
@@ -38,7 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
 PY = sys.executable
 GLADOS = ROOT / "target" / "release" / "glados.exe"
-ACTIVE = ("starting", "training", "picking", "evaluating", "ingame")
+ACTIVE = ("starting", "training", "evaluating", "ingame", "picking")
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: no console pops up, none is needed
 DETACH = NO_WINDOW | 0x00000200  # | CREATE_NEW_PROCESS_GROUP
 BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB: outlive the session that started it
@@ -136,8 +144,9 @@ def start(a):
     if busy:
         sys.exit(f"{name_of(busy[0][0])} is still running (one run at a time). "
                  f"Wait for it, or: train/run.py stop {name_of(busy[0][0])}")
-    if not GLADOS.exists():
-        sys.exit(f"{GLADOS} is missing: run `cargo build --release` first")
+    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "glados"], cwd=ROOT)
+    if build.returncode or not GLADOS.exists():
+        sys.exit("`cargo build --release --bin glados` failed (output above): fix that first, no run started")
     data = []
     for pattern in a.data:
         hits = sorted(glob.glob(str(ROOT / pattern))) or sorted(glob.glob(pattern))
@@ -163,10 +172,20 @@ def start(a):
     d.mkdir(parents=True)
     write_status(
         d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours,
-        ingame=a.ingame, init=str(init or ""), train=train, evaluate=evaluate,
+        ingame=not a.no_ingame, init=str(init or ""), train=train, evaluate=evaluate,
     )
+    p = detach(d)
+    ends = now() + datetime.timedelta(hours=a.hours)
+    print(f"started runs/{a.name} (pid {p.pid}) from {init.relative_to(ROOT).as_posix() if init else 'scratch'}")
+    print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=30):%H:%M}")
+    print(f"check:  .venv/Scripts/python train/run.py status {a.name}")
+    print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
+
+
+def detach(d, *steps):
+    """Run pipeline(d, steps) in a process of its own that outlives this one."""
     kw = dict(cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    cmd = [PY, "-u", str(Path(__file__).resolve()), "_pipeline", str(d)]
+    cmd = [PY, "-u", str(Path(__file__).resolve()), "_pipeline", str(d), *steps]
     if sys.platform == "win32":
         try:
             p = subprocess.Popen(cmd, creationflags=DETACH | BREAKAWAY, **kw)
@@ -175,15 +194,39 @@ def start(a):
     else:
         p = subprocess.Popen(cmd, start_new_session=True, **kw)
     write_status(d, pid=p.pid)
-    ends = now() + datetime.timedelta(hours=a.hours)
-    print(f"started runs/{a.name} (pid {p.pid}) from {init.relative_to(ROOT).as_posix() if init else 'scratch'}")
-    print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=6 + 30 * a.ingame):%H:%M}")
-    print(f"check:  .venv/Scripts/python train/run.py status {a.name}")
-    print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
+    return p
 
 
-def pipeline(d):
-    """The detached part of `start`: train, evaluate, (check in game), record."""
+STEPS = ("training", "evaluating", "ingame", "picking")
+
+
+def ingame_outcome(d):
+    """What the in-game check of d's evaluation found: (done, one-line summary)."""
+    try:
+        text = (d / "eval" / "ingame" / "report.md").read_text(encoding="utf-8")
+    except OSError:
+        return False, "not run"
+    for l in text.splitlines():
+        if l.startswith("Skipped"):
+            return False, l
+        if "Game-valid, of levels our checker passes" in l:
+            return True, l.strip("-* ").replace("**", "")
+    return False, "no result in eval/ingame/report.md"
+
+
+def picks_outcome(d):
+    """(done, summary) for the play-test levels pick.py copied in."""
+    try:
+        picks = json.loads((d / "playtest" / "picks.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, "none picked (see pick.log)"
+    names = ", ".join(f"glados-{d.name}-{p['file']}".removesuffix(".p2c") for p in picks)
+    checked = all(p.get("game") == "valid" for p in picks)
+    return checked, f"{names} ({'valid in Portal 2' if checked else 'NOT checked in Portal 2'})"
+
+
+def pipeline(d, steps=STEPS):
+    """The detached part of `start` (and `ingame`): the steps, then record."""
     d = Path(d)
     s = write_status(d, pid=__import__("os").getpid())
     log = open(d / "run.log", "a", encoding="utf-8")
@@ -204,26 +247,33 @@ def pipeline(d):
         if code:
             raise RuntimeError(f"{state} failed (exit {code}); see {d.name}/{logname}")
 
+    game = s.get("ingame", True)
     try:
-        until = (now() + datetime.timedelta(hours=s["hours"])).strftime("%Y-%m-%d %H:%M:%S")
-        write_status(d, train_until=until)
-        phase("training", s["train"] + ["--until", until], "train.log")
+        if "training" in steps:
+            until = (now() + datetime.timedelta(hours=s["hours"])).strftime("%Y-%m-%d %H:%M:%S")
+            write_status(d, train_until=until)
+            phase("training", s["train"] + ["--until", until], "train.log")
         if not (d / "best.pt").exists():
             raise RuntimeError("training wrote no best.pt; see train.log")
-        try:  # always: 5 levels to play-test; a failure here never sinks the run
-            phase("picking", ["train/pick.py", str(d)], "pick.log")
-        except RuntimeError as e:
-            say(f"{e} (carrying on)")
-        phase("evaluating", s["evaluate"], "evaluate.log")
-        if s.get("ingame"):
-            try:
+        if "evaluating" in steps:
+            phase("evaluating", s["evaluate"], "evaluate.log")
+        if "ingame" in steps and game:
+            try:  # the game being busy (or crashing) shouldn't sink the run: status flags it
                 phase("ingame", ["train/ingame.py", str(d / "eval")], "ingame.log")
-            except RuntimeError as e:  # the game being busy shouldn't sink the run
+            except RuntimeError as e:
                 say(f"{e} (carrying on)")
+            say(f"in-game check: {ingame_outcome(d)[1]}")
+        if "picking" in steps:
+            try:  # always: 5 levels to play-test; a failure here never sinks the run
+                phase("picking", ["train/pick.py", str(d)] + ([] if game else ["--no-game"]), "pick.log")
+            except RuntimeError as e:
+                say(f"{e} (carrying on)")
+            say(f"play-test levels: {picks_outcome(d)[1]}")
         write_status(d, state="done", ended=now().isoformat(timespec="seconds"))
         say("done")
     except BaseException as e:  # noqa: BLE001
-        write_status(d, state="failed", ended=now().isoformat(timespec="seconds"), error=str(e))
+        write_status(d, state="failed", failed_in=(read_status(d) or {}).get("state"),
+                     ended=now().isoformat(timespec="seconds"), error=str(e))
         say(f"failed: {e}\n{traceback.format_exc()}")
     finally:
         sys.path.insert(0, str(ROOT / "train"))
@@ -280,17 +330,34 @@ def describe(d):
         lines.append(f"  EVAL: {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse "
                      f"(the main score; differences under ~10 points are noise)")
         lines.append(f"  report: runs/{name_of(d)}/eval/report.md")
-    ig = d / "eval" / "ingame" / "report.md"
-    if ig.exists():
-        for l in ig.read_text(encoding="utf-8").splitlines():
-            if "Game-valid, of levels our checker passes" in l:
-                lines.append("  in game: " + l.strip("-* ").replace("**", ""))
+    game = s.get("ingame", True)
+    ig_done, ig_text = ingame_outcome(d)
+    pk_done, pk_text = picks_outcome(d)
+    if ev.exists():
+        lines.append(f"  in Portal 2: {ig_text if game or ig_done else 'not checked (Portal 2 checks were off for this run)'}")
+    if state == "done" or (d / "playtest" / "picks.json").exists():
+        lines.append(f"  play-test levels in the Puzzle Maker: {pk_text}")
     if state in ("failed", "died"):
-        log = {"picking": "pick.log", "evaluating": "evaluate.log", "ingame": "ingame.log"}.get(s.get("state"), "train.log")
+        log = {"picking": "pick.log", "evaluating": "evaluate.log", "ingame": "ingame.log"}.get(
+            s.get("failed_in", s.get("state")), "train.log")
         lines.append(f"  last lines of {log}:")
         lines += ["    " + l for l in tail(d / log).splitlines()]
-    if state in ("done", "failed", "died", "stopped"):
-        lines.append(f"  next: write what it showed with  train/run.py note {name_of(d)} \"...\"")
+    if state in ACTIVE:
+        return "\n".join(lines)
+    n = name_of(d)
+    todo = []
+    if state == "done" and game and not (ig_done and pk_done):
+        lines[0] += "  -- INCOMPLETE: the Portal 2 check didn't happen"
+        todo.append(f"Tell the user the Portal 2 check was skipped ({ig_text}). Once Portal 2 is closed, run"
+                    f"  .venv/Scripts/python train/run.py ingame {n}  and then wait for it the same way.")
+    if state in ("failed", "died"):
+        todo.append("Report the log lines above to the user. Don't start the run again until the cause is fixed.")
+    todo.append("Report everything above to the user, including the play-test level names.")
+    todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
+                " (give the EVAL solvable %, the Portal 2 game-valid %, and how they compare with"
+                " earlier runs in  train/run.py list)")
+    lines.append("  NEXT STEPS (do all of them):")
+    lines += [f"    {i}. {t}" for i, t in enumerate(todo, 1)]
     return "\n".join(lines)
 
 
@@ -313,7 +380,26 @@ def wait(a):
             break
         time.sleep(30)
     print(describe(d))
-    sys.exit(0 if (read_status(d) or {}).get("state") == "done" else 1)
+    s = read_status(d) or {}
+    if s.get("state") != "done":
+        sys.exit(1)
+    if s.get("ingame", True) and not (ingame_outcome(d)[0] and picks_outcome(d)[0]):
+        sys.exit(2)
+
+
+def ingame(a):
+    """Redo a finished run's Portal 2 steps: check its evaluation, pick checked play-test levels."""
+    d = run_dir(a.name)
+    s = read_status(d)
+    if not s or not (d / "eval" / "samples.jsonl").exists():
+        sys.exit(f"runs/{a.name} has no evaluation to check: did it finish?")
+    busy = running()
+    if busy:
+        sys.exit(f"{name_of(busy[0][0])} is still running (one run at a time). Wait for it first")
+    write_status(d, state="ingame", phase_started=now().isoformat(timespec="seconds"), ingame=True, error="")
+    p = detach(d, "ingame", "picking")
+    print(f"checking runs/{a.name} in Portal 2 in the background (pid {p.pid}), about 20 minutes")
+    print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
 
 
 def stop(a):
@@ -360,7 +446,7 @@ def main():
         i = argv.index("--")
         argv, extra = argv[:i], argv[i + 1 :]
     if argv[:1] == ["_pipeline"]:
-        return pipeline(argv[1])
+        return pipeline(argv[1], argv[2:] or STEPS)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("start", help="start a run in the background")
@@ -370,12 +456,17 @@ def main():
     p.add_argument("--from", dest="from_", default=None, help="continue from this run (or .pt)")
     p.add_argument("--data", nargs="+", default=["data/v5/levels-*.jsonl"])
     p.add_argument("--vocab", default=None, help="default: vocab.txt beside the first data file")
-    p.add_argument("--ingame", action="store_true", help="check samples in Portal 2 afterwards")
+    p.add_argument("--no-ingame", action="store_true",
+                   help="skip the Portal 2 checks. ONLY if the user says the game mustn't be launched")
+    p.add_argument("--ingame", action="store_true", help=argparse.SUPPRESS)  # old flag: always on now
     p.set_defaults(fn=start)
     for cmd, fn, h in [("status", status, "what a run is doing"), ("wait", wait, "block until it ends")]:
         p = sub.add_parser(cmd, help=h)
         p.add_argument("name", nargs="?", help="default: the newest run")
         p.set_defaults(fn=fn)
+    p = sub.add_parser("ingame", help="redo a finished run's Portal 2 steps (if they were skipped)")
+    p.add_argument("name")
+    p.set_defaults(fn=ingame)
     p = sub.add_parser("stop", help="stop a run")
     p.add_argument("name")
     p.set_defaults(fn=stop)
