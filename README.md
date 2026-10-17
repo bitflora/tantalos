@@ -361,6 +361,20 @@ cell, portals, cubes); one that didn't work is put right by teleporting (`setpos
 coordinates, movement and these commands instead of playing. **Not yet run in the game**: it
 has only been run against a fake netcon server.
 
+## Plans as tokens (for a solver net)
+`src/plan.rs` writes a route as plan tokens, one group per step in the level's own coordinates
+and without the walks: `fire blue 0 5 4 -x fire orange 7 0 1 +x pickup 2 2 1 enter orange
+putdown 2 6 3 exit` is the worked example. `glados score --plan` adds each solvable level's
+plan (`"plan"`, or `"plan_error"` when the route can't ground it), and
+`train/plans.py` builds `data/plans/` from the existing data that way. `glados check` replays
+plans a model writes: each step has to fit an action the solver could take next (any face of
+the right face class, any cell of the region it leads to), and the plan has to reach the exit.
+It reports `solved` (with `optimal` when given the level's `min_len`), `illegal` (the step
+that fits nothing, `fail_verb`), `unfinished` or `unparsed`. `--route DIR` writes a solved
+plan as a route for `train/play.py`, grounded by the router, so its faces and cells can
+differ from the plan's. On a first sample, every generated level's plan grounded, but 2-10%
+of Workshop-derived ones didn't (the router can't place some shots and cube drops).
+
 ## Unverified (check in the game)
 
 The later items' rules were fitted to `editoritems.txt`, the editor's instances and compiled

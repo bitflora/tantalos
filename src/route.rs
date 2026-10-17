@@ -204,8 +204,14 @@ pub fn route(level: &Level, budget: usize) -> Result<Route, String> {
         Verdict::Unsolvable => return Err("not solvable under conservative rules".into()),
         Verdict::Unknown => return Err("the state budget ran out".into()),
     };
-    let states = replay(&model, &plan).ok_or("the plan doesn't replay")?;
-    let g = Grounder::new(level, &model);
+    route_plan(level, &model, &plan)
+}
+
+/// Grounds `plan`, a plan of `model` (built from `level`) that reaches the goal: the solver's
+/// own, or one `plan::check` accepted.
+pub fn route_plan(level: &Level, model: &Model, plan: &[Action]) -> Result<Route, String> {
+    let states = replay(model, plan).ok_or("the plan doesn't replay")?;
+    let g = Grounder::new(level, model);
     let start = g.settle(g.start()?, &states[0]);
     g.check(&start, &states[0])
         .map_err(|e| format!("start: {e}"))?;

@@ -192,8 +192,13 @@ pub fn vocab() -> Vec<String> {
     v
 }
 
-fn dir_token(d: Dir) -> &'static str {
+pub fn dir_token(d: Dir) -> &'static str {
     DIRS.iter().find(|(x, _)| *x == d).unwrap().1
+}
+
+/// The direction a token like `+x` names.
+pub fn parse_dir(t: &str) -> Option<Dir> {
+    DIRS.iter().find(|(_, s)| *s == t).map(|(d, _)| *d)
 }
 
 fn num(n: i32) -> String {

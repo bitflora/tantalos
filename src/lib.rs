@@ -8,7 +8,8 @@
 //! Slice 5: levels as token sequences (`tokens`), labelled training data and scoring of model
 //! output (`dataset`).
 //! Turrets (`turrets`) and gel (`gel`): where turrets shoot, where paint lands, and gel moves.
-//! Plans made concrete for playing them in the game (`route`).
+//! Plans made concrete for playing them in the game (`route`), and plans as tokens with a
+//! checker for plans a model writes (`plan`).
 //! Devices that change the geometry as the level is played: bridges, funnels, panels, stairs,
 //! pistons, rails (`dynamics`); laser beams (`lasers`); flings and faith plates (`flings`).
 
@@ -28,6 +29,7 @@ pub mod level;
 pub mod metrics;
 pub mod mutate;
 pub mod p2c;
+pub mod plan;
 pub mod portals;
 pub mod regions;
 pub mod render;

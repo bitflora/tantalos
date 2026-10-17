@@ -17,7 +17,7 @@ use crate::level::Level;
 use crate::metrics::{measure, Assessment, Metrics};
 use crate::p2c::Puzzle;
 use crate::rng::Rng;
-use crate::solver::{Mode, Model, Problem, Verdict};
+use crate::solver::{Action, Mode, Model, Problem, Verdict};
 use crate::tokens;
 
 /// What the solver says about a level.
@@ -137,10 +137,38 @@ pub fn label_known(
     editor_rules: bool,
     known: Option<usize>,
 ) -> Label {
+    label_full(puzzle, budget, seed, editor_rules, known).0
+}
+
+/// `label_with`, plus the conservative plan of a solvable level, as plan tokens (`plan`), or
+/// why it couldn't be grounded (`route`).
+pub fn label_with_plan(
+    puzzle: &Puzzle,
+    budget: usize,
+    seed: u64,
+    editor_rules: bool,
+) -> (Label, Option<Result<String, String>>) {
+    let (label, plan) = label_full(puzzle, budget, seed, editor_rules, None);
+    let plan = plan.map(|plan| {
+        let level = Level::from_puzzle(puzzle);
+        let model = Model::new(&level, Mode::Conservative).map_err(|p| format!("{p:?}"))?;
+        crate::route::route_plan(&level, &model, &plan).map(|r| crate::plan::encode(&r))
+    });
+    (label, plan)
+}
+
+/// `label_known`, with the conservative plan when the search found one.
+fn label_full(
+    puzzle: &Puzzle,
+    budget: usize,
+    seed: u64,
+    editor_rules: bool,
+    known: Option<usize>,
+) -> (Label, Option<Vec<Action>>) {
     let level = Level::from_puzzle(puzzle);
     let problems = level.mount_problems_with(editor_rules);
     if !problems.is_empty() {
-        return Label::Invalid(problems.join("; "));
+        return (Label::Invalid(problems.join("; ")), None);
     }
     // `judge`, with the conservative search shared with the metrics, and the liberal model
     // built only when needed (both models have the same problems).
@@ -161,11 +189,12 @@ pub fn label_known(
                     _ => None,
                 })
                 .collect();
-            return if invalid.is_empty() {
+            let label = if invalid.is_empty() {
                 Label::Unsupported(unsupported.join("; "))
             } else {
                 Label::Invalid(invalid.join("; "))
             };
+            return (label, None);
         }
     };
     let space = model.explore(budget);
@@ -175,30 +204,33 @@ pub fn label_known(
                 Assessment::Solved(m) => Some(m),
                 _ => None,
             };
-            return Label::Solvable {
+            let label = Label::Solvable {
                 min_len: plan.len(),
                 needs_portals: !space.solvable_without_portals(),
                 metrics,
             };
+            return (label, Some(plan));
         }
         strict => strict,
     };
     // The conservative search ran out of budget before it reached a goal. A caller that built the
     // level knows a solution, so trust it; every reverse gadget needs at least one portal trip.
     if let (Verdict::Unknown, Some(n)) = (&strict, known) {
-        return Label::Solvable {
+        let label = Label::Solvable {
             min_len: n,
             needs_portals: true,
             metrics: None,
         };
+        return (label, None);
     }
     drop(space);
     let liberal = Model::new(&level, Mode::Liberal).expect("same problems as conservative");
-    match liberal.solve(budget).verdict {
+    let label = match liberal.solve(budget).verdict {
         Verdict::Unsolvable if strict == Verdict::Unsolvable => Label::Unsolvable,
         Verdict::Solved(plan) => Label::Uncertain(Some(plan.len())),
         _ => Label::Uncertain(None),
-    }
+    };
+    (label, None)
 }
 
 pub fn json_str(s: &str) -> String {

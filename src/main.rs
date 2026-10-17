@@ -25,12 +25,20 @@ const USAGE: &str = "usage:
                                 (default data/levels-<seed>.jsonl). --portals-required true:
                                 drop levels solvable without portals; --max-unsolved: most
                                 share of levels that aren't solvable
-  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [FILE]
+  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [FILE]
                                 decode and solve one token sequence per line of FILE (or
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
                                 --p2c-all every one that parsed. --editor-rules off: don't
                                 call levels invalid for our model of the editor's rules
-                                (for levels the game's editor accepted, e.g. the Workshop)
+                                (for levels the game's editor accepted, e.g. the Workshop).
+                                --plan: add each solvable level's plan as plan tokens
+                                (\"plan\", src/plan.rs), or why it has none (\"plan_error\")
+  glados check [--mode conservative|liberal] [--route DIR] [FILE]
+                                check plans: JSONL with \"tokens\" (a level) and \"plan\" (plan
+                                tokens), optionally \"min_len\", from FILE or stdin; one JSON
+                                verdict per line (solved, illegal, unfinished, unparsed,
+                                invalid, unsupported). --route DIR: NNNNN.p2c and
+                                NNNNN.route.jsonl (as glados route writes) for each solved one
   glados mutate [--seed N] [--per-level N] [--tries N] [--max-tokens N] [--budget N]
                 [--threads N] [--out FILE] [FILE]
                                 1-3 random edits to each level of FILE (JSONL with \"tokens\",
@@ -58,6 +66,7 @@ fn main() -> ExitCode {
         }
         Some("dataset") => run_dataset(&args[1..]),
         Some("score") => run_score(&args[1..]),
+        Some("check") => run_check(&args[1..]),
         Some("mutate") => run_mutate(&args[1..]),
         Some("editor") if args.len() > 1 => editor_check(&args[1..]),
         Some("route") if args.len() == 2 => print_route(Path::new(&args[1])),
@@ -572,8 +581,19 @@ fn run_score(args: &[String]) -> Result<()> {
     let mut p2c_dir = None;
     let mut all = false;
     let mut editor_rules = true;
+    let mut with_plan = false;
     let mut rest = Vec::new();
-    for (flag, value) in flags(args, &mut rest)? {
+    // `--plan` takes no value.
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| {
+            let plan = *a == "--plan";
+            with_plan |= plan;
+            !plan
+        })
+        .cloned()
+        .collect();
+    for (flag, value) in flags(&args, &mut rest)? {
         match flag {
             "--budget" => budget = parse(flag, value)?,
             "--editor-rules" => {
@@ -634,13 +654,22 @@ fn run_score(args: &[String]) -> Result<()> {
                     let tokens = encoded.map_or(String::new(), |t| {
                         format!("\"tokens\":{},", dataset::json_str(&t))
                     });
-                    let label = dataset::label_with(&p, budget, i as u64, editor_rules);
+                    let (label, plan) = if with_plan {
+                        dataset::label_with_plan(&p, budget, i as u64, editor_rules)
+                    } else {
+                        (dataset::label_with(&p, budget, i as u64, editor_rules), None)
+                    };
+                    let plan = match plan {
+                        Some(Ok(t)) => format!(",\"plan\":{}", dataset::json_str(&t)),
+                        Some(Err(e)) => format!(",\"plan_error\":{}", dataset::json_str(&e)),
+                        None => String::new(),
+                    };
                     let keep =
                         (all || matches!(label, dataset::Label::Solvable { .. })).then_some(p);
                     (
                         i,
                         format!(
-                            "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}}}",
+                            "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{}{plan}}}",
                             label.json_fields()
                         ),
                         keep,
@@ -654,6 +683,132 @@ fn run_score(args: &[String]) -> Result<()> {
             if let (Some(dir), Some(mut p)) = (&p2c_dir, puzzle) {
                 p.set_title(&format!("glados sample {i}"));
                 std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
+            }
+            Ok(())
+        },
+    )?;
+    out.flush()?;
+    Ok(())
+}
+
+fn run_check(args: &[String]) -> Result<()> {
+    use glados::mutate::json_field;
+    use glados::plan;
+    use std::io::{BufRead, Write};
+    let mut mode = Mode::Conservative;
+    let mut route_dir = None;
+    let mut rest = Vec::new();
+    for (flag, value) in flags(args, &mut rest)? {
+        match flag {
+            "--mode" => {
+                mode = match value {
+                    "conservative" => Mode::Conservative,
+                    "liberal" => Mode::Liberal,
+                    _ => return Err(format!("--mode: conservative or liberal, not {value}").into()),
+                }
+            }
+            "--route" => route_dir = Some(PathBuf::from(value)),
+            _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
+        }
+    }
+    let input: Box<dyn BufRead + Send> = match rest.as_slice() {
+        [] | ["-"] => Box::new(std::io::BufReader::new(std::io::stdin())),
+        [file] => Box::new(std::io::BufReader::new(
+            std::fs::File::open(file).map_err(|e| format!("{file}: {e}"))?,
+        )),
+        _ => return Err(format!("check takes one input file\n{USAGE}").into()),
+    };
+    let lines = input
+        .lines()
+        .enumerate()
+        .map(|(i, l)| (i + 1, l))
+        .filter(|(_, l)| !l.as_ref().is_ok_and(|l| l.trim().is_empty()));
+    if let Some(dir) = &route_dir {
+        std::fs::create_dir_all(dir)?;
+    }
+    let want_route = route_dir.is_some();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    // A line's verdict as JSON members (after "line"), and the level with its route's lines
+    // if it was solved and routed.
+    type Done = (String, Option<(Puzzle, Vec<String>)>);
+    let one = |line: &str| -> Done {
+        let fail = |verdict: &str, why: &str| {
+            (
+                format!(
+                    "\"verdict\":\"{verdict}\",\"problem\":{}",
+                    dataset::json_str(why)
+                ),
+                None,
+            )
+        };
+        let (Some(toks), Some(plan_text)) = (json_field(line, "tokens"), json_field(line, "plan"))
+        else {
+            return fail("unparsed", "the line needs \"tokens\" and \"plan\"");
+        };
+        let min_len: Option<usize> = json_field(line, "min_len").and_then(|v| v.parse().ok());
+        let puzzle = match tokens::decode(&toks) {
+            Ok(p) => p,
+            Err(e) => return fail("unparsed", &format!("level: {e}")),
+        };
+        let steps = match plan::decode(&plan_text) {
+            Ok(s) => s,
+            Err(e) => return fail("unparsed", &format!("plan: {e}")),
+        };
+        let level = Level::from_puzzle(&puzzle);
+        let model = match Model::new(&level, mode) {
+            Ok(m) => m,
+            Err(problems) => {
+                let invalid = problems.iter().any(|p| matches!(p, Problem::Invalid(_)));
+                let verdict = if invalid { "invalid" } else { "unsupported" };
+                return fail(verdict, &format!("{problems:?}"));
+            }
+        };
+        let c = plan::check(&model, &steps);
+        let verdict = match (c.solved, c.steps_ok < steps.len()) {
+            (true, _) => "solved",
+            (false, true) => "illegal",
+            (false, false) => "unfinished",
+        };
+        let mut json = format!(
+            "\"verdict\":\"{verdict}\",\"steps\":{},\"steps_ok\":{}",
+            steps.len(),
+            c.steps_ok
+        );
+        if c.solved {
+            json.push_str(&format!(",\"len\":{}", c.plan.len()));
+            if let Some(m) = min_len {
+                json.push_str(&format!(",\"optimal\":{}", c.plan.len() <= m));
+            }
+        } else if let Some(s) = steps.get(c.steps_ok) {
+            json.push_str(&format!(",\"fail_verb\":\"{}\"", plan::step_verb(s)));
+        }
+        if let Some(why) = &c.problem {
+            json.push_str(&format!(",\"problem\":{}", dataset::json_str(why)));
+        }
+        let mut routed = None;
+        if c.solved && want_route {
+            match route::route_plan(&level, &model, &c.plan) {
+                Ok(r) => {
+                    let lines = r.json_lines(puzzle.title(), level.size);
+                    routed = Some((puzzle.clone(), lines));
+                }
+                Err(e) => json.push_str(&format!(",\"route_error\":{}", dataset::json_str(&e))),
+            }
+        }
+        (json, routed)
+    };
+    dataset::par_map_ordered(
+        lines,
+        threads,
+        |(i, line)| line.map(|l| (i, one(l.trim()))),
+        |done: std::io::Result<(usize, Done)>| -> Result<()> {
+            let (i, (json, routed)) = done?;
+            writeln!(out, "{{\"line\":{i},{json}}}")?;
+            if let (Some(dir), Some((mut p, lines))) = (&route_dir, routed) {
+                p.set_title(&format!("glados plan {i}"));
+                std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
+                std::fs::write(dir.join(format!("{i:05}.route.jsonl")), lines.join("\n") + "\n")?;
             }
             Ok(())
         },

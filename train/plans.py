@@ -1,0 +1,179 @@
+"""Training data for the solver net: levels with the solver's plans, as plan tokens.
+
+    .venv/Scripts/python train/plans.py                  # every source, into data/plans/
+    .venv/Scripts/python train/plans.py --limit 2000 --out data/plans-try
+
+Re-scores the solvable levels of the usual data files with `glados score --plan` (the solver
+throws its plans away when it labels data, so they are found again) and keeps the ones whose
+plan grounds (`glados route` can make it concrete). Duplicate levels are scored once. The
+Workshop file repeated 20 times in data/v5 is left out; the Workshop levels come from
+data/ws3, scored without our editor rules as the Workshop pipeline does.
+
+Writes, under --out (default data/plans/):
+    parts/SOURCE.jsonl   every planned level of one source (a finished part is reused, so a
+                         run that stopped picks up where it was)
+    train.jsonl          the rest, generated and Workshop
+    test-gen.jsonl       generated levels held out by a hash of their tokens (1 in 50)
+    test-ws.jsonl        the ws3 test split
+Each record: tokens, plan, min_len, needs_portals, metrics, src ("gen" or "ws"), and
+workshop_id for Workshop levels. Plan tokens are documented in src/plan.rs.
+
+Uses the CPU hard (the solver, on every thread): not while a training run or data generation
+is going. Run it with the release binary (`cargo build --release` first).
+"""
+
+import argparse
+import glob
+import hashlib
+import json
+import subprocess
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from sample import DEFAULT_GLADOS  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+# (name, files, editor rules, src, budget): the levels a source holds. Workshop levels were
+# labelled with a budget of 500k (tools/workshop); at 50k some fall to uncertain.
+SOURCES = [
+    ("v5-gen", ["data/v5/levels-[0-9].jsonl"], True, "gen", None),
+    ("v5-mutants", ["data/v5/levels-mutants.jsonl"], False, "gen", None),
+    ("ws3-train", ["data/ws3/train.jsonl"], False, "ws", 500_000),
+    ("ws3-test", ["data/ws3/test.jsonl"], False, "ws", 500_000),
+]
+KEEP = ("tokens", "plan", "min_len", "needs_portals", "metrics")
+TEST_EVERY = 50
+
+
+def held_out(tokens):
+    return int(hashlib.md5(tokens.encode()).hexdigest(), 16) % TEST_EVERY == 0
+
+
+def solvable_records(patterns, seen, limit):
+    """Solvable records of the files, one per level not in `seen` (which grows)."""
+    n = 0
+    for pattern in patterns:
+        paths = sorted(glob.glob(str(ROOT / pattern)))
+        if not paths:
+            sys.exit(f"no data files match {pattern}")
+        for path in paths:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    r = json.loads(line)
+                    if r.get("verdict") != "solvable" or r["tokens"] in seen:
+                        continue
+                    seen.add(r["tokens"])
+                    yield r
+                    n += 1
+                    if limit and n >= limit:
+                        return
+
+
+def plan_part(name, patterns, editor_rules, src, budget, out, seen, args):
+    """Scores one source's solvable levels into `out`; returns counts."""
+    cmd = [str(Path(args.glados).resolve()), "score", "--plan", "--budget", str(budget or args.budget)]
+    if not editor_rules:
+        cmd += ["--editor-rules", "off"]
+    counts = Counter()
+    tmp = out.with_suffix(".partial")
+    start = time.time()
+    with open(tmp, "w", encoding="utf-8") as w:
+        batch = []
+
+        def flush():
+            text = "\n".join(r["tokens"] for r in batch) + "\n"
+            res = subprocess.run(cmd, input=text, capture_output=True, text=True, check=True)
+            for r, s in zip(batch, (json.loads(l) for l in res.stdout.splitlines())):
+                counts["levels"] += 1
+                if "plan" in s:
+                    rec = {k: s[k] for k in KEEP if k in s}
+                    rec["src"] = src
+                    if "workshop_id" in r:
+                        rec["workshop_id"] = r["workshop_id"]
+                    w.write(json.dumps(rec) + "\n")
+                    counts["planned"] += 1
+                elif "plan_error" in s:
+                    counts["plan_error"] += 1
+                    if counts["plan_error"] <= 5:
+                        print(f"  {name}: no plan: {s['plan_error']}", flush=True)
+                else:
+                    counts[f"now {s['verdict']}"] += 1
+            batch.clear()
+            rate = counts["levels"] / max(time.time() - start, 1e-9)
+            print(f"  {name}: {counts['levels']} levels, {counts['planned']} planned, "
+                  f"{rate:.0f}/s", flush=True)
+
+        for r in solvable_records(patterns, seen, args.limit):
+            batch.append(r)
+            if len(batch) >= args.chunk:
+                flush()
+        if batch:
+            flush()
+    tmp.replace(out)
+    counts["seconds"] = round(time.time() - start)
+    return counts
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default="data/plans")
+    ap.add_argument("--only", nargs="*", help="source names to score (default: all)")
+    ap.add_argument("--limit", type=int, default=0, help="most levels per source (0: all)")
+    ap.add_argument("--budget", type=int, default=50_000, help="for generated levels")
+    ap.add_argument("--chunk", type=int, default=2048)
+    ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
+    args = ap.parse_args()
+    if sys.platform == "win32":
+        import ctypes
+
+        # Keep Windows awake for the whole job (ES_CONTINUOUS | ES_SYSTEM_REQUIRED).
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
+
+    out = ROOT / args.out
+    (out / "parts").mkdir(parents=True, exist_ok=True)
+    seen = set()
+    for name, patterns, editor_rules, src, budget in SOURCES:
+        part = out / "parts" / f"{name}.jsonl"
+        if part.exists():
+            # Done earlier: its levels still count as seen, so later sources skip them.
+            with open(part, encoding="utf-8") as f:
+                seen.update(json.loads(l)["tokens"] for l in f if l.strip())
+            print(f"{name}: kept from an earlier run ({part})")
+            continue
+        if args.only and name not in args.only:
+            continue
+        print(f"{name}: scoring", flush=True)
+        counts = plan_part(name, patterns, editor_rules, src, budget, part, seen, args)
+        print(f"{name}: {dict(counts)}", flush=True)
+
+    # Split.
+    files = {k: open(out / f"{k}.jsonl", "w", encoding="utf-8") for k in ("train", "test-gen", "test-ws")}
+    sizes = Counter()
+    plan_lens = []
+    for name, *_ in SOURCES:
+        part = out / "parts" / f"{name}.jsonl"
+        if not part.exists():
+            continue
+        with open(part, encoding="utf-8") as f:
+            for line in f:
+                r = json.loads(line)
+                key = "test-ws" if name == "ws3-test" else "test-gen" if r["src"] == "gen" and held_out(r["tokens"]) else "train"
+                files[key].write(line)
+                sizes[key] += 1
+                plan_lens.append(len(r["plan"].split()))
+    for f in files.values():
+        f.close()
+    plan_lens.sort()
+    if plan_lens:
+        q = lambda p: plan_lens[min(len(plan_lens) - 1, int(p * len(plan_lens)))]
+        print(f"plan tokens: median {q(0.5)}, 99% {q(0.99)}, max {plan_lens[-1]}")
+    print(f"written to {out}: {dict(sizes)}")
+
+
+if __name__ == "__main__":
+    main()
