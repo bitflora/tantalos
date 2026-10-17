@@ -148,11 +148,15 @@ class GPT(nn.Module):
             done = torch.zeros(len(rows), dtype=torch.bool, device=device)
             new = []
             for step in range(steps):
-                logits = logits[:, -1, :].float() / max(temperature, 1e-5)
-                if top_k:
-                    kth = torch.topk(logits, min(top_k, logits.size(-1))).values[:, -1:]
-                    logits[logits < kth] = -float("inf")
-                nxt = torch.multinomial(F.softmax(logits, dim=-1), 1)
+                logits = logits[:, -1, :].float()
+                if top_k == 1:  # greedy: argmax, so tied logits don't get a random pick
+                    nxt = logits.argmax(dim=-1, keepdim=True)
+                else:
+                    logits = logits / max(temperature, 1e-5)
+                    if top_k:
+                        kth = torch.topk(logits, min(top_k, logits.size(-1))).values[:, -1:]
+                        logits[logits < kth] = -float("inf")
+                    nxt = torch.multinomial(F.softmax(logits, dim=-1), 1)
                 nxt[done] = stop
                 done |= nxt.squeeze(1) == stop
                 new.append(nxt)

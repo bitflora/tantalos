@@ -10,8 +10,10 @@ Workshop file repeated 20 times in data/v5 is left out; the Workshop levels come
 data/ws3, scored without our editor rules as the Workshop pipeline does.
 
 Writes, under --out (default data/plans/):
-    parts/SOURCE.jsonl   every planned level of one source (a finished part is reused, so a
-                         run that stopped picks up where it was)
+    parts/SOURCE.jsonl   every planned level of one source (a finished part is reused, but only
+                         if the --limit and --budget stored beside it match this run's - parts
+                         from before settings were recorded are trusted - so a run that stopped
+                         picks up where it was without a smaller run passing for a whole one)
     train.jsonl          the rest, generated and Workshop
     test-gen.jsonl       generated levels held out by a hash of their tokens (1 in 50)
     test-ws.jsonl        the ws3 test split
@@ -139,16 +141,29 @@ def main():
     seen = set()
     for name, patterns, editor_rules, src, budget in SOURCES:
         part = out / "parts" / f"{name}.jsonl"
+        params = part.with_suffix(".params.json")
+        # What this run asks of the part. A part from an earlier --limit or --budget would
+        # otherwise pass for finished, and later sources would skip its levels.
+        settings = {"limit": args.limit, "budget": budget or args.budget}
         if part.exists():
-            # Done earlier: its levels still count as seen, so later sources skip them.
-            with open(part, encoding="utf-8") as f:
-                seen.update(json.loads(l)["tokens"] for l in f if l.strip())
-            print(f"{name}: kept from an earlier run ({part})")
-            continue
+            old = json.loads(params.read_text()) if params.exists() else None
+            # A part made before parts recorded their settings has none: trust it rather than
+            # rescore it (its levels still count as seen). Parts made now record them, so one
+            # built with a different --limit or --budget is rescored, not taken for finished.
+            if old is None or old == settings:
+                # Done earlier: its levels still count as seen, so later sources skip them.
+                with open(part, encoding="utf-8") as f:
+                    seen.update(json.loads(l)["tokens"] for l in f if l.strip())
+                print(f"{name}: kept from an earlier run ({part})")
+                continue
         if args.only and name not in args.only:
             continue
+        if part.exists():
+            print(f"{name}: {part.name} was built with {old}, not {settings}: scoring again",
+                  flush=True)
         print(f"{name}: scoring", flush=True)
         counts = plan_part(name, patterns, editor_rules, src, budget, part, seen, args)
+        params.write_text(json.dumps(settings) + "\n")
         print(f"{name}: {dict(counts)}", flush=True)
 
     # Split.

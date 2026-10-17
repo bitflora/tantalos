@@ -66,17 +66,24 @@ def generate_plans(model, vocab, prompts, temperature=1.0, top_k=None, rows=64):
 
 
 def check(items, glados=DEFAULT_GLADOS, mode="conservative"):
-    """One `glados check` verdict per item ({tokens, plan, min_len?}), in order."""
+    """One `glados check` verdict per plan, in order. An item is `{tokens, plans: [...]}` (or
+    `{tokens, plan}` for one), optionally with `min_len`. An item's plans share one input line,
+    so `glados check` builds the level's model once for all of them. Returns the per-plan result
+    dicts, flattened in item order."""
+    lines = []
+    for it in items:
+        line = {k: it[k] for k in ("tokens", "min_len") if it.get(k) is not None}
+        line["plans"] = it["plans"] if "plans" in it else [it["plan"]]
+        lines.append(line)
     args = [str(Path(glados).resolve()), "check", "--mode", mode]
-    text = "".join(json.dumps({k: v for k, v in it.items() if k in ("tokens", "plan", "min_len") and v is not None})
-                   + "\n" for it in items)
+    text = "".join(json.dumps(line) + "\n" for line in lines)
     out = subprocess.run(args, input=text, capture_output=True, text=True, encoding="utf-8", check=True)
-    results = [None] * len(items)
+    results = []
     for line in out.stdout.splitlines():
-        r = json.loads(line)
-        results[r["line"] - 1] = r
-    if any(r is None for r in results):
-        raise ValueError(f"glados check answered {sum(r is not None for r in results)} of {len(items)} lines")
+        results.extend(json.loads(line)["results"])
+    want = sum(len(it["plans"]) if "plans" in it else 1 for it in items)
+    if len(results) != want:
+        raise ValueError(f"glados check answered {len(results)} of {want} plans")
     return results
 
 
@@ -105,8 +112,9 @@ def solve_levels(model, vocab, records, k, temperature, glados, modes, rows):
     out = [{"tokens": r["tokens"], "min_len": r.get("min_len"), "metrics": r.get("metrics"),
             "workshop_id": r.get("workshop_id"), "greedy_plan": greedy.get(i), "sample_plans": samples.get(i, [])}
            for i, r in enumerate(records)]
-    items = [{"tokens": o["tokens"], "plan": p, "min_len": o["min_len"]}
-             for o in out for p in ([o["greedy_plan"]] + o["sample_plans"] if o["greedy_plan"] is not None else [])]
+    items = [{"tokens": o["tokens"], "min_len": o["min_len"],
+              "plans": [o["greedy_plan"]] + o["sample_plans"]}
+             for o in out if o["greedy_plan"] is not None]
     for mode in modes:
         results = iter(check(items, glados, mode) if items else [])
         for o, p in zip(out, prompts):

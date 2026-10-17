@@ -48,6 +48,7 @@ fn solver_plans_check_as_solved() {
     let all = plans();
     assert!(all.len() > 40, "only {} solvable levels", all.len());
     let v = vocab();
+    let mut ambiguous = 0;
     for (name, level, tokens, len) in &all {
         for t in tokens.split(' ') {
             assert!(v.contains(&t.to_string()), "{name}: {t:?} missing from vocab");
@@ -64,7 +65,11 @@ fn solver_plans_check_as_solved() {
         let c = check(&model, &steps);
         assert!(c.solved, "{name}: {tokens}: {:?}", c.problem);
         assert_eq!(c.plan.len(), *len, "{name}: {tokens}");
+        // A step that fits more than one distinct action makes `check` choose, and back out
+        // of a dead end and try the next; these plans are where that path gets exercised.
+        ambiguous += c.ambiguous as usize;
     }
+    assert!(ambiguous > 0, "no plan's step fitted more than one distinct action");
 }
 
 /// A cell no level here reaches.

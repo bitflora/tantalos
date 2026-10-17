@@ -35,10 +35,12 @@ const USAGE: &str = "usage:
                                 (\"plan\", src/plan.rs), or why it has none (\"plan_error\")
   glados check [--mode conservative|liberal] [--route DIR] [FILE]
                                 check plans: JSONL with \"tokens\" (a level) and \"plan\" (plan
-                                tokens), optionally \"min_len\", from FILE or stdin; one JSON
-                                verdict per line (solved, illegal, unfinished, unparsed,
-                                invalid, unsupported). --route DIR: NNNNN.p2c and
-                                NNNNN.route.jsonl (as glados route writes) for each solved one
+                                tokens) or \"plans\" (a list of them, all against one model),
+                                optionally \"min_len\", from FILE or stdin; one JSON line per
+                                input, with a \"results\" list of one verdict per plan, in order
+                                (solved, illegal, unfinished, unknown, unparsed, invalid,
+                                unsupported). --route DIR: NNNNN.p2c and NNNNN.route.jsonl (as
+                                glados route writes) for the first solved plan of a line
   glados mutate [--seed N] [--per-level N] [--tries N] [--max-tokens N] [--budget N]
                 [--threads N] [--out FILE] [FILE]
                                 1-3 random edits to each level of FILE (JSONL with \"tokens\",
@@ -692,7 +694,7 @@ fn run_score(args: &[String]) -> Result<()> {
 }
 
 fn run_check(args: &[String]) -> Result<()> {
-    use glados::mutate::json_field;
+    use glados::mutate::{json_array, json_field};
     use glados::plan;
     use std::io::{BufRead, Write};
     let mut mode = Mode::Conservative;
@@ -729,31 +731,34 @@ fn run_check(args: &[String]) -> Result<()> {
     let want_route = route_dir.is_some();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    // A line's verdict as JSON members (after "line"), and the level with its route's lines
-    // if it was solved and routed.
+    // A line's verdicts as a JSON `results` array (after "line"), and the level with its
+    // route's lines if one of its plans solved and --route was given.
     type Done = (String, Option<(Puzzle, Vec<String>)>);
     let one = |line: &str| -> Done {
-        let fail = |verdict: &str, why: &str| {
-            (
-                format!(
-                    "\"verdict\":\"{verdict}\",\"problem\":{}",
-                    dataset::json_str(why)
-                ),
-                None,
-            )
+        // The level itself can't be checked (or read), so every plan of the line says so.
+        let fail = |n: usize, verdict: &str, why: &str| {
+            let one = format!(
+                "{{\"verdict\":\"{verdict}\",\"problem\":{}}}",
+                dataset::json_str(why)
+            );
+            (format!("\"results\":[{}]", vec![one; n].join(",")), None)
         };
-        let (Some(toks), Some(plan_text)) = (json_field(line, "tokens"), json_field(line, "plan"))
-        else {
-            return fail("unparsed", "the line needs \"tokens\" and \"plan\"");
+        // `plans`: a list of plans for one level, checked against one model. `plan`: one.
+        let plans = match json_array(line, "plans") {
+            Some(p) if !p.is_empty() => p,
+            _ => match json_field(line, "plan") {
+                Some(p) => vec![p],
+                None => return fail(1, "unparsed", "the line needs \"plan\" or \"plans\""),
+            },
+        };
+        let n = plans.len();
+        let Some(toks) = json_field(line, "tokens") else {
+            return fail(n, "unparsed", "the line needs \"tokens\"");
         };
         let min_len: Option<usize> = json_field(line, "min_len").and_then(|v| v.parse().ok());
         let puzzle = match tokens::decode(&toks) {
             Ok(p) => p,
-            Err(e) => return fail("unparsed", &format!("level: {e}")),
-        };
-        let steps = match plan::decode(&plan_text) {
-            Ok(s) => s,
-            Err(e) => return fail("unparsed", &format!("plan: {e}")),
+            Err(e) => return fail(n, "unparsed", &format!("level: {e}")),
         };
         let level = Level::from_puzzle(&puzzle);
         let model = match Model::new(&level, mode) {
@@ -761,42 +766,64 @@ fn run_check(args: &[String]) -> Result<()> {
             Err(problems) => {
                 let invalid = problems.iter().any(|p| matches!(p, Problem::Invalid(_)));
                 let verdict = if invalid { "invalid" } else { "unsupported" };
-                return fail(verdict, &format!("{problems:?}"));
+                return fail(n, verdict, &format!("{problems:?}"));
             }
         };
-        let c = plan::check(&model, &steps);
-        let verdict = match (c.solved, c.steps_ok < steps.len()) {
-            (true, _) => "solved",
-            (false, true) => "illegal",
-            (false, false) => "unfinished",
-        };
-        let mut json = format!(
-            "\"verdict\":\"{verdict}\",\"steps\":{},\"steps_ok\":{}",
-            steps.len(),
-            c.steps_ok
-        );
-        if c.solved {
-            json.push_str(&format!(",\"len\":{}", c.plan.len()));
-            if let Some(m) = min_len {
-                json.push_str(&format!(",\"optimal\":{}", c.plan.len() <= m));
-            }
-        } else if let Some(s) = steps.get(c.steps_ok) {
-            json.push_str(&format!(",\"fail_verb\":\"{}\"", plan::step_verb(s)));
-        }
-        if let Some(why) = &c.problem {
-            json.push_str(&format!(",\"problem\":{}", dataset::json_str(why)));
-        }
         let mut routed = None;
-        if c.solved && want_route {
-            match route::route_plan(&level, &model, &c.plan) {
-                Ok(r) => {
-                    let lines = r.json_lines(puzzle.title(), level.size);
-                    routed = Some((puzzle.clone(), lines));
+        let mut results = Vec::with_capacity(n);
+        for plan_text in &plans {
+            let steps = match plan::decode(plan_text) {
+                Ok(s) => s,
+                Err(e) => {
+                    results.push(format!(
+                        "{{\"verdict\":\"unparsed\",\"problem\":{}}}",
+                        dataset::json_str(&format!("plan: {e}"))
+                    ));
+                    continue;
                 }
-                Err(e) => json.push_str(&format!(",\"route_error\":{}", dataset::json_str(&e))),
+            };
+            let c = plan::check(&model, &steps);
+            // `steps_ok` is measured against `steps.len()`, so a plan that fits whole and
+            // still doesn't reach the goal is unfinished, budget or not.
+            let verdict = if c.solved {
+                "solved"
+            } else if c.steps_ok == steps.len() {
+                "unfinished"
+            } else if c.exhausted {
+                "unknown"
+            } else {
+                "illegal"
+            };
+            let mut json = format!(
+                "\"verdict\":\"{verdict}\",\"steps\":{},\"steps_ok\":{}",
+                steps.len(),
+                c.steps_ok
+            );
+            if c.solved {
+                json.push_str(&format!(",\"len\":{}", c.plan.len()));
+                if let Some(m) = min_len {
+                    json.push_str(&format!(",\"optimal\":{}", c.plan.len() <= m));
+                }
+            } else if !c.exhausted {
+                if let Some(s) = steps.get(c.steps_ok) {
+                    json.push_str(&format!(",\"fail_verb\":\"{}\"", plan::step_verb(s)));
+                }
             }
+            if let Some(why) = &c.problem {
+                json.push_str(&format!(",\"problem\":{}", dataset::json_str(why)));
+            }
+            if c.solved && want_route && routed.is_none() {
+                match route::route_plan(&level, &model, &c.plan) {
+                    Ok(r) => {
+                        let lines = r.json_lines(puzzle.title(), level.size);
+                        routed = Some((puzzle.clone(), lines));
+                    }
+                    Err(e) => json.push_str(&format!(",\"route_error\":{}", dataset::json_str(&e))),
+                }
+            }
+            results.push(format!("{{{json}}}"));
         }
-        (json, routed)
+        (format!("\"results\":[{}]", results.join(",")), routed)
     };
     dataset::par_map_ordered(
         lines,

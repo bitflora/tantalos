@@ -539,29 +539,60 @@ pub fn json_field(line: &str, key: &str) -> Option<String> {
             continue;
         };
         let rest = rest.trim_start();
-        if let Some(s) = rest.strip_prefix('"') {
-            let mut out = String::new();
-            let mut chars = s.chars();
-            while let Some(ch) = chars.next() {
-                match ch {
-                    '"' => return Some(out),
-                    '\\' => match chars.next()? {
-                        'n' => out.push('\n'),
-                        't' => out.push('\t'),
-                        'r' => out.push('\r'),
-                        'u' => {
-                            let hex: String = chars.by_ref().take(4).collect();
-                            out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
-                        }
-                        c => out.push(c),
-                    },
-                    c => out.push(c),
-                }
-            }
-            return None;
+        if rest.starts_with('"') {
+            return json_string(rest).map(|(s, _)| s);
         }
         let end = rest.find([',', '}']).unwrap_or(rest.len());
         return Some(rest[..end].trim().to_string());
+    }
+    None
+}
+
+/// The strings of a JSON array value, `"key": ["a", "b", ...]`, unescaped.
+pub fn json_array(line: &str, key: &str) -> Option<Vec<String>> {
+    let pat = format!("\"{key}\"");
+    let i = line.find(&pat)?;
+    let rest = line[i + pat.len()..].trim_start();
+    let mut rest = rest.strip_prefix(':')?.trim_start();
+    rest = rest.strip_prefix('[')?.trim_start();
+    let mut out = Vec::new();
+    loop {
+        if rest.starts_with(']') {
+            return Some(out);
+        }
+        let (s, after) = json_string(rest)?;
+        out.push(s);
+        rest = after.trim_start();
+        if let Some(after) = rest.strip_prefix(',') {
+            rest = after.trim_start();
+        }
+    }
+}
+
+/// A JSON string at the start of `s` (which starts with `"`): its unescaped value and the rest
+/// of `s` after the closing quote.
+fn json_string(s: &str) -> Option<(String, &str)> {
+    let s = s.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = s.char_indices();
+    while let Some((i, ch)) = chars.next() {
+        match ch {
+            '"' => return Some((out, &s[i + 1..])),
+            '\\' => match chars.next()?.1 {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                'u' => {
+                    let mut hex = String::new();
+                    for _ in 0..4 {
+                        hex.push(chars.next()?.1);
+                    }
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                }
+                c => out.push(c),
+            },
+            c => out.push(c),
+        }
     }
     None
 }

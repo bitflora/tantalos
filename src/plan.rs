@@ -233,6 +233,12 @@ pub struct Checked {
     pub steps_ok: usize,
     /// Why not: step `steps_ok + 1` fits no action, or the plan ends short of the goal.
     pub problem: Option<String>,
+    /// The state budget ran out before the plan was settled either way: the verdict is unknown,
+    /// not a failure of the plan. Then `steps_ok` and `problem` only describe the best path found.
+    pub exhausted: bool,
+    /// A step fitted more than one distinct action, so `check` had to choose (and back out of
+    /// the choices that lead nowhere). Not a problem, just which plans exercise the search.
+    pub ambiguous: bool,
 }
 
 /// Most states `check` visits: a step can fit more than one action (two ledges down to the
@@ -247,6 +253,8 @@ pub fn check(model: &Model, steps: &[Step]) -> Checked {
         path: Vec<Action>,
         budget: usize,
         best: (usize, Vec<Action>, String),
+        exhausted: bool,
+        ambiguous: bool,
     }
     impl Search<'_> {
         fn go(&mut self, s: &State) -> bool {
@@ -261,14 +269,19 @@ pub fn check(model: &Model, steps: &[Step]) -> Checked {
                 return false;
             };
             if self.budget == 0 {
+                self.exhausted = true;
                 return false;
             }
             self.budget -= 1;
             let mut tried: Vec<State> = Vec::new();
             for (a, n) in self.model.successors(s) {
-                if tried.contains(&n) || !fits(self.model, s, &a, &n, step) {
+                // Two fitting actions can lead to the same state (two ledges down to one
+                // region): only the first is worth exploring. Distinct ones (a drop that
+                // fizzles the cube and a walk) all get a turn, and a dead end backs out.
+                if !fits(self.model, s, &a, &n, step) || tried.contains(&n) {
                     continue;
                 }
+                self.ambiguous |= !tried.is_empty();
                 tried.push(n.clone());
                 self.path.push(a);
                 if self.go(&n) {
@@ -292,19 +305,22 @@ pub fn check(model: &Model, steps: &[Step]) -> Checked {
         path: Vec::new(),
         budget: CHECK_BUDGET,
         best: (0, Vec::new(), String::new()),
+        exhausted: false,
+        ambiguous: false,
     };
     let start = model.initial();
     if search.go(&start) {
-        let plan = search.path;
         return Checked {
             solved: true,
-            steps_ok: plan.len(),
-            plan,
+            steps_ok: search.path.len(),
+            plan: search.path,
             problem: None,
+            exhausted: false,
+            ambiguous: search.ambiguous,
         };
     }
     let (steps_ok, plan, mut problem) = search.best;
-    if problem.is_empty() {
+    if search.exhausted || problem.is_empty() {
         problem = "the check ran out of budget".into();
     }
     Checked {
@@ -312,6 +328,8 @@ pub fn check(model: &Model, steps: &[Step]) -> Checked {
         plan,
         steps_ok,
         problem: Some(problem),
+        exhausted: search.exhausted,
+        ambiguous: search.ambiguous,
     }
 }
 
