@@ -31,6 +31,14 @@ Settings: data/v5 (all levels-*.jsonl: generated, Workshop, mutants) unless --da
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
 in runs.csv did. Anything after `--` goes to train.py as is.
 
+Solver-net runs (`start NAME --task solve`) train the second net, which reads a level and
+writes its plan, on data/plans (train/plans.py makes it). Their steps: train, evaluate best.pt
+(solve_eval.py, about 15 minutes: plans for held-out levels, replayed by `glados check`), record
+in train/solver-runs.csv (`list --task solve` shows them).
+No Portal 2 steps, no training away, no play-test picks. The main score is EVAL solved %: the
+share of test-gen levels whose greedy plan solves. --from a level-writing run warm-starts from
+its weights with the fresh learning rates (a new task); --from a solve run continues it.
+
 Only one run at a time: they share the GPU.
 """
 
@@ -144,6 +152,15 @@ def tail(path, n=15):
 # ---------------------------------------------------------------------------------------- start
 
 
+def task_of(checkpoint):
+    """The task of the run a checkpoint belongs to (its own dir, or the run above an away/)."""
+    for p in (checkpoint.parent, checkpoint.parent.parent):
+        s = read_status(p)
+        if s:
+            return s.get("task", "levels")
+    return "levels"
+
+
 def start(a):
     d = run_dir(a.name)
     if d.exists():
@@ -152,20 +169,29 @@ def start(a):
     if busy:
         sys.exit(f"{name_of(busy[0][0])} is still running (one run at a time). "
                  f"Wait for it, or: train/run.py stop {name_of(busy[0][0])}")
-    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "glados"], cwd=ROOT)
-    if build.returncode or not GLADOS.exists():
-        sys.exit("`cargo build --release --bin glados` failed (output above): fix that first, no run started")
+    solve = a.task == "solve"
+    if solve and not a.data and not PLANS.exists():
+        sys.exit(f"{PLANS.relative_to(ROOT).as_posix()} is missing: a solve run needs plan data. Make it with "
+                 "train/plans.py first (CPU-heavy, hours; not while a run is going). No run started")
     data = []
-    for pattern in a.data:
+    for pattern in a.data or ([str(PLANS)] if solve else ["data/v5/levels-*.jsonl"]):
         hits = sorted(glob.glob(str(ROOT / pattern))) or sorted(glob.glob(pattern))
         if not hits:
             sys.exit(f"--data {pattern}: no such file")
         data += [Path(h).resolve() for h in hits]
     vocab = Path(a.vocab).resolve() if a.vocab else data[0].parent / "vocab.txt"
+    if solve and not a.vocab and not vocab.exists():
+        vocab = ROOT / "data" / "v5" / "vocab.txt"  # the level models' words, so --from works
     if not vocab.exists():
         sys.exit(f"{vocab} is missing: pass --vocab")
     init = checkpoint_of(a.from_) if a.from_ else None
-    lr, min_lr, warmup = ("2e-4", "2e-5", "200") if init else ("1e-3", "1e-4", "300")
+    # Continuing a run of the same task fine-tunes it; a level model starting the solver net
+    # learns a new task, at the fresh rates.
+    warm = init is not None and task_of(init) == a.task
+    lr, min_lr, warmup = ("2e-4", "2e-5", "200") if warm else ("1e-3", "1e-4", "300")
+    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "glados"], cwd=ROOT)
+    if build.returncode or not GLADOS.exists():
+        sys.exit("`cargo build --release --bin glados` failed (output above): fix that first, no run started")
 
     train = [
         "train/train.py", "--data", *map(str, data), "--vocab", str(vocab), "--out", str(d),
@@ -174,19 +200,26 @@ def start(a):
     ]
     if init:
         train += ["--init", str(init)]
+    if solve:
+        train += ["--task", "solve"]
     train += a.extra
-    evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
+    if solve:
+        tests = data[0].parent if (data[0].parent / "test-gen.jsonl").exists() else PLANS.parent
+        evaluate = ["train/solve_eval.py", str(d / "best.pt"), "--plans", str(tests)]
+    else:
+        evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
 
     d.mkdir(parents=True)
     write_status(
-        d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours,
-        ingame=not a.no_ingame, init=str(init or ""), train=train, evaluate=evaluate,
+        d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours, task=a.task,
+        ingame=not (a.no_ingame or solve), init=str(init or ""), train=train, evaluate=evaluate,
         data=list(map(str, data)), vocab=str(vocab), extra=a.extra,
     )
     p = detach(d)
     ends = now() + datetime.timedelta(hours=a.hours)
     print(f"started runs/{a.name} (pid {p.pid}) from {init.relative_to(ROOT).as_posix() if init else 'scratch'}")
-    print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=75):%H:%M}")
+    after = 20 if solve else 75
+    print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=after):%H:%M}")
     print(f"check:  .venv/Scripts/python train/run.py status {a.name}")
     print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
 
@@ -207,6 +240,8 @@ def detach(d, *steps):
 
 
 STEPS = ("training", "evaluating", "ingame", "away", "away-ingame", "picking")
+SOLVE_STEPS = ("training", "evaluating")  # a solver-net run's
+PLANS = ROOT / "data" / "plans" / "train.jsonl"  # its training data (train/plans.py)
 INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
 AWAY_MINUTES, AWAY_REPEAT, AWAY_WORSE = 15, 5, 0.03  # as runs/v5-away-invalid
 
@@ -272,6 +307,8 @@ def pipeline(d, steps=STEPS):
     d = Path(d).resolve()
     s = write_status(d, pid=__import__("os").getpid())
     log = open(d / "run.log", "a", encoding="utf-8")
+    if s.get("task") == "solve":
+        steps = [x for x in steps if x in SOLVE_STEPS]
 
     def say(msg):
         log.write(f"[{now():%H:%M:%S}] {msg}\n")
@@ -397,9 +434,14 @@ def describe(d):
         line = f"  step {e['step']}: val loss {e['val_loss']:.4f} (best {best:.4f}, lower is better)"
         if e.get("samples"):
             line += f"; samples {e['samples']['parsed']:.0%} parse, {e['samples']['solvable']:.0%} solvable"
+        if e.get("solve"):
+            line += f"; val levels {e['solve']['solved']:.0%} solved (greedy), {e['solve']['parsed']:.0%} parse"
         lines.append(line)
     ev = d / "eval" / "eval.json"
-    if ev.exists():
+    solve = s.get("task") == "solve"
+    if solve:
+        lines += solve_lines(d)
+    elif ev.exists():
         v = json.loads(ev.read_text())["validity"]
         lines.append(f"  EVAL: {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse "
                      f"(the main score; differences under ~10 points are noise)")
@@ -407,7 +449,7 @@ def describe(d):
     game = s.get("ingame", True)
     ig_done, ig_text = ingame_outcome(d)
     pk_done, pk_text = picks_outcome(d)
-    if ev.exists():
+    if ev.exists() and not solve:
         lines.append(f"  in Portal 2: {ig_text if game or ig_done else 'not checked (Portal 2 checks were off for this run)'}")
     away = d / "away"
     if (away / "eval" / "eval.json").exists():
@@ -416,13 +458,13 @@ def describe(d):
         lines.append(f"  AFTER TRAINING AWAY from the levels Portal 2 rejected (runs/{name_of(away)}):"
                      f" EVAL {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse")
         lines.append(f"    in Portal 2: {aw_text if game or aw_done else 'not checked'}")
-    elif state == "done" and "data" in s:
+    elif state == "done" and "data" in s and not solve:
         lines.append("  training away: didn't happen (see run.log)")
     if state == "done":
         f = final_dir(d)
         why = " (training away made it worse)" if (away / "WORSE").exists() else ""
         lines.append(f"  final model: runs/{name_of(f)}/best.pt{why}")
-    if state == "done" or (d / "playtest" / "picks.json").exists():
+    if (state == "done" and not solve) or (d / "playtest" / "picks.json").exists():
         lines.append(f"  play-test levels in the Puzzle Maker: {pk_text}")
     if state in ("failed", "died"):
         log = s.get("log", "train.log")
@@ -439,13 +481,35 @@ def describe(d):
                     f"  .venv/Scripts/python train/run.py ingame {n}  and then wait for it the same way.")
     if state in ("failed", "died"):
         todo.append("Report the log lines above to the user. Don't start the run again until the cause is fixed.")
-    todo.append("Report everything above to the user, including the play-test level names.")
-    todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
-                " (give the EVAL solvable %, the Portal 2 game-valid %, before and after training away,"
-                " which is the final model, and how they compare with earlier runs in  train/run.py list)")
+    if solve:
+        todo.append("Report everything above to the user.")
+        todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
+                    " (give the EVAL solved %, pass@8, the test-ws and published-liberal solved %, and how"
+                    " they compare with earlier solve runs in  train/run.py list --task solve)")
+    else:
+        todo.append("Report everything above to the user, including the play-test level names.")
+        todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
+                    " (give the EVAL solvable %, the Portal 2 game-valid %, before and after training away,"
+                    " which is the final model, and how they compare with earlier runs in  train/run.py list)")
     lines.append("  NEXT STEPS (do all of them):")
     lines += [f"    {i}. {t}" for i, t in enumerate(todo, 1)]
     return "\n".join(lines)
+
+
+def solve_lines(d):
+    """A solver-net run's evaluation (solve_eval.py's eval/eval.json), for describe()."""
+    try:
+        e = json.loads((d / "eval" / "eval.json").read_text())
+    except (OSError, ValueError):
+        return []
+    h, k = e["headline"], e.get("k", 8)
+    out = [f"  EVAL: {h['solved']:.0%} solved (greedy, {h['set']} levels; the main score, differences under"
+           f" ~5 points are noise), pass@{k} {h['pass_at_k']:.0%}, optimal {h['optimal']:.0%}, {h['parsed']:.0%} parse"]
+    for name, v in e["sets"].items():
+        if name != h["set"]:
+            out.append(f"    {name}: {v['solved']:.0%} solved (greedy), pass@{k} {v['pass_at_k']:.0%}, {v['n']} levels")
+    out.append(f"  report: runs/{name_of(d)}/eval/report.md")
+    return out
 
 
 def newest():
@@ -478,6 +542,8 @@ def ingame(a):
     """Redo a finished run's Portal 2 steps: check its evaluation, pick checked play-test levels."""
     d = run_dir(a.name)
     s = read_status(d)
+    if s and s.get("task") == "solve":
+        sys.exit(f"runs/{a.name} is a solver-net run: it has no Portal 2 steps")
     if not s or not (d / "eval" / "samples.jsonl").exists():
         sys.exit(f"runs/{a.name} has no evaluation to check: did it finish?")
     busy = running()
@@ -506,13 +572,24 @@ def stop(a):
 
 
 def list_runs(a):
-    with open(ROOT / "train" / "runs.csv", newline="", encoding="utf-8") as f:
+    solve = a.task == "solve"
+    path = ROOT / "train" / ("solver-runs.csv" if solve else "runs.csv")
+    if not path.exists():
+        sys.exit(f"{path.relative_to(ROOT).as_posix()} doesn't exist yet: no runs recorded there")
+    with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))[-a.n:]
-    print(f"{'run':32} {'started':16} {'min':>4} {'solv%':>5} {'val':>6}  from / notes")
+    if solve:  # solved%: EVAL solved % (greedy, test-gen), the main score; pass: pass@8
+        print(f"{'run':32} {'started':16} {'min':>4} {'solved%':>7} {'pass':>5} {'ws%':>5} {'val':>6}  from / notes")
+    else:
+        print(f"{'run':32} {'started':16} {'min':>4} {'solv%':>5} {'val':>6}  from / notes")
     for r in rows:
         notes = (r["init"] + " | " if r["init"] else "") + r["notes"]
-        print(f"{r['run'][:32]:32} {r['started']:16} {r['minutes']:>4} {r['eval_solvable'] or '-':>5} "
-              f"{r['best_val'] or '-':>6}  {notes[:90]}")
+        if solve:
+            print(f"{r['run'][:32]:32} {r['started']:16} {r['minutes']:>4} {r['eval_solved'] or '-':>7} "
+                  f"{r['eval_pass_at_k'] or '-':>5} {r['ws_solved'] or '-':>5} {r['best_val'] or '-':>6}  {notes[:80]}")
+        else:
+            print(f"{r['run'][:32]:32} {r['started']:16} {r['minutes']:>4} {r['eval_solvable'] or '-':>5} "
+                  f"{r['best_val'] or '-':>6}  {notes[:90]}")
     live = running()
     if live:
         print(f"\nrunning now: runs/{name_of(live[0][0])}")
@@ -522,8 +599,8 @@ def note(a):
     sys.path.insert(0, str(ROOT / "train"))
     import record
 
-    record.update(run_dir(a.name), a.text)
-    print(f"noted on runs/{name_of(run_dir(a.name))} in train/runs.csv")
+    r = record.update(run_dir(a.name), a.text)
+    print(f"noted on runs/{name_of(run_dir(a.name))} in {record.table(r['task'])[0].relative_to(ROOT).as_posix()}")
 
 
 def main():
@@ -541,7 +618,10 @@ def main():
     p.add_argument("--hours", type=float, required=True, help="training time (evaluation comes after)")
     p.add_argument("--note", required=True, help="what the run is for (goes in train/runs.csv)")
     p.add_argument("--from", dest="from_", default=None, help="continue from this run (or .pt)")
-    p.add_argument("--data", nargs="+", default=["data/v5/levels-*.jsonl"])
+    p.add_argument("--task", choices=("levels", "solve"), default="levels",
+                   help="levels: the level-writing net; solve: the solver net (needs data/plans)")
+    p.add_argument("--data", nargs="+", default=None,
+                   help="default: data/v5/levels-*.jsonl, or data/plans/train.jsonl for --task solve")
     p.add_argument("--vocab", default=None, help="default: vocab.txt beside the first data file")
     p.add_argument("--no-ingame", action="store_true",
                    help="skip the Portal 2 checks. ONLY if the user says the game mustn't be launched")
@@ -557,10 +637,11 @@ def main():
     p = sub.add_parser("stop", help="stop a run")
     p.add_argument("name")
     p.set_defaults(fn=stop)
-    p = sub.add_parser("list", help="recent runs from train/runs.csv")
+    p = sub.add_parser("list", help="recent runs from train/runs.csv (--task solve: train/solver-runs.csv)")
     p.add_argument("-n", type=int, default=12)
+    p.add_argument("--task", choices=("levels", "solve"), default="levels")
     p.set_defaults(fn=list_runs)
-    p = sub.add_parser("note", help="write a run's conclusion into train/runs.csv")
+    p = sub.add_parser("note", help="write a run's conclusion into train/runs.csv (or solver-runs.csv)")
     p.add_argument("name")
     p.add_argument("text")
     p.set_defaults(fn=note)

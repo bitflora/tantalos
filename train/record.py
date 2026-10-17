@@ -1,4 +1,5 @@
-"""Keep train/runs.csv: one row per training run, with its settings, results and notes.
+"""Keep train/runs.csv (and train/solver-runs.csv): one row per training run, with its
+settings, results and notes.
 
     python train/record.py runs/v3c                       # add or refresh a run's row
     python train/record.py runs/v3c --note "lr too high"  # and set its notes
@@ -7,6 +8,11 @@ train.py, evaluate.py and ingame.py call this when they finish, so a run's row f
 goes: settings and losses after training, validity after evaluating, game-valid share after
 the in-game check. Refreshing a row keeps its notes. A run started with `train.py --note` gets
 that note if its row has none yet.
+
+A solver-net run (train.py --task solve) gets its row in train/solver-runs.csv instead, with
+its own result columns (SOLVER_FIELDS): train_* from the eval during training, eval_* from
+solve_eval.py's headline set (test-gen; eval_solved is the greedy solved share, the main
+score), and the greedy solved shares of its other sets.
 
 Everything else comes from the run directory: <run>/run.json (written by train.py at the
 start: start time, commit, note), the args saved in last.pt, log.jsonl, train.log,
@@ -53,6 +59,29 @@ FIELDS = [
     "game_valid_of_solvable",
     "notes",
 ]
+SOLVER_CSV = ROOT / "train" / "solver-runs.csv"
+SETTINGS = FIELDS[: FIELDS.index("train_parsed")]
+SOLVER_FIELDS = SETTINGS + [
+    "train_parsed",
+    "train_solved",
+    "eval_n",
+    "eval_parsed",
+    "eval_solved",
+    "eval_pass_at_k",
+    "eval_optimal",
+    "ws_solved",
+    "published_solved",
+    "published_liberal_solved",
+    "notes",
+]
+# solve_eval.py's other sets, and the column of each one's greedy solved share.
+SOLVER_SETS = {"test-ws": "ws_solved", "published": "published_solved",
+               "published-liberal": "published_liberal_solved"}
+
+
+def table(task):
+    """(CSV file, its fields) for a run of `task`."""
+    return (SOLVER_CSV, SOLVER_FIELDS) if task == "solve" else (CSV, FIELDS)
 
 
 def key(run):
@@ -148,6 +177,8 @@ def measure(run):
     row["commit"] = meta.get("commit", "")
 
     args, cfg, step = checkpoint_info(run)
+    # Which CSV the row goes in: the checkpoint says, or run.json before there is one.
+    row["task"] = args.get("task") or meta.get("task") or "levels"
     if args:
         base = checkout(run)
         row["data"] = short_paths(args.get("data", []), base)
@@ -174,6 +205,10 @@ def measure(run):
         if s:
             row["train_parsed"] = pct(s["parsed"])
             row["train_solvable"] = pct(s["solvable"])
+        s = entries[-1].get("solve")
+        if s:
+            row["train_parsed"] = pct(s["parsed"])
+            row["train_solved"] = pct(s["solved"])
     elif step is not None:
         row["steps"] = step
 
@@ -187,46 +222,60 @@ def measure(run):
 
     ev = run / "eval" / "eval.json"
     if ev.exists():
-        v = json.loads(ev.read_text())["validity"]
-        row["eval_parsed"] = pct(v["parsed"])
-        row["eval_solvable"] = pct(v["solvable"])
-        row["eval_invalid"] = pct(v["verdicts"].get("invalid", 0) / v["n"])
+        e = json.loads(ev.read_text())
+        if e.get("task") == "solve":
+            h = e["headline"]
+            row["eval_n"] = e["sets"][h["set"]]["n"]
+            row["eval_parsed"] = pct(h["parsed"])
+            row["eval_solved"] = pct(h["solved"])
+            row["eval_pass_at_k"] = pct(h["pass_at_k"])
+            row["eval_optimal"] = pct(h["optimal"])
+            for name, field in SOLVER_SETS.items():
+                if name in e["sets"]:
+                    row[field] = pct(e["sets"][name]["solved"])
+        else:
+            v = e["validity"]
+            row["eval_parsed"] = pct(v["parsed"])
+            row["eval_solvable"] = pct(v["solvable"])
+            row["eval_invalid"] = pct(v["verdicts"].get("invalid", 0) / v["n"])
     row.update(ingame_report(run / "eval" / "ingame" / "report.md"))
     return row, meta.get("note", "")
 
 
-def load_rows():
-    if not CSV.exists():
+def load_rows(path=CSV):
+    if not path.exists():
         return []
-    with open(CSV, newline="", encoding="utf-8") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
-def save_rows(rows):
+def save_rows(rows, path=CSV, fields=FIELDS):
     rows.sort(key=lambda r: (r["started"], r["run"]))
-    with open(CSV, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, FIELDS, extrasaction="ignore")
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fields, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
 
 
 def update(run, note=None):
-    """Add or refresh `run`'s row. `note` replaces its notes; without one they're kept."""
+    """Add or refresh `run`'s row (in runs.csv, or solver-runs.csv for a solve run). `note`
+    replaces its notes; without one they're kept. Returns the row, with `task` added."""
     row, run_note = measure(run)
-    rows = load_rows()
+    path, fields = table(row["task"])
+    rows = load_rows(path)
     old = next((r for r in rows if r["run"] == row["run"]), None)
     if old is None:
-        old = {f: "" for f in FIELDS}
+        old = {f: "" for f in fields}
         rows.append(old)
     notes = old.get("notes", "")
-    old.update({f: row.get(f, "") for f in FIELDS})
+    old.update({f: row.get(f, "") for f in fields})
     old["notes"] = note if note is not None else (notes or run_note)
-    save_rows(rows)
-    return old
+    save_rows(rows, path, fields)
+    return {**old, "task": row["task"]}
 
 
-def write_meta(out, note):
-    """<out>/run.json at the start of training: when, which commit, and the note if any."""
+def write_meta(out, note, task="levels"):
+    """<out>/run.json at the start of training: when, which commit, the task, and the note if any."""
     def git(*a):
         try:
             return subprocess.run(["git", *a], cwd=ROOT, capture_output=True, text=True).stdout.strip()
@@ -240,6 +289,7 @@ def write_meta(out, note):
         "started": datetime.datetime.now().isoformat(timespec="seconds"),
         "commit": commit,
         "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "task": task,
     }
     if note:
         meta["note"] = note
@@ -249,10 +299,10 @@ def write_meta(out, note):
 def safely(run, **kw):
     """update() for the end of a script: a bad record is reported, never fatal."""
     try:
-        update(run, **kw)
-        print(f"recorded {key(run)} in {CSV.relative_to(ROOT).as_posix()}")
+        r = update(run, **kw)
+        print(f"recorded {key(run)} in {table(r['task'])[0].relative_to(ROOT).as_posix()}")
     except Exception as e:  # noqa: BLE001
-        print(f"couldn't record {run} in {CSV}: {e}")
+        print(f"couldn't record {run}: {e}")
 
 
 def main():
@@ -264,7 +314,9 @@ def main():
         ap.error("--note goes with one run")
     for run in a.runs:
         r = update(run, a.note)
-        print(f"{r['run']}: {r['steps']} steps, val {r['best_val']}, eval solvable {r['eval_solvable'] or '-'}")
+        score = (f"eval solved {r['eval_solved'] or '-'}" if r["task"] == "solve"
+                 else f"eval solvable {r['eval_solvable'] or '-'}")
+        print(f"{r['run']}: {r['steps']} steps, val {r['best_val']}, {score}")
 
 
 if __name__ == "__main__":

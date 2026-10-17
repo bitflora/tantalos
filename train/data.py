@@ -16,10 +16,17 @@ model. Loss is only taken on the level tokens and <eos>.
 
 Checkpoints trained before a group existed don't have its tokens; `groups_in(vocab)` lists the
 groups a checkpoint knows, and prompts for it only fill those slots.
+
+The solver net (task `solve`, `load_solve`) reads a level and writes its plan (src/plan.rs):
+
+    <bos> <level tokens>... <sep> <plan tokens>... <eos>
+
+with the loss on the plan and <eos> only, and no conditions.
 """
 
 import json
 import random
+import zlib
 from array import array
 from pathlib import Path
 
@@ -28,6 +35,10 @@ import torch
 
 SPECIAL = ["<pad>", "<bos>", "<sep>", "<eos>"]
 PAD, BOS, SEP, EOS = range(4)
+# Plan words (src/plan.rs `plan::vocab`) beyond the level format's numbers and directions. Some
+# (`exit`, `plate`, `funnel`) are level words too and are the same token.
+PLAN_WORDS = ["walk", "fire", "enter", "pickup", "putdown", "toss", "throw", "press", "dash", "knock",
+              "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "exit"]
 
 LEN_BUCKETS = [(0, 0), (1, 2), (3, 4), (5, 7), (8, 11), (12, 10**9)]
 FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo", "turret", "gel", "wall", "balcony"]
@@ -379,8 +390,12 @@ class Vocab:
         assert len(self.stoi) == len(self.itos), "duplicate tokens"
 
     @classmethod
-    def build(cls, level_vocab_file):
+    def build(cls, level_vocab_file, task="levels"):
+        """`levels`: special tokens, conditions, level words. `solve`: special tokens, level
+        words, then the plan words the level format doesn't have; no conditions."""
         level = Path(level_vocab_file).read_text().split()
+        if task == "solve":
+            return cls(SPECIAL + level + [w for w in PLAN_WORDS if w not in level])
         return cls(SPECIAL + COND_TOKENS + level)
 
     def __len__(self):
@@ -472,3 +487,126 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
             vocab.encode(ANY.values()),
         )
     return out["train"], out["val"], skipped
+
+
+class Solves(Levels):
+    """Levels with their plans (task `solve`), one split, as flat tensors. The level is the
+    prompt; the plan and <eos> are what is learned."""
+
+    def __init__(self, level_ids, level_offsets, plan_ids, plan_offsets, min_lens):
+        # As in Levels, `level_ids`/`offsets` hold what is learned: here the plans.
+        super().__init__(plan_ids, plan_offsets, None, [])
+        self.prompt_ids = level_ids  # int16, all levels end to end
+        self.prompt_offsets = level_offsets  # int64, len N + 1
+        self.min_lens = min_lens  # the solver's plan length per record (-1: unknown)
+
+    def __len__(self):
+        return len(self.offsets) - 1
+
+    def lengths(self):
+        """Whole sequence (level and plan) of each record, for batching by length."""
+        levels = self.prompt_offsets[1:] - self.prompt_offsets[:-1]
+        return (levels + self.offsets[1:] - self.offsets[:-1]).tolist()
+
+    def level(self, i):
+        return self.prompt_ids[self.prompt_offsets[i] : self.prompt_offsets[i + 1]].tolist()
+
+    def sequence(self, i, drop=0.0):
+        level = self.level(i)
+        plan = self.level_ids[self.offsets[i] : self.offsets[i + 1]].tolist()
+        ids = [BOS] + level + [SEP] + plan + [EOS]
+        learn = [False] * (len(level) + 2) + [True] * (len(plan) + 1)
+        return ids, learn
+
+
+class LengthStats:
+    """Plan and whole-sequence lengths of solver-net records, and how many don't fit a block."""
+
+    def __init__(self, block_size):
+        self.block_size = block_size
+        self.plans, self.seqs = array("i"), array("i")
+        self.too_long = 0
+
+    def add(self, n_level, n_plan):
+        """Counts one record; False if its sequence (<bos> level <sep> plan <eos>) doesn't fit."""
+        n = n_level + n_plan + 3
+        self.plans.append(n_plan)
+        self.seqs.append(n)
+        if n > self.block_size:
+            self.too_long += 1
+            return False
+        return True
+
+    def report(self):
+        if not self.plans:
+            return "no plans"
+
+        def dist(a):
+            q = np.percentile(np.frombuffer(a, dtype=np.int32), [50, 90, 99, 100]).astype(int)
+            return f"median {q[0]}, 90% {q[1]}, 99% {q[2]}, max {q[3]}"
+
+        n = len(self.plans)
+        return (f"{n} plans; plan tokens {dist(self.plans)}; whole sequence {dist(self.seqs)}; "
+                f"{self.too_long} ({self.too_long / n:.2%}) longer than block {self.block_size}, dropped")
+
+
+def load_solve(paths, vocab, block_size, val_share=0.05, seed=0):
+    """Train and validation `Solves` from data/plans JSONL ({tokens, plan, min_len, ...}),
+    streamed, and the `LengthStats` of every record with a plan. Records too long for
+    `block_size`, or with tokens the vocabulary lacks, are dropped. A record goes to validation
+    by a hash of its level, so a level repeated in the data stays on one side."""
+    stats = LengthStats(block_size)
+    stats.unknown = 0
+    splits = {name: (array("h"), array("q", [0]), array("h"), array("q", [0]), array("h"))
+              for name in ("train", "val")}
+    cut = int(val_share * 2**32)
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                if not r.get("plan"):
+                    continue
+                level, plan = r["tokens"].split(), r["plan"].split()
+                if not stats.add(len(level), len(plan)):
+                    continue
+                try:
+                    level_ids, plan_ids = vocab.encode(level), vocab.encode(plan)
+                except KeyError:
+                    stats.unknown += 1
+                    continue
+                split = "val" if zlib.crc32(f"{seed} {r['tokens']}".encode()) < cut else "train"
+                lv, lo, pl, po, ml = splits[split]
+                lv.extend(level_ids)
+                lo.append(len(lv))
+                pl.extend(plan_ids)
+                po.append(len(pl))
+                ml.append(r["min_len"] if r.get("min_len") is not None else -1)
+
+    def tensor(a, dtype):
+        return torch.frombuffer(a, dtype=dtype) if a else torch.zeros(0, dtype=dtype)
+
+    out = {
+        name: Solves(tensor(lv, torch.int16), tensor(lo, torch.int64), tensor(pl, torch.int16),
+                     tensor(po, torch.int64), ml.tolist())
+        for name, (lv, lo, pl, po, ml) in splits.items()
+    }
+    return out["train"], out["val"], stats
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        description="Plan lengths in solver-net data (data/plans/*.jsonl), and how many records a block drops.")
+    ap.add_argument("files", nargs="+")
+    ap.add_argument("--block", type=int, default=1024)
+    a = ap.parse_args()
+    lengths = LengthStats(a.block)
+    for p in a.files:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                if line.strip() and (r := json.loads(line)).get("plan"):
+                    lengths.add(len(r["tokens"].split()), len(r["plan"].split()))
+    print(lengths.report())

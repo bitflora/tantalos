@@ -59,3 +59,24 @@ Training time: one run of 2 hours beats two chained 1-hour runs. Each run's lear
 warms up and decays to its minimum over its own time, so a chained run starts back at a high
 rate and spends its first part undoing the fine-tuning the last one ended with. Chain runs only
 to change something between them (data, settings) or to look at a model midway.
+
+## Solver-net runs
+
+The second kind of run trains the solver net: it reads a level and writes its solution as plan
+tokens (src/plan.rs). Same steps as above, with `--task solve` in step 1:
+`.venv/Scripts/python train/run.py start NAME --task solve --hours H --note "WHAT IT IS FOR"`.
+Name them `solve-...`, e.g. `solve-fresh-2h`. `--from` a level run starts from its weights (a
+new task, fresh learning rates); `--from` a solve run continues it.
+
+- It needs `data/plans/` (train.jsonl, test-gen.jsonl, test-ws.jsonl), made by `train/plans.py`:
+  CPU-heavy for hours, so only when the user asks, and not while a run is going. `start`
+  refuses without it; tell the user.
+- A solve run does: build, train, evaluate with `solve_eval.py` (about 15 minutes), record. It
+  has no Portal 2 steps, no training away and no play-test picks, so `wait` never exits 2.
+- Solve runs are recorded in `train/solver-runs.csv`, not runs.csv; see them with
+  `.venv/Scripts/python train/run.py list --task solve`. `note` finds the right file itself.
+- The main score is **EVAL solved %**: the share of 1,024 held-out generated levels (test-gen)
+  whose greedy plan `glados check` accepts. Higher is better; differences under about 5 points
+  are noise. Also reported: pass@8, optimal %, test-ws (Workshop levels our solver solves) and
+  published-liberal (Workshop levels it can't; a weak signal). Don't compare it with the level
+  runs' EVAL solvable %.

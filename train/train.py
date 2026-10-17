@@ -9,6 +9,11 @@ run's weights. Every --eval-every steps: validation loss, then --score-n sampled
 (lowest validation loss). Log: <out>/log.jsonl. The run gets a row in train/runs.csv
 (train/record.py), with --note as its notes.
 
+--task solve trains the solver net instead: it reads a level and writes its plan (data/plans from
+train/plans.py; sequences in train/data.py). Its eval replays greedy plans for --score-n
+validation levels with `glados check` and logs the solved share. --init from a level model keeps
+the embeddings of the tokens both know (level words), and drops its conditions.
+
 Training batches hold levels of similar length (--bucket), so they pad little. On the GPU the
 process keeps to --gpu-mem: on Windows, outgrowing the free GPU memory doesn't fail, the driver
 pages to system memory instead and everything slows down.
@@ -35,13 +40,21 @@ import torch  # noqa: E402
 sys.path.insert(0, str(Path(__file__).parent))
 import record  # noqa: E402
 import sample  # noqa: E402
-from data import Away, Vocab, load  # noqa: E402
+import solve_eval  # noqa: E402
+from data import COND_TOKENS, Away, Vocab, load, load_solve  # noqa: E402
 from model import GPT, Config  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", nargs="+", required=True, help="JSONL files from `glados dataset`")
+    ap.add_argument(
+        "--task",
+        choices=("levels", "solve"),
+        default="levels",
+        help="levels: write levels from conditions; solve: write a level's plan (data/plans, "
+        "train/plans.py), the solver net",
+    )
     ap.add_argument("--vocab", default=None, help="level vocab (default: vocab.txt beside the data)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--block", type=int, default=512)
@@ -77,7 +90,13 @@ def main():
     )
     ap.add_argument("--eval-every", type=int, default=500)
     ap.add_argument("--eval-batches", type=int, default=20)
-    ap.add_argument("--score-n", type=int, default=32, help="levels sampled and scored per eval (0: off)")
+    ap.add_argument(
+        "--score-n",
+        type=int,
+        default=32,
+        help="levels sampled and scored per eval; with --task solve, validation levels whose "
+        "greedy plans `glados check` replays (0: off)",
+    )
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
     ap.add_argument(
         "--gpu-mem",
@@ -116,7 +135,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if not (args.resume and (out / "run.json").exists()):
-        record.write_meta(out, args.note)
+        record.write_meta(out, args.note, args.task)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
@@ -135,13 +154,23 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=dtype == torch.float16)
 
     vocab_file = args.vocab or Path(args.data[0]).parent / "vocab.txt"
-    vocab = Vocab.build(vocab_file)
+    vocab = Vocab.build(vocab_file, args.task)
     t0 = time.time()
-    train, val, skipped = load(args.data, vocab, args.block, seed=args.seed)
-    print(
-        f"data: {len(train)} train, {len(val)} val, {skipped} too long for block {args.block}; "
-        f"vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s"
-    )
+    solve = args.task == "solve"
+    if solve:
+        if args.away:
+            sys.exit("--away is for --task levels")
+        train, val, lengths = load_solve(args.data, vocab, args.block, seed=args.seed)
+        print(f"data: {len(train)} train, {len(val)} val; vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s")
+        print(f"  {lengths.report()}; {lengths.unknown} with tokens not in {vocab_file}, dropped")
+        # The same validation levels at every eval, so their solved shares compare.
+        solve_picks = random.Random(args.seed).sample(range(len(val)), min(args.score_n, len(val)))
+    else:
+        train, val, skipped = load(args.data, vocab, args.block, seed=args.seed)
+        print(
+            f"data: {len(train)} train, {len(val)} val, {skipped} too long for block {args.block}; "
+            f"vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s"
+        )
 
     away = Away(args.away, vocab, args.block) if args.away else None
     if away is not None:
@@ -160,6 +189,9 @@ def main():
         # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
         # words and conditions can go anywhere), new ones start fresh, and so do new positions.
         lost = [t for t in init["vocab"] if t not in vocab.stoi]
+        if solve:
+            # A level model warm-starting the solver net: its conditions have no use here.
+            lost = [t for t in lost if t not in COND_TOKENS]
         if lost:
             sys.exit(f"{args.init} knows tokens this data doesn't have: {lost[:8]}")
         if init["model_config"]["block_size"] > args.block:
@@ -290,7 +322,19 @@ def main():
         if step % args.eval_every == 0 or done:
             val_loss = evaluate()
             entry = {"step": step, "train_loss": loss.item(), "val_loss": val_loss}
-            if args.score_n:
+            if args.score_n and solve:
+                model.eval()
+                levels = [" ".join(vocab.decode(val.level(i))) for i in solve_picks]
+                prompts = [solve_eval.plan_prompt(vocab, lv, args.block) for lv in levels]
+                plans = solve_eval.generate_plans(model, vocab, prompts, top_k=1)
+                model.train()
+                try:
+                    items = [{"tokens": lv, "plan": p, "min_len": val.min_lens[i] if val.min_lens[i] >= 0 else None}
+                             for lv, p, i in zip(levels, plans, solve_picks)]
+                    entry["solve"] = solve_eval.summarize(solve_eval.check(items, args.glados))
+                except (OSError, ValueError, subprocess.CalledProcessError) as e:
+                    print(f"checking plans failed, carrying on: {e}")
+            elif args.score_n:
                 model.eval()
                 lines = sample.generate(model, vocab, args.score_n, ["<verdict:solvable>"])
                 model.train()
@@ -318,6 +362,10 @@ def main():
                 if s
                 else ""
             )
+            if entry.get("solve"):
+                v = entry["solve"]
+                extra += (f"  val levels: {v['solved']:.0%} solved (greedy), {v['optimal']:.0%} optimal, "
+                          f"{v['parsed']:.0%} parse")
             if "gpu_gb" in entry:
                 extra += f"  gpu {entry['gpu_gb']:.1f} GB"
             print(f"== step {step}: val {val_loss:.4f}{' (best)' if improved else ''}{extra}")
