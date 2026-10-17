@@ -157,6 +157,47 @@ pub fn label_with_plan(
     (label, plan)
 }
 
+/// Only the conservative plan of a level already labelled solvable: its length and plan tokens
+/// (or why it couldn't be grounded), without the metrics, the portal check or the liberal model
+/// that labelling pays for. A level that no longer solves gets its label instead: `Invalid`,
+/// `Unsupported`, `Unsolvable`, or `Uncertain(None)` if the budget ran out.
+pub fn plan_only(
+    puzzle: &Puzzle,
+    budget: usize,
+    editor_rules: bool,
+) -> Result<(usize, Result<String, String>), Label> {
+    let level = Level::from_puzzle(puzzle);
+    let problems = level.mount_problems_with(editor_rules);
+    if !problems.is_empty() {
+        return Err(Label::Invalid(problems.join("; ")));
+    }
+    let model = Model::new(&level, Mode::Conservative).map_err(|problems| {
+        let (invalid, unsupported): (Vec<_>, Vec<_>) =
+            problems.iter().partition(|p| matches!(p, Problem::Invalid(_)));
+        let text = |ps: Vec<&Problem>| {
+            ps.iter()
+                .map(|p| match p {
+                    Problem::Invalid(m) | Problem::Unsupported(m) => m.as_str(),
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        if invalid.is_empty() {
+            Label::Unsupported(text(unsupported))
+        } else {
+            Label::Invalid(text(invalid))
+        }
+    })?;
+    match model.solve(budget).verdict {
+        Verdict::Solved(plan) => Ok((
+            plan.len(),
+            crate::route::route_plan(&level, &model, &plan).map(|r| crate::plan::encode(&r)),
+        )),
+        Verdict::Unsolvable => Err(Label::Unsolvable),
+        Verdict::Unknown => Err(Label::Uncertain(None)),
+    }
+}
+
 /// `label_known`, with the conservative plan when the search found one.
 fn label_full(
     puzzle: &Puzzle,

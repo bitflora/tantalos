@@ -3,9 +3,10 @@
     .venv/Scripts/python train/plans.py                  # every source, into data/plans/
     .venv/Scripts/python train/plans.py --limit 2000 --out data/plans-try
 
-Re-scores the solvable levels of the usual data files with `glados score --plan` (the solver
-throws its plans away when it labels data, so they are found again) and keeps the ones whose
-plan grounds (`glados route` can make it concrete). Duplicate levels are scored once. The
+Solves the solvable levels of the usual data files again with `glados score --plan-only` (the
+solver throws its plans away when it labels data, so they are found again) and keeps the ones
+whose plan grounds (`glados route` can make it concrete). Only the plan is found again: min_len,
+needs_portals and metrics come from the data files. Duplicate levels are scored once. The
 Workshop file repeated 20 times in data/v5 is left out; the Workshop levels come from
 data/ws3, scored without our editor rules as the Workshop pipeline does.
 
@@ -14,6 +15,8 @@ Writes, under --out (default data/plans/):
                          if the --limit and --budget stored beside it match this run's - parts
                          from before settings were recorded are trusted - so a run that stopped
                          picks up where it was without a smaller run passing for a whole one)
+    parts/SOURCE.partial the part being made; a run that stopped carries it on, by the same
+                         rule (settings beside it in SOURCE.partial.params.json)
     train.jsonl          the rest, generated and Workshop
     test-gen.jsonl       generated levels held out by a hash of their tokens (1 in 50)
     test-ws.jsonl        the ws3 test split
@@ -46,7 +49,7 @@ SOURCES = [
     ("ws3-train", ["data/ws3/train.jsonl"], False, "ws", 500_000),
     ("ws3-test", ["data/ws3/test.jsonl"], False, "ws", 500_000),
 ]
-KEEP = ("tokens", "plan", "min_len", "needs_portals", "metrics")
+FROM_DATA = ("min_len", "needs_portals", "metrics")
 TEST_EVERY = 50
 
 
@@ -76,15 +79,28 @@ def solvable_records(patterns, seen, limit):
                         return
 
 
-def plan_part(name, patterns, editor_rules, src, budget, out, seen, args):
-    """Scores one source's solvable levels into `out`; returns counts."""
-    cmd = [str(Path(args.glados).resolve()), "score", "--plan", "--budget", str(budget or args.budget)]
+def plan_part(name, patterns, editor_rules, src, budget, out, seen, settings, args):
+    """Plans one source's solvable levels into `out`; returns counts. Carries on from the
+    `.partial` file a stopped run left, if it was made with the same settings."""
+    cmd = [str(Path(args.glados).resolve()), "score", "--plan-only", "--budget", str(budget or args.budget)]
     if not editor_rules:
         cmd += ["--editor-rules", "off"]
     counts = Counter()
     tmp = out.with_suffix(".partial")
+    tmp_params = out.with_suffix(".partial.params.json")
+    done = set()
+    if tmp.exists():
+        old = json.loads(tmp_params.read_text()) if tmp_params.exists() else None
+        # A partial from before partials recorded their settings is trusted, as finished parts are.
+        if old is None or old == settings:
+            with open(tmp, encoding="utf-8") as f:
+                done = {json.loads(l)["tokens"] for l in f if l.strip()}
+            print(f"  {name}: carrying on from {len(done)} planned levels in {tmp.name}", flush=True)
+        else:
+            print(f"  {name}: {tmp.name} was built with {old}, not {settings}: starting over", flush=True)
+    tmp_params.write_text(json.dumps(settings) + "\n")
     start = time.time()
-    with open(tmp, "w", encoding="utf-8") as w:
+    with open(tmp, "a" if done else "w", encoding="utf-8") as w:
         batch = []
 
         def flush():
@@ -93,7 +109,12 @@ def plan_part(name, patterns, editor_rules, src, budget, out, seen, args):
             for r, s in zip(batch, (json.loads(l) for l in res.stdout.splitlines())):
                 counts["levels"] += 1
                 if "plan" in s:
-                    rec = {k: s[k] for k in KEEP if k in s}
+                    rec = {"tokens": s["tokens"], "plan": s["plan"]}
+                    rec.update((k, r[k]) for k in FROM_DATA if k in r)
+                    if s["min_len"] != r.get("min_len"):
+                        # The data's label is from the same solver: this shouldn't happen.
+                        counts["min_len_differs"] += 1
+                        rec["min_len"] = s["min_len"]
                     rec["src"] = src
                     if "workshop_id" in r:
                         rec["workshop_id"] = r["workshop_id"]
@@ -111,12 +132,16 @@ def plan_part(name, patterns, editor_rules, src, budget, out, seen, args):
                   f"{rate:.0f}/s", flush=True)
 
         for r in solvable_records(patterns, seen, args.limit):
+            if r["tokens"] in done:
+                counts["kept"] += 1
+                continue
             batch.append(r)
             if len(batch) >= args.chunk:
                 flush()
         if batch:
             flush()
     tmp.replace(out)
+    tmp_params.unlink(missing_ok=True)
     counts["seconds"] = round(time.time() - start)
     return counts
 
@@ -162,7 +187,7 @@ def main():
             print(f"{name}: {part.name} was built with {old}, not {settings}: scoring again",
                   flush=True)
         print(f"{name}: scoring", flush=True)
-        counts = plan_part(name, patterns, editor_rules, src, budget, part, seen, args)
+        counts = plan_part(name, patterns, editor_rules, src, budget, part, seen, settings, args)
         params.write_text(json.dumps(settings) + "\n")
         print(f"{name}: {dict(counts)}", flush=True)
 

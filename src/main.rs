@@ -25,14 +25,16 @@ const USAGE: &str = "usage:
                                 (default data/levels-<seed>.jsonl). --portals-required true:
                                 drop levels solvable without portals; --max-unsolved: most
                                 share of levels that aren't solvable
-  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [FILE]
+  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [--plan-only] [FILE]
                                 decode and solve one token sequence per line of FILE (or
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
                                 --p2c-all every one that parsed. --editor-rules off: don't
                                 call levels invalid for our model of the editor's rules
                                 (for levels the game's editor accepted, e.g. the Workshop).
                                 --plan: add each solvable level's plan as plan tokens
-                                (\"plan\", src/plan.rs), or why it has none (\"plan_error\")
+                                (\"plan\", src/plan.rs), or why it has none (\"plan_error\").
+                                --plan-only: just the plan and min_len, for levels already
+                                labelled solvable: no metrics, portal check or liberal model
   glados check [--mode conservative|liberal] [--route DIR] [FILE]
                                 check plans: JSONL with \"tokens\" (a level) and \"plan\" (plan
                                 tokens) or \"plans\" (a list of them, all against one model),
@@ -584,14 +586,17 @@ fn run_score(args: &[String]) -> Result<()> {
     let mut all = false;
     let mut editor_rules = true;
     let mut with_plan = false;
+    let mut plan_only = false;
     let mut rest = Vec::new();
-    // `--plan` takes no value.
+    // `--plan` and `--plan-only` take no value.
     let args: Vec<String> = args
         .iter()
         .filter(|a| {
             let plan = *a == "--plan";
+            let only = *a == "--plan-only";
             with_plan |= plan;
-            !plan
+            plan_only |= only;
+            !plan && !only
         })
         .cloned()
         .collect();
@@ -656,6 +661,24 @@ fn run_score(args: &[String]) -> Result<()> {
                     let tokens = encoded.map_or(String::new(), |t| {
                         format!("\"tokens\":{},", dataset::json_str(&t))
                     });
+                    if plan_only {
+                        let fields = match dataset::plan_only(&p, budget, editor_rules) {
+                            Ok((len, Ok(t))) => format!(
+                                "\"verdict\":\"solvable\",\"min_len\":{len},\"plan\":{}",
+                                dataset::json_str(&t)
+                            ),
+                            Ok((len, Err(e))) => format!(
+                                "\"verdict\":\"solvable\",\"min_len\":{len},\"plan_error\":{}",
+                                dataset::json_str(&e)
+                            ),
+                            Err(label) => label.json_fields(),
+                        };
+                        return Ok((
+                            i,
+                            format!("{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}{fields}}}"),
+                            None,
+                        ));
+                    }
                     let (label, plan) = if with_plan {
                         dataset::label_with_plan(&p, budget, i as u64, editor_rules)
                     } else {
