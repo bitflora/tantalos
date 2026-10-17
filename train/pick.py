@@ -7,7 +7,7 @@ and copies them into the Puzzle Maker's folder as glados-<run>-<number>.p2c (pla
 pick is also kept in runs/NAME/playtest/ with picks.json (each pick's "game": valid, or
 unchecked when the game couldn't be used). run.py calls this after every training run.
 
-    python train/pick.py runs/NAME [--n 5] [--samples 80] [--seed 0] [--no-game]
+    python train/pick.py runs/NAME [--checkpoint runs/NAME/away/best.pt] [--n 5] [--samples 80] [--no-game]
 """
 import argparse, json, shutil, subprocess, sys
 from pathlib import Path
@@ -52,12 +52,13 @@ def main():
     ap.add_argument("--samples", type=int, default=80)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-game", action="store_true", help="don't check the picks in Portal 2")
+    ap.add_argument("--checkpoint", help="the model to sample (default <run>/best.pt)")
     args = ap.parse_args()
 
     run = Path(args.run)
     out = run / "playtest"
     shutil.rmtree(out, ignore_errors=True)
-    subprocess.check_call([sys.executable, "-u", str(ROOT / "train" / "sample.py"), str(run / "best.pt"),
+    subprocess.check_call([sys.executable, "-u", str(ROOT / "train" / "sample.py"), args.checkpoint or str(run / "best.pt"),
                            "--n", str(args.samples), "--verdict", "solvable", "--p2c", "--out", str(out),
                            "--seed", str(args.seed)], cwd=ROOT)
     rows = [json.loads(l) for l in (out / "scores.jsonl").read_text(encoding="utf-8").splitlines()]

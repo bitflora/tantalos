@@ -17,9 +17,13 @@ order, with nothing to remember:
   3. check the evaluation's levels in Portal 2's own editor (ingame.py, about 15 minutes). It
      launches the game itself, unless the game is already running (someone playing): then it
      is skipped, and `status` says INCOMPLETE until `run.py ingame NAME` redoes it.
-  4. pick 5 levels for play-testing (pick.py), checked in Portal 2 too, and copy them into the
-     Puzzle Maker folder as glados-NAME-NNNNN
-  5. record the run in train/runs.csv
+  4. train best.pt away from every level Portal 2 has rejected (data/ingame/invalid.jsonl, x5,
+     labelled invalid) for 15 minutes into runs/NAME/away, evaluate that and check it in Portal
+     2 too. It is the final model unless its EVAL solvable share is over 3 points lower (then
+     away/WORSE is written and best.pt stays final).
+  5. pick 5 levels from the final model for play-testing (pick.py), checked in Portal 2 too,
+     and copy them into the Puzzle Maker folder as glados-NAME-NNNNN
+  6. record the run (and NAME/away) in train/runs.csv
 Everything lands in runs/NAME: status.json (what it's doing now), run.log (each phase),
 train.log, evaluate.log, ingame.log, pick.log, eval/report.md.
 
@@ -46,7 +50,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
 PY = sys.executable
 GLADOS = ROOT / "target" / "release" / "glados.exe"
-ACTIVE = ("starting", "training", "evaluating", "ingame", "picking")
+ACTIVE = ("starting", "training", "evaluating", "ingame", "away", "picking")
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: no console pops up, none is needed
 DETACH = NO_WINDOW | 0x00000200  # | CREATE_NEW_PROCESS_GROUP
 BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB: outlive the session that started it
@@ -119,7 +123,11 @@ def name_of(d):
 
 
 def checkpoint_of(src):
-    """--from: a run name, a run directory or a .pt file."""
+    """--from: a run name (its final model: away/best.pt unless that was worse), a run
+    directory or a .pt file."""
+    final = (read_status(run_dir(src)) or {}).get("final")
+    if final and Path(final).is_file():
+        return Path(final).resolve()
     for p in (Path(src), ROOT / src, run_dir(src) / "best.pt", Path(src) / "best.pt"):
         if p.is_file():
             return p.resolve()
@@ -173,11 +181,12 @@ def start(a):
     write_status(
         d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours,
         ingame=not a.no_ingame, init=str(init or ""), train=train, evaluate=evaluate,
+        data=list(map(str, data)), vocab=str(vocab), extra=a.extra,
     )
     p = detach(d)
     ends = now() + datetime.timedelta(hours=a.hours)
     print(f"started runs/{a.name} (pid {p.pid}) from {init.relative_to(ROOT).as_posix() if init else 'scratch'}")
-    print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=30):%H:%M}")
+    print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=75):%H:%M}")
     print(f"check:  .venv/Scripts/python train/run.py status {a.name}")
     print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
 
@@ -197,7 +206,40 @@ def detach(d, *steps):
     return p
 
 
-STEPS = ("training", "evaluating", "ingame", "picking")
+STEPS = ("training", "evaluating", "ingame", "away", "away-ingame", "picking")
+INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
+AWAY_MINUTES, AWAY_REPEAT, AWAY_WORSE = 15, 5, 0.03  # as runs/v5-away-invalid
+
+
+def away_train(d, s):
+    """train.py arguments for training d's best.pt away from the game-rejected levels."""
+    name = name_of(d)
+    return [
+        "train/train.py", "--data", *s["data"], *[str(INVALID)] * AWAY_REPEAT, "--vocab", s["vocab"],
+        "--out", str(d / "away"), "--init", str(d / "best.pt"), "--block", "1024", "--batch", "16",
+        "--eval-every", "1000", "--score-n", "64", "--lr", "2e-4", "--min-lr", "2e-5", "--warmup", "200",
+        "--note", f"{name} trained away from the levels Portal 2 rejected ({AWAY_MINUTES} min, x{AWAY_REPEAT})",
+        *s.get("extra", []),
+    ]
+
+
+def solvable(eval_dir):
+    try:
+        return json.loads((eval_dir / "eval.json").read_text())["validity"]["solvable"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def final_dir(d):
+    """The directory holding the run's final model: d/away unless training away made it worse."""
+    a = d / "away"
+    return a if (a / "best.pt").exists() and solvable(a / "eval") is not None and not (a / "WORSE").exists() else d
+
+
+def complete(d):
+    """Did every Portal 2 step happen? (The in-game checks, and play-test picks checked in game.)"""
+    evals = [d] + ([d / "away"] if (d / "away" / "eval" / "eval.json").exists() else [])
+    return all(ingame_outcome(e)[0] for e in evals) and picks_outcome(d)[0]
 
 
 def ingame_outcome(d):
@@ -227,7 +269,7 @@ def picks_outcome(d):
 
 def pipeline(d, steps=STEPS):
     """The detached part of `start` (and `ingame`): the steps, then record."""
-    d = Path(d)
+    d = Path(d).resolve()
     s = write_status(d, pid=__import__("os").getpid())
     log = open(d / "run.log", "a", encoding="utf-8")
 
@@ -239,7 +281,7 @@ def pipeline(d, steps=STEPS):
         ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
 
     def phase(state, args, logname):
-        write_status(d, state=state, phase_started=now().isoformat(timespec="seconds"))
+        write_status(d, state=state, phase_started=now().isoformat(timespec="seconds"), log=logname)
         say(f"{state}: {' '.join(args[:2])}")
         with open(d / logname, "a", encoding="utf-8") as out:
             code = subprocess.call([PY, "-u", *args], cwd=ROOT, stdout=out, stderr=subprocess.STDOUT,
@@ -263,9 +305,35 @@ def pipeline(d, steps=STEPS):
             except RuntimeError as e:
                 say(f"{e} (carrying on)")
             say(f"in-game check: {ingame_outcome(d)[1]}")
+        if "away" in steps and "data" in s and INVALID.exists():
+            # Train best.pt away from every level the game has rejected (this run's check adds
+            # to them), then evaluate that. A failure leaves best.pt as the final model.
+            try:
+                (d / "away").mkdir(exist_ok=True)
+                until = (now() + datetime.timedelta(minutes=AWAY_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+                phase("away", away_train(d, s) + ["--until", until], "away/train.log")
+                if not (d / "away" / "best.pt").exists():
+                    raise RuntimeError("it saved no model (too short to reach its first eval); see away/train.log")
+                phase("evaluating", ["train/evaluate.py", str(d / "away" / "best.pt"), "--data", *s["data"]],
+                      "away/evaluate.log")
+                main, away = solvable(d / "eval"), solvable(d / "away" / "eval")
+                if main is not None and away is not None and away < main - AWAY_WORSE:
+                    (d / "away" / "WORSE").touch()
+                say(f"trained away: EVAL {away:.0%} solvable vs {main:.0%} before; "
+                    f"final model {final_dir(d).relative_to(ROOT).as_posix()}/best.pt")
+            except Exception as e:  # noqa: BLE001
+                say(f"training away failed: {e} (carrying on with best.pt)")
+        if "away-ingame" in steps and game and (d / "away" / "eval" / "samples.jsonl").exists():
+            try:
+                phase("ingame", ["train/ingame.py", str(d / "away" / "eval")], "away/ingame.log")
+            except RuntimeError as e:
+                say(f"{e} (carrying on)")
+            say(f"in-game check after training away: {ingame_outcome(d / 'away')[1]}")
+        write_status(d, final=str(final_dir(d) / "best.pt"))
         if "picking" in steps:
             try:  # always: 5 levels to play-test; a failure here never sinks the run
-                phase("picking", ["train/pick.py", str(d)] + ([] if game else ["--no-game"]), "pick.log")
+                phase("picking", ["train/pick.py", str(d), "--checkpoint", str(final_dir(d) / "best.pt")]
+                      + ([] if game else ["--no-game"]), "pick.log")
             except RuntimeError as e:
                 say(f"{e} (carrying on)")
             say(f"play-test levels: {picks_outcome(d)[1]}")
@@ -280,6 +348,8 @@ def pipeline(d, steps=STEPS):
         import record
 
         record.safely(d)
+        if (d / "away" / "best.pt").exists():
+            record.safely(d / "away")
 
 
 # --------------------------------------------------------------------------------------- status
@@ -307,8 +377,12 @@ def describe(d):
         steps = [l for l in tail(d / "train.log", 40).splitlines() if l.startswith("step ")]
         if steps:
             lines.append("  latest: " + " ".join(steps[-1].split()))
-    elif state in ("evaluating", "ingame"):
-        lines.append(f"{name}: {state.upper()} (since {hhmm(s['phase_started'])}; training is over)")
+    elif state == "away":
+        lines.append(f"{name}: TRAINING AWAY from the levels Portal 2 rejected (since {hhmm(s['phase_started'])},"
+                     f" {AWAY_MINUTES} min; the main training is over)")
+    elif state in ("evaluating", "ingame", "picking"):
+        lines.append(f"{name}: {state.upper()} ({s.get('log', '')}, since {hhmm(s['phase_started'])};"
+                     " training is over)")
     elif state == "done":
         lines.append(f"{name}: DONE at {hhmm(s['ended'])}")
     elif state == "stopped":
@@ -335,27 +409,40 @@ def describe(d):
     pk_done, pk_text = picks_outcome(d)
     if ev.exists():
         lines.append(f"  in Portal 2: {ig_text if game or ig_done else 'not checked (Portal 2 checks were off for this run)'}")
+    away = d / "away"
+    if (away / "eval" / "eval.json").exists():
+        v = json.loads((away / "eval" / "eval.json").read_text())["validity"]
+        aw_done, aw_text = ingame_outcome(away)
+        lines.append(f"  AFTER TRAINING AWAY from the levels Portal 2 rejected (runs/{name_of(away)}):"
+                     f" EVAL {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse")
+        lines.append(f"    in Portal 2: {aw_text if game or aw_done else 'not checked'}")
+    elif state == "done" and "data" in s:
+        lines.append("  training away: didn't happen (see run.log)")
+    if state == "done":
+        f = final_dir(d)
+        why = " (training away made it worse)" if (away / "WORSE").exists() else ""
+        lines.append(f"  final model: runs/{name_of(f)}/best.pt{why}")
     if state == "done" or (d / "playtest" / "picks.json").exists():
         lines.append(f"  play-test levels in the Puzzle Maker: {pk_text}")
     if state in ("failed", "died"):
-        log = {"picking": "pick.log", "evaluating": "evaluate.log", "ingame": "ingame.log"}.get(
-            s.get("failed_in", s.get("state")), "train.log")
+        log = s.get("log", "train.log")
         lines.append(f"  last lines of {log}:")
         lines += ["    " + l for l in tail(d / log).splitlines()]
     if state in ACTIVE:
         return "\n".join(lines)
     n = name_of(d)
     todo = []
-    if state == "done" and game and not (ig_done and pk_done):
-        lines[0] += "  -- INCOMPLETE: the Portal 2 check didn't happen"
-        todo.append(f"Tell the user the Portal 2 check was skipped ({ig_text}). Once Portal 2 is closed, run"
+    if state == "done" and game and not complete(d):
+        lines[0] += "  -- INCOMPLETE: a Portal 2 check didn't happen"
+        todo.append("Tell the user a Portal 2 check was skipped (the 'in Portal 2' lines above say why)."
+                    " Once Portal 2 is closed, run"
                     f"  .venv/Scripts/python train/run.py ingame {n}  and then wait for it the same way.")
     if state in ("failed", "died"):
         todo.append("Report the log lines above to the user. Don't start the run again until the cause is fixed.")
     todo.append("Report everything above to the user, including the play-test level names.")
     todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
-                " (give the EVAL solvable %, the Portal 2 game-valid %, and how they compare with"
-                " earlier runs in  train/run.py list)")
+                " (give the EVAL solvable %, the Portal 2 game-valid %, before and after training away,"
+                " which is the final model, and how they compare with earlier runs in  train/run.py list)")
     lines.append("  NEXT STEPS (do all of them):")
     lines += [f"    {i}. {t}" for i, t in enumerate(todo, 1)]
     return "\n".join(lines)
@@ -383,7 +470,7 @@ def wait(a):
     s = read_status(d) or {}
     if s.get("state") != "done":
         sys.exit(1)
-    if s.get("ingame", True) and not (ingame_outcome(d)[0] and picks_outcome(d)[0]):
+    if s.get("ingame", True) and not complete(d):
         sys.exit(2)
 
 
@@ -397,8 +484,8 @@ def ingame(a):
     if busy:
         sys.exit(f"{name_of(busy[0][0])} is still running (one run at a time). Wait for it first")
     write_status(d, state="ingame", phase_started=now().isoformat(timespec="seconds"), ingame=True, error="")
-    p = detach(d, "ingame", "picking")
-    print(f"checking runs/{a.name} in Portal 2 in the background (pid {p.pid}), about 20 minutes")
+    p = detach(d, "ingame", "away-ingame", "picking")
+    print(f"checking runs/{a.name} in Portal 2 in the background (pid {p.pid}), about 40 minutes")
     print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
 
 

@@ -8,9 +8,12 @@ Generates Portal 2 puzzle-maker levels: a Rust generator/solver (`src/`, binary
 Use `train/run.py` for every training run. Don't call train.py, evaluate.py, ingame.py,
 pick.py, retrain.sh or loop.sh yourself, and don't change their settings, unless the user asks
 you to. `run.py start` already does every step of a run, in order: build `glados.exe`, train,
-evaluate, check the levels in Portal 2's own editor, pick 5 game-checked levels for
-play-testing (copied into the Puzzle Maker folder as `glados-NAME-NNNNN`), record in
-`train/runs.csv`. You don't run any of those steps yourself.
+evaluate, check the levels in Portal 2's own editor, train 15 minutes away from every level
+the game has rejected (into `runs/NAME/away`; evaluated and game-checked too, and the final
+model unless it scores over 3 points lower), pick 5 game-checked levels from the final model
+for play-testing (copied into the Puzzle Maker folder as `glados-NAME-NNNNN`), record in
+`train/runs.csv`. You don't run any of those steps yourself. `--from NAME` continues that
+run's final model.
 
 A training run is exactly these steps:
 
