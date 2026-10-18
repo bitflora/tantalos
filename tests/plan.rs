@@ -65,8 +65,8 @@ fn solver_plans_check_as_solved() {
         let c = check(&model, &steps);
         assert!(c.solved, "{name}: {tokens}: {:?}", c.problem);
         assert_eq!(c.plan.len(), *len, "{name}: {tokens}");
-        // A step that fits more than one distinct action makes `check` choose, and back out
-        // of a dead end and try the next; these plans are where that path gets exercised.
+        // A step that fits more than one distinct action leaves `check` more than one way
+        // through the plan to follow; these plans are where that gets exercised.
         ambiguous += c.ambiguous as usize;
     }
     assert!(ambiguous > 0, "no plan's step fitted more than one distinct action");

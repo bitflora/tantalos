@@ -201,6 +201,8 @@ pub fn add_mask(masks: &mut Masks, m: u64) {
 
 pub struct Portals {
     pub classes: Vec<FaceClass>,
+    /// The classes (ids) each face is in.
+    by_face: HashMap<Face, Vec<usize>>,
 }
 
 /// An angled panel on a face: its bit, its hinge's side (where its face leans) and its angle.
@@ -430,8 +432,19 @@ impl Portals {
                     beam_out,
                 }
             })
-            .collect();
-        Portals { classes }
+            .collect::<Vec<FaceClass>>();
+        let mut by_face: HashMap<Face, Vec<usize>> = HashMap::new();
+        for c in &classes {
+            for &f in &c.faces {
+                by_face.entry(f).or_default().push(c.id);
+            }
+        }
+        Portals { classes, by_face }
+    }
+
+    /// Whether `face` is one of class `class`'s faces.
+    pub fn has_face(&self, class: usize, face: Face) -> bool {
+        self.by_face.get(&face).is_some_and(|cs| cs.contains(&class))
     }
 }
 

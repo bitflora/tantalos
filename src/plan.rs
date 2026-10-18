@@ -26,6 +26,8 @@
 //! Any face of the right class is accepted, so a plan may differ from the route's choices
 //! and still pass. What happens between the steps (the walks) is the solver's business.
 
+use std::collections::HashSet;
+
 use crate::geom::{Cell, Dir};
 use crate::level::CubeKind;
 use crate::regions::Move;
@@ -225,111 +227,107 @@ pub fn decode(text: &str) -> Result<Vec<Step>, String> {
 /// What `check` found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Checked {
-    /// The goal is reached after `plan.len()` steps (steps after that are ignored).
+    /// The goal is reached after `plan.len()` steps (steps after that are ignored): the
+    /// shortest part of the plan that can reach it.
     pub solved: bool,
     /// The solver's actions for the steps that fit, up to the goal or the step that failed.
     pub plan: Vec<Action>,
-    /// Steps that fit, on the longest way through the plan that was found.
+    /// Steps that fit, on the longest way through the plan.
     pub steps_ok: usize,
     /// Why not: step `steps_ok + 1` fits no action, or the plan ends short of the goal.
     pub problem: Option<String>,
-    /// The state budget ran out before the plan was settled either way: the verdict is unknown,
-    /// not a failure of the plan. Then `steps_ok` and `problem` only describe the best path found.
+    /// Too many ways through the plan to follow (`CHECK_FRONTIER`) before it was settled either
+    /// way: the verdict is unknown, not a failure of the plan. Then `steps_ok` counts the steps
+    /// that were followed in full.
     pub exhausted: bool,
-    /// A step fitted more than one distinct action, so `check` had to choose (and back out of
-    /// the choices that lead nowhere). Not a problem, just which plans exercise the search.
+    /// A step fitted actions to more than one distinct state, so there was more than one way
+    /// through the plan to follow. Not a problem, just which plans exercise the search.
     pub ambiguous: bool,
 }
 
-/// Most states `check` visits: a step can fit more than one action (two ledges down to the
-/// same region, a dash that ends in different states), so it backtracks.
-const CHECK_BUDGET: usize = 20_000;
+/// Most states `check` follows at once: a step can fit more than one action (two ledges down
+/// to the same region, one of which fizzles the cube; a dash that ends in different states),
+/// and every way through the plan so far is followed until one reaches the goal.
+const CHECK_FRONTIER: usize = 100_000;
 
-/// Replays `steps` on `model` (see the module docs).
+/// Replays `steps` on `model` (see the module docs). Follows every state the steps so far can
+/// lead to, step by step, so an ambiguous step can be settled by any later one.
 pub fn check(model: &Model, steps: &[Step]) -> Checked {
-    struct Search<'a> {
-        model: &'a Model,
-        steps: &'a [Step],
-        path: Vec<Action>,
-        budget: usize,
-        best: (usize, Vec<Action>, String),
-        exhausted: bool,
-        ambiguous: bool,
-    }
-    impl Search<'_> {
-        fn go(&mut self, s: &State) -> bool {
-            let i = self.path.len();
-            if self.model.is_goal(s) {
-                return true;
-            }
-            let Some(step) = self.steps.get(i) else {
-                if i >= self.best.0 {
-                    self.best = (i, self.path.clone(), "the plan ends before the exit".into());
-                }
-                return false;
+    check_from(model, model.initial(), steps)
+}
+
+/// `check`, from state `start`.
+fn check_from(model: &Model, start: State, steps: &[Step]) -> Checked {
+    // The states after `i` steps, each once, and for each step how its states were reached:
+    // (index of the state it came from among the step's before, action).
+    let mut states = vec![start];
+    let mut back: Vec<Vec<(usize, Action)>> = Vec::new();
+    // The actions to the state at `k` after the last step.
+    let trace = |back: &[Vec<(usize, Action)>], mut k: usize| {
+        let mut plan: Vec<Action> = back
+            .iter()
+            .rev()
+            .map(|layer| {
+                let (from, a) = layer[k];
+                k = from;
+                a
+            })
+            .collect();
+        plan.reverse();
+        plan
+    };
+    let mut ambiguous = false;
+    let mut i = 0;
+    loop {
+        if let Some(k) = states.iter().position(|s| model.is_goal(s)) {
+            return Checked {
+                solved: true,
+                plan: trace(&back, k),
+                steps_ok: i,
+                problem: None,
+                exhausted: false,
+                ambiguous,
             };
-            if self.budget == 0 {
-                self.exhausted = true;
-                return false;
-            }
-            self.budget -= 1;
-            let mut tried: Vec<State> = Vec::new();
-            for (a, n) in self.model.successors(s) {
+        }
+        let failed = |problem: String, exhausted: bool| Checked {
+            solved: false,
+            plan: trace(&back, 0),
+            steps_ok: i,
+            problem: Some(problem),
+            exhausted,
+            ambiguous,
+        };
+        let Some(step) = steps.get(i) else {
+            return failed("the plan ends before the exit".into(), false);
+        };
+        let mut next: Vec<State> = Vec::new();
+        let mut seen: HashSet<State> = HashSet::new();
+        let mut layer: Vec<(usize, Action)> = Vec::new();
+        for (k, s) in states.iter().enumerate() {
+            for (a, n) in model.successors(s) {
                 // Two fitting actions can lead to the same state (two ledges down to one
-                // region): only the first is worth exploring. Distinct ones (a drop that
-                // fizzles the cube and a walk) all get a turn, and a dead end backs out.
-                if !fits(self.model, s, &a, &n, step) || tried.contains(&n) {
+                // region), from one state or two: it is followed once.
+                if !fits(model, s, &a, &n, step) || seen.contains(&n) {
                     continue;
                 }
-                self.ambiguous |= !tried.is_empty();
-                tried.push(n.clone());
-                self.path.push(a);
-                if self.go(&n) {
-                    return true;
-                }
-                self.path.pop();
+                seen.insert(n.clone());
+                next.push(n);
+                layer.push((k, a));
             }
-            if tried.is_empty() && i >= self.best.0 {
-                self.best = (
-                    i,
-                    self.path.clone(),
-                    format!("step {} ({}) fits no move", i + 1, step_text(step)),
-                );
+            if next.len() > CHECK_FRONTIER {
+                return failed("the check ran out of budget".into(), true);
             }
-            false
         }
-    }
-    let mut search = Search {
-        model,
-        steps,
-        path: Vec::new(),
-        budget: CHECK_BUDGET,
-        best: (0, Vec::new(), String::new()),
-        exhausted: false,
-        ambiguous: false,
-    };
-    let start = model.initial();
-    if search.go(&start) {
-        return Checked {
-            solved: true,
-            steps_ok: search.path.len(),
-            plan: search.path,
-            problem: None,
-            exhausted: false,
-            ambiguous: search.ambiguous,
-        };
-    }
-    let (steps_ok, plan, mut problem) = search.best;
-    if search.exhausted || problem.is_empty() {
-        problem = "the check ran out of budget".into();
-    }
-    Checked {
-        solved: false,
-        plan,
-        steps_ok,
-        problem: Some(problem),
-        exhausted: search.exhausted,
-        ambiguous: search.ambiguous,
+        if next.is_empty() {
+            return failed(
+                format!("step {} ({}) fits no move", i + 1, step_text(step)),
+                false,
+            );
+        }
+        ambiguous |= next.len() > 1;
+        states = next;
+        back.push(layer);
+        i += 1;
     }
 }
 
@@ -401,7 +399,7 @@ fn fits(model: &Model, s: &State, a: &Action, next: &State, step: &Step) -> bool
         | (Step::Funnel(c), Action::Move { kind: Move::Funnel, .. })
         | (Step::Ride(c), Action::Move { kind: Move::Ride, .. }) => lands(&c),
         (Step::Fire(k, c, d), Action::Fire { color, class, .. }) => {
-            k == color && model.portals.classes[class].faces.contains(&(c, d))
+            k == color && model.portals.has_face(class, (c, d))
         }
         (Step::Enter(k), Action::Enter { color }) => k == color,
         (Step::PickUp(c), Action::PickUp { from, .. }) => loc_fits(model, from, c, None, None),
@@ -448,5 +446,68 @@ fn loc_fits(
         // A loose cube fizzled on the way: wherever it was going.
         CubeLoc::Gone => true,
         CubeLoc::Held => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::Level;
+    use crate::solver::Mode;
+
+    /// Two droppers leave a sphere and a standard cube in one region, a sphere button opens
+    /// the exit (data/plans/test-gen.jsonl).
+    const LEVEL: &str = "size 7 9 8 open 3 3 1 4 6 7 0 0 2 6 8 7 white +x 4 4 1 6 8 1 white -x 3 4 1         6 8 7 0 4 2 6 4 5 0 5 4 6 7 5 white +y 1 8 2 6 8 5 entry 0 7 2 +x exit 1 0 2 +y         laserfield 2 8 2 -y +z 1 on dropper 0 6 7 sphere dropper 1 7 7 standard button 1 2 2         sphere > exit button 5 0 2 weighted > exit pedestal 3 3 1 inf > exit turret 4 0 2 3         laser 6 1 2 -x -z on catcher 4 5 1 -x -z > stairs 0 funnel 5 0 3 +y on stairs 5 2 2         +x off";
+    const PLAN: &str = "fire blue 2 8 3 +y fire orange 0 4 2 -x pickup 1 7 2 enter orange         knock 4 0 2 walk 5 0 2 putdown 5 0 2 walk 6 1 2 walk 4 3 1 fire blue 3 4 1 -x         press 3 3 1 enter blue pickup 0 6 2 putdown 1 2 2 exit";
+
+    /// Step 3 picks up either cube. The sphere does on the weighted button (step 7) as well as
+    /// the standard cube, so with the sphere every later step still fits, until the last puts
+    /// the standard cube on the sphere button, where it does nothing: the check has to keep
+    /// both ways until the end.
+    #[test]
+    fn ambiguity_settled_at_the_end() {
+        let level = Level::from_puzzle(&crate::tokens::decode(LEVEL).unwrap());
+        let model = Model::new(&level, Mode::Conservative).unwrap();
+        let steps = decode(PLAN).unwrap();
+        let c = check(&model, &steps);
+        assert!(c.solved, "{:?}", c.problem);
+        assert!(c.ambiguous);
+        assert_eq!(c.plan.len(), steps.len());
+        let states = crate::metrics::replay(&model, &c.plan).unwrap();
+        let wrong: Vec<State> = model
+            .successors(&states[2])
+            .into_iter()
+            .filter(|(a, n)| *n != states[3] && fits(&model, &states[2], a, n, &steps[2]))
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(wrong.len(), 1);
+        let w = check_from(&model, wrong[0].clone(), &steps[3..]);
+        assert!(!w.solved);
+        assert_eq!(w.steps_ok, steps.len() - 3, "{:?}", w.problem);
+    }
+
+    /// Picking up either cube and putting it back, over and over, splits the way through the
+    /// plan in two and joins it again each time: followed one way at a time, that's 2^n ways
+    /// by the end, here two states at most. With a last step that fits nothing, the plan is
+    /// settled as illegal there.
+    #[test]
+    fn rejoined_ways_are_followed_once() {
+        let level = Level::from_puzzle(&crate::tokens::decode(LEVEL).unwrap());
+        let model = Model::new(&level, Mode::Conservative).unwrap();
+        let plan = decode(PLAN).unwrap();
+        let mut steps = plan[..2].to_vec();
+        for _ in 0..40 {
+            steps.extend(decode("pickup 1 7 2 putdown 1 7 2").unwrap());
+        }
+        steps.extend(&plan[2..plan.len() - 1]);
+        steps.push(Step::Walk([31, 31, 31]));
+        let c = check(&model, &steps);
+        assert!(!c.solved && !c.exhausted && c.ambiguous);
+        assert_eq!(c.steps_ok, steps.len() - 1, "{:?}", c.problem);
+        // Without the bad step, solved.
+        steps.pop();
+        steps.extend(&plan[plan.len() - 1..]);
+        let c = check(&model, &steps);
+        assert!(c.solved, "{:?}", c.problem);
     }
 }
