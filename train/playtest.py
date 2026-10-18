@@ -4,7 +4,7 @@ Generated levels carry a fixed creation time (src/builder.rs keeps fixtures byte
 the editor lists them all as made on Oct 8 2025. Copies get Timestamp_Created/_Modified set
 to now, a second apart in argument order so the editor's date sort keeps that order. Files
 are named glados-<source name>.p2c unless the name already starts with glados-. Each copy gets
-a preview image (<name>.jpg, train/preview.py: floor plan and item list) for the editor's Open
+a preview image (<name>.jpg, train/preview.py: isometric view and item list) for the editor's Open
 screen, and its Description lists the items.
 
     python train/playtest.py out/sample/p2c/00003.p2c favorites/laser.p2c

@@ -1,10 +1,13 @@
-"""Draw the Puzzle Maker's "Open" screen preview for a .p2c: a top-down map and a list of items.
+"""Draw the Puzzle Maker's "Open" screen preview for a .p2c: an isometric view and a list of items.
 
 The editor shows <name>.jpg (555x312) next to <name>.p2c as a level's thumbnail and only renders
 one itself when the level is saved in the editor, so generated levels have none. This draws a
-stand-in: floor plan on the left (darker = lower floor, black = solid, teal = goo; items as
-coloured dots, barriers and tracks as lines), level name, size and item counts on the right.
-playtest.py calls it for every level it copies in.
+stand-in: the chamber in oblique 2.5D on the left (Z up, the near walls cut away so you can see
+in; darker = lower floor, teal = goo, grey = wall, and items as coloured dots, barriers and
+tracks as lines), the level name, size and item counts on the right. The projection is the one
+`glados view` (src/viewer.html) draws with, turned to the corner the editor's own preview looks
+from, so a level is oriented the way the game shows it. playtest.py calls it for every level it
+copies in.
 
     python train/preview.py level.p2c [more.p2c ...]       # writes level.jpg next to each
 """
@@ -16,8 +19,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 W, H = 555, 312
 MAP = 300  # square map area on the left
-BG, WALL, TEXT, DIM = (38, 40, 44), (14, 15, 17), (235, 235, 235), (150, 155, 160)
+BG, TEXT, DIM = (38, 40, 44), (235, 235, 235), (150, 155, 160)
+WALL, WALL_X = (52, 57, 64), (46, 51, 58)  # the far walls, shaded by which way they face
 GOO = (40, 120, 90)
+TURNS = 3  # quarter-turns of the level about z, to the corner the editor's own preview looks from
 
 TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|([{}])')
 
@@ -136,45 +141,102 @@ def render(p2c, name=None):
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
 
-    cell = max(1, min((MAP - 12) // sx, (MAP - 12) // sy))
-    ox, oy = 6 + (MAP - 12 - cell * sx) // 2, 6 + (MAP - 12 - cell * sy) // 2
-    goo = {tuple(ints(i["VoxelPos"]))[:2] for i in items if i.get("Type") == "ITEM_GOO"}
+    goo = {tuple(ints(i["VoxelPos"])[:3]) for i in items if i.get("Type") == "ITEM_GOO"}
 
-    def px(x, y):  # cell centre; +y points up the image
-        return ox + x * cell + cell / 2, oy + (sy - 1 - y) * cell + cell / 2
+    def is_solid(x, y, z):
+        return (x, y, z) in solid if 0 <= x < sx and 0 <= y < sy and 0 <= z < sz else True
 
-    for x in range(sx):
+    def rotxy(x, y):  # the level turned TURNS quarter turns about z
+        if TURNS % 4 == 1:
+            return -y, x
+        if TURNS % 4 == 2:
+            return -x, -y
+        if TURNS % 4 == 3:
+            return y, -x
+        return x, y
+
+    # Oblique 2.5D, Z up: the projection glados view draws with, the level turned TURNS quarter
+    # turns first. `rx + ry` is depth, so cells with a larger one are nearer (drawn last).
+    def project(x, y, z):
+        rx, ry = rotxy(x, y)
+        return (rx - ry) * 0.5, (rx + ry) * 0.25 - z, rx + ry
+
+    box = MAP - 12
+    us = [project(x, y, z)[0] for x in (0, sx) for y in (0, sy) for z in (0, sz)]
+    vs = [project(x, y, z)[1] for x in (0, sx) for y in (0, sy) for z in (0, sz)]
+    scale = min((box - 8) / max(1e-6, max(us) - min(us)), (box - 8) / max(1e-6, max(vs) - min(vs)))
+    cu, cv = (min(us) + max(us)) / 2, (min(vs) + max(vs)) / 2
+    ox, oy = 6 + box / 2, 6 + box / 2
+
+    def screen(x, y, z):  # a voxel point -> an image point
+        u, v, _ = project(x, y, z)
+        return ox + (u - cu) * scale, oy + (v - cv) * scale
+
+    def quad(points, fill):
+        d.polygon([screen(*p) for p in points], fill=fill, outline=(0, 0, 0))
+
+    def floor(x, y, z):  # the four corners of cell (x, y, z)'s floor
+        return [(x, y, z), (x + 1, y, z), (x + 1, y + 1, z), (x, y + 1, z)]
+
+    def wall(x, y, z, dr):  # the four corners of a vertical face
+        if dr == "-x":
+            return [(x, y, z), (x, y + 1, z), (x, y + 1, z + 1), (x, y, z + 1)]
+        if dr == "+y":
+            return [(x, y + 1, z), (x + 1, y + 1, z), (x + 1, y + 1, z + 1), (x, y + 1, z + 1)]
+        if dr == "+x":
+            return [(x + 1, y, z), (x + 1, y + 1, z), (x + 1, y + 1, z + 1), (x + 1, y, z + 1)]
+        return [(x, y, z), (x + 1, y, z), (x + 1, y, z + 1), (x, y, z + 1)]  # -y
+
+    # Floors and walls. Only the walls facing away from the camera are drawn: the near ones are
+    # cut away so the room reads from the front (glados view's `nearFace`).
+    walls = [s for s in (("+x", 1, 0), ("-x", -1, 0), ("+y", 0, 1), ("-y", 0, -1))
+             if sum(rotxy(s[1], s[2])) <= 0.01]
+
+    ops = []
+    for z in range(sz):
         for y in range(sy):
-            # Highest floor you can stand on in this column.
-            floor = next((z for z in range(sz - 1, -1, -1)
-                          if (x, y, z) not in solid and (z == 0 or (x, y, z - 1) in solid)), None)
-            if floor is None:
-                colour = WALL
-            elif (x, y) in goo:
-                colour = GOO
-            else:
-                v = 70 + int(110 * floor / max(1, sz - 1))
-                colour = (v, v + 4, v + 10)
-            cx, cy = px(x, y)
-            d.rectangle([cx - cell / 2, cy - cell / 2, cx + cell / 2 - 1, cy + cell / 2 - 1], fill=colour)
+            for x in range(sx):
+                if is_solid(x, y, z):
+                    continue
+                if (x, y, z) in goo:
+                    fill = GOO
+                elif is_solid(x, y, z - 1):
+                    v = 70 + int(110 * z / max(1, sz - 1))
+                    fill = (v, v + 4, v + 10)
+                else:
+                    fill = None
+                dep = project(x + .5, y + .5, z)[2]
+                if fill is not None:
+                    ops.append((dep, 0, floor(x, y, z), fill))
+                for dr, dx, dy in walls:
+                    if is_solid(x + dx, y + dy, z):
+                        ops.append((dep, 1, wall(x, y, z, dr), WALL if dx else WALL_X))
+    for _, _, points, fill in sorted(ops, key=lambda o: (o[0], o[1])):
+        quad(points, fill)
 
     by_index = {i.get("Index"): i for i in items}
     shown = [(i, describe(i)) for i in items]
     colour_of = {i.get("Index"): desc[1] for i, desc in shown if desc}
-    for c in conns:  # barrier and track extents
+    for c in conns:  # barrier and track extents, drawn where they run
         if c.get("Type") in ("CONNECTION_BARRIER_ANCHOR_TO_EXTENT", "CONNECTION_PISTON_ANCHOR_TO_EXTENT",
                              "CONNECTION_RAIL_ANCHOR_TO_EXTENT"):
             a, b = by_index.get(c.get("Sender")), by_index.get(c.get("Receiver"))
-            if a and b and a.get("Index") in colour_of:
-                pa, pb = px(*ints(a["VoxelPos"])[:2]), px(*ints(b["VoxelPos"])[:2])
-                d.line([pa, pb], fill=colour_of[a["Index"]], width=max(2, cell // 4))
-    r = max(2, cell * 0.32)
-    doors_last = sorted(shown, key=lambda s: bool(s[1]) and s[1][0] in ("Entry", "Exit"))
-    for i, desc in doors_last:
-        if desc and "VoxelPos" in i:
-            cx, cy = px(*ints(i["VoxelPos"])[:2])
-            shape = d.rectangle if desc[0] in ("Entry", "Exit") else d.ellipse
-            shape([cx - r, cy - r, cx + r, cy + r], fill=desc[1], outline=(0, 0, 0))
+            if a and b and a.get("Index") in colour_of and "VoxelPos" in a and "VoxelPos" in b:
+                pa, pb = ints(a["VoxelPos"]), ints(b["VoxelPos"])
+                d.line([screen(pa[0] + .5, pa[1] + .5, pa[2] + .5), screen(pb[0] + .5, pb[1] + .5, pb[2] + .5)],
+                       fill=colour_of[a["Index"]], width=max(2, int(scale * 0.14)))
+
+    def depth(item):  # how near an item's cell is, for painter's order
+        x, y, z = ints(item["VoxelPos"])
+        return project(x + .5, y + .5, z)[2]
+
+    r = max(3, min(14, int(scale * 0.22)))
+    for i, desc in sorted((s for s in shown if s[1] and "VoxelPos" in s[0]),
+                          key=lambda s: (s[1][0] in ("Entry", "Exit"), depth(s[0]))):
+        x, y, z = ints(i["VoxelPos"])
+        cx, cy = screen(x + .5, y + .5, z + .5)
+        shape = d.rectangle if desc[0] in ("Entry", "Exit") else d.ellipse
+        shape([cx - r, cy - r, cx + r, cy + r], fill=desc[1], outline=(0, 0, 0))
 
     counts = Counter(desc for _, desc in shown if desc and desc[0] not in ("Entry", "Exit"))
     x0, y = MAP + 10, 10
