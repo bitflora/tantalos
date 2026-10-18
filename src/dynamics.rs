@@ -4,6 +4,9 @@
 //!
 //! Rules (ASSUMPTIONS until checked in-game):
 //! - Stairs, deployed, climb from their two cells onto the ledge they face (`Move::Stairs`).
+//!   Deployed, they are a ramp of steps up to most of a voxel high: nobody walks onto or off
+//!   them sideways (in-game, a walk across their top end stuck on the steps), so their cells'
+//!   side faces are walls; they are walked into from behind.
 //! - Angled and glass panels, deployed: on a floor at 45° or 60° their cell is a slope nobody
 //!   stands on (whoever is there steps off away from the hinge); at 90° (any surface) the panel
 //!   stands on its hinge edge: a wall across that face, or a floor if the hinge is at the top
@@ -19,7 +22,9 @@
 //!   or a glass/grating panel. A bridge sits 0.375 voxel from the middle of its cells against
 //!   its walkable `side` (as the editor's `LocalPos`): with that side up it is the floor of the
 //!   cells it crosses, with it down the floor of the cells over them (it runs along their
-//!   bottom). One standing on edge is a wall on its `side` face of each.
+//!   bottom). One standing on edge is a wall on its `side` face of each. (Measured: out of a
+//!   wall portal a bridge sits 24 units over its cells' floor, above a step: getting onto it
+//!   from that floor takes a hop, which the player can do, so it is still their floor.)
 //! - Through portals: a projection that ends at a white face continues out of the other
 //!   portal. A horizontal bridge going wall to wall stays horizontal (`bridge_routes`); other
 //!   bridges through portals aren't modelled. Funnels carry on in any direction
@@ -159,6 +164,13 @@ impl Devices {
         }
 
         for (s, &b) in level.stairs.iter().zip(&d.stairs_bit) {
+            for c in [s.cell, step(s.cell, s.dir)] {
+                for side in Dir::HORIZONTAL {
+                    if side.axis() != s.dir.axis() {
+                        blocks.entry(face_key(c, side)).or_insert(Cond::on(b));
+                    }
+                }
+            }
             moves.push(DynMove {
                 from: vec![s.cell, step(s.cell, s.dir)],
                 to: vec![(Cond::ALWAYS, s.top(), 0)],

@@ -125,21 +125,25 @@ impl Rules {
         }
     }
 
+    /// Measured in-game 2026-10-18: a splat paints its own cell (the middle of the cell
+    /// beside it was bare: a bounce and a portal shot there failed); about one cell of
+    /// propulsion gel gets the player to 400 u/s, and a jump from it carries ~290 units at
+    /// ledge height (two cells of gap, not three).
     fn gel(mode: Mode) -> GelRules {
         match mode {
             Mode::Conservative => GelRules {
-                radius: 1,
+                radius: 0,
                 bounce_height: 2,
                 bounce_reach: 1,
-                leap_run: 2,
-                leap_gap: 3,
+                leap_run: 1,
+                leap_gap: 2,
             },
             Mode::Liberal => GelRules {
-                radius: 2,
+                radius: 1,
                 bounce_height: 4,
                 bounce_reach: 2,
                 leap_run: 1,
-                leap_gap: 5,
+                leap_gap: 3,
             },
         }
     }
@@ -968,6 +972,15 @@ impl Model {
                     "polarity wire {} -> {} isn't from a sender to a funnel",
                     link.sender, link.receiver
                 ))),
+            }
+        }
+
+        // A piston wired to a button starts the other way round from its START_UP (in-game,
+        // piston_bridge: START_UP 0 stood up until its pedestal was pressed, then went down).
+        for ps in &level.pistons {
+            let w = &mut switches[switch_of[&ps.item]];
+            if !w.inputs.is_empty() {
+                w.start = !w.start;
             }
         }
 

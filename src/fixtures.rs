@@ -254,12 +254,13 @@ pub fn bounce_gel() -> Puzzle {
     b.build()
 }
 
-/// A goo trench three wide; propulsion gel poured at its edge lets you leap it.
+/// A goo trench two wide; propulsion gel poured at its edge lets you leap it (three was too
+/// far in-game).
 pub fn speed_gel() -> Puzzle {
     let mut b = Builder::new("Speed gel", [10, 3, 4]);
     b.carve([0, 0, 1], [9, 2, 3]);
-    b.carve([4, 0, 0], [6, 2, 0]);
-    b.goo([5, 1, 0]);
+    b.carve([4, 0, 0], [5, 2, 0]);
+    b.goo([4, 1, 0]);
     b.entry([0, 1, 1], Dir::PosX);
     b.exit([9, 1, 1], Dir::NegX);
     b.gel_dropper([3, 1, 1], 1, true);
@@ -413,14 +414,14 @@ pub fn stairs_button() -> Puzzle {
 }
 
 /// A two-deep pit cuts the room; a piston platform in it rises flush with the floor when a
-/// latching pedestal is pressed.
+/// latching pedestal is pressed. (START_UP set: wired, that starts it down.)
 pub fn piston_bridge() -> Puzzle {
     let mut b = Builder::new("Piston bridge", [7, 3, 6]);
     b.carve([0, 0, 3], [6, 2, 5]);
     b.carve([3, 0, 1], [3, 2, 2]);
     b.entry([0, 1, 3], Dir::PosX);
     b.exit([6, 1, 3], Dir::NegX);
-    let piston = b.piston([3, 1, 1], Dir::PosZ, 0, 2, false);
+    let piston = b.piston([3, 1, 1], Dir::PosZ, 0, 2, true);
     let p = b.pedestal([1, 2, 3], None);
     b.connect(p, piston);
     b.build()

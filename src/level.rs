@@ -44,7 +44,9 @@
 //!   and deployed climb one voxel toward local +x (stairs.vmf: four steps of 32 over 256 units).
 //! - Piston platforms (`ITEM_PISTON_PLATFORM`) push out of the surface behind the item's cell
 //!   along its up: at level L they fill the L cells from the item's (`BOTTOM_LEVEL`/`TOP_LEVEL`,
-//!   `START_UP`). On a floor, that makes the cell L above the item's a floor.
+//!   `START_UP`). On a floor, that makes the cell L above the item's a floor. Wired to a
+//!   button, a piston starts the other way round from `START_UP` (measured in-game; the
+//!   solver flips it).
 //! - Rail platforms (`ITEM_RAIL_PLATFORM`) are a floor in the item's cell that travels to the
 //!   cell of the extent farthest from it (their angles don't follow the up = normal rule).
 

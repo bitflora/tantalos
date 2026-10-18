@@ -1,6 +1,7 @@
 //! Gel (plan.md tier 3): where paint lands and the moves painted floors allow.
 //!
-//! Rules (ASSUMPTIONS until measured in-game):
+//! Rules (ASSUMPTIONS until measured in-game; the radius and leap were measured 2026-10-18,
+//! see `Rules::gel`):
 //! - Gel paints the face it lands on and the faces of the same surface within `radius`
 //!   (Manhattan) of it. A dropper's stream falls straight down from the dropper.
 //! - Repulsion (blue) floor: from a painted cell the player can bounce up `1..=bounce_height`

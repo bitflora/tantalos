@@ -16,7 +16,8 @@
 //!   turret or portal, perhaps through more spots) are kept.
 //! - A beam that ends at a face with a portal comes out of the other portal, along its
 //!   normal. A beam coming out of a portal and ending at the other one just loops.
-//! - Beams don't hurt the player (crossing one quickly is survivable) and don't stop cubes.
+//! - Beams don't stop the player or cubes. (In-game a beam burns and pushes back a player who
+//!   walks into it: crossing one takes a running jump over it, which play.py does.)
 
 use std::collections::{HashMap, HashSet};
 
