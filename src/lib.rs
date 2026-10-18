@@ -12,6 +12,7 @@
 //! checker for plans a model writes (`plan`).
 //! Devices that change the geometry as the level is played: bridges, funnels, panels, stairs,
 //! pistons, rails (`dynamics`); laser beams (`lasers`); flings and faith plates (`flings`).
+//! A local browser viewer for the solutions you have saved (`view`).
 
 pub mod builder;
 pub mod dataset;
@@ -38,3 +39,4 @@ pub mod route;
 pub mod solver;
 pub mod tokens;
 pub mod turrets;
+pub mod view;

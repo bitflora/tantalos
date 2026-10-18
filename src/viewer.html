@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glados view</title>
+<style>
+  :root { --bg:#16181d; --panel:#1e2127; --panel2:#252932; --line:#333844; --text:#e6e9ee; --dim:#98a1b0; --accent:#5aa9ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font:13px/1.4 "Segoe UI", system-ui, sans-serif; overflow:hidden; }
+  #app { display:flex; height:100vh; }
+  #sidebar { width:290px; flex:0 0 auto; background:var(--panel); border-right:1px solid var(--line);
+    display:flex; flex-direction:column; }
+  #sidebar header { padding:10px 12px; border-bottom:1px solid var(--line); }
+  #sidebar h1 { margin:0 0 8px; font-size:14px; font-weight:600; letter-spacing:.3px; }
+  #sidebar h1 span { color:var(--dim); font-weight:400; }
+  #search { width:100%; padding:6px 8px; background:var(--panel2); color:var(--text);
+    border:1px solid var(--line); border-radius:6px; outline:none; }
+  #search:focus { border-color:var(--accent); }
+  .row { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  #count { color:var(--dim); font-size:12px; }
+  #list { overflow:auto; flex:1; margin:0; padding:6px; list-style:none; }
+  #list .group { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.6px;
+    margin:10px 6px 4px; }
+  #list .item { padding:6px 8px; border-radius:6px; cursor:pointer; }
+  #list .item:hover { background:var(--panel2); }
+  #list .item.active { background:#2c3c52; }
+  #list .item .t { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #list .item .m { color:var(--dim); font-size:11px; }
+  #main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #toolbar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line);
+    background:var(--panel); flex-wrap:wrap; }
+  #toolbar .title { font-weight:600; margin-right:auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #toolbar .title small { color:var(--dim); font-weight:400; margin-left:8px; }
+  button { background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px;
+    padding:5px 9px; cursor:pointer; font:inherit; }
+  button:hover { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; border-color:var(--line); }
+  button.primary { background:#2c3c52; border-color:#3a5170; }
+  select { background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 6px; }
+  label.chk { color:var(--dim); display:flex; align-items:center; gap:5px; cursor:pointer; }
+  #stage { position:relative; flex:1; min-height:0; }
+  #cv { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--dim); text-align:center; padding:20px; }
+  #legend { position:absolute; left:12px; bottom:10px; display:flex; flex-wrap:wrap; gap:4px 10px;
+    max-width:70%; pointer-events:none; }
+  #legend span { display:flex; align-items:center; gap:5px; color:var(--dim); font-size:11px;
+    background:rgba(22,24,29,.7); padding:2px 6px; border-radius:10px; }
+  #legend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
+  #steps { max-height:190px; overflow:auto; border-top:1px solid var(--line); background:var(--panel);
+    padding:6px 8px; }
+  #steps .step { display:flex; gap:8px; padding:2px 6px; border-radius:5px; cursor:pointer; }
+  #steps .step:hover { background:var(--panel2); }
+  #steps .step.done { color:var(--text); }
+  #steps .step.todo { color:var(--dim); }
+  #steps .step.now { background:#2c3c52; }
+  #steps .step .n { color:var(--dim); width:20px; text-align:right; flex:0 0 auto; }
+  #hint { color:var(--dim); font-size:11px; margin-left:6px; }
+  canvas { cursor:grab; } canvas.drag { cursor:grabbing; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header>
+      <h1>glados view <span>— solutions</span></h1>
+      <input id="search" placeholder="search title or folder…" autocomplete="off">
+      <div class="row">
+        <button id="rescan" title="Look for new solutions on disk">Rescan</button>
+        <span id="count"></span>
+      </div>
+    </header>
+    <ul id="list"></ul>
+  </aside>
+  <main id="main">
+    <div id="toolbar">
+      <div class="title" id="title">no solution selected <small id="meta"></small></div>
+      <button id="prev" title="Previous step (←)">◀</button>
+      <button id="play" class="primary" title="Play/pause (space)">▶ Play</button>
+      <button id="next" title="Next step (→)">▶</button>
+      <button id="rst" title="Back to the start">⟲</button>
+      <span id="stepcount" style="color:var(--dim); min-width:64px; text-align:center"></span>
+      <select id="speed" title="Playback speed">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+      </select>
+      <button id="rot" title="Rotate the view 90°">⟳</button>
+      <button id="zin" title="Zoom in">+</button>
+      <button id="zout" title="Zoom out">−</button>
+      <button id="fit" title="Reset the view">Fit</button>
+      <label class="chk"><input type="checkbox" id="nearw"> near walls</label>
+      <button id="save" title="Save this solution as a standalone .html">Save .html</button>
+    </div>
+    <div id="stage">
+      <canvas id="cv"></canvas>
+      <div id="empty">Pick a solution from the list.</div>
+      <div id="legend"></div>
+    </div>
+    <div id="steps"></div>
+  </main>
+</div>
+
+<script>
+const DATA = __GLADOS_DATA__;   // null in server mode; the inlined item when standalone
+
+// ---- state ----------------------------------------------------------------
+let geom = null, route = null, name = "", L = 0;
+let step = 0, playT = 0, playing = false, speed = 1;
+let legPaths = [];                 // cell-space polyline per leg, for the animation
+let view = { yaw: 0, zoom: 1, panX: 0, panY: 0, nearWalls: false };
+let activePath = null;
+let base = document.createElement("canvas");   // the level, drawn once per view change
+let baseCtx = base.getContext("2d");
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+// Where poly/dot draw: the visible canvas normally, the offscreen base while building it.
+let drawingCtx = ctx;
+
+// ---- colours --------------------------------------------------------------
+const C = {
+  wall: "#4a515b", goo: "#1f6b52",
+  white: "rgba(226,236,246,0.45)",
+  glass: "rgba(150,215,230,0.32)", grating: "rgba(182,196,206,0.32)",
+  fizzler: "rgba(110,165,255,0.38)", laserfield: "rgba(255,105,215,0.32)",
+  paint: { bounce: "#2f6bff", speed: "#ff8c14", portal: "#e6e6e6", water: "#6ec8ff" },
+  player: "#ffd23f", cube: "#e2e2e2",
+  blue: "#3aa0ff", orange: "#ff8c1a",
+  path: "rgba(255,255,255,0.18)", pathDone: "rgba(120,255,180,0.85)",
+};
+const ITEM = {
+  entry: "#31d158", exit: "#ff4636", cubedropper: "#c8c8c8", button: "#e6325a",
+  pedestal: "#e6325a", paintdropper: "#b06cff", turret: "#ffe128", laser: "#ff2828",
+  catcher: "#c82828", relay: "#c82828", plate: "#a0e63c", bridge: "#8cd2ff",
+  funnel: "#aa64ff", panel: "#d2aa6e", glasspanel: "#a8e0e0", flippanel: "#d2aa6e",
+  stairs: "#d2aa6e", piston: "#d2aa6e", rail: "#d2aa6e",
+};
+const LEGEND = [["entry", ITEM.entry], ["exit", ITEM.exit], ["cube", C.cube], ["dropper", ITEM.cubedropper],
+  ["button", ITEM.button], ["turret", ITEM.turret], ["gel", C.paint.bounce], ["beam", "#ff3c3c"],
+  ["fizzler", "#7ab0ff"], ["laser field", "#ff6ad5"], ["panel", ITEM.panel], ["white face", "#dfe7ef"]];
+
+// ---- projection (oblique 2.5D, Z up) --------------------------------------
+function rotXY(x, y) { const a = view.yaw, c = Math.cos(a), s = Math.sin(a); return [x * c - y * s, x * s + y * c]; }
+function proj(x, y, z) { const [rx, ry] = rotXY(x, y); return [(rx - ry) * 0.5, (rx + ry) * 0.25 - z, rx + ry]; }
+
+let tf = null;   // {toScreen(x,y,z), scale}
+function makeTransform(cw, ch) {
+  const [sx, sy, sz] = geom.size;
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+  for (const x of [0, sx]) for (const y of [0, sy]) for (const z of [0, sz]) {
+    const [px, py] = proj(x, y, z);
+    minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+    minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+  }
+  const w = Math.max(1e-3, maxX - minX), h = Math.max(1e-3, maxY - minY);
+  const scale = Math.min((cw - 60) / w, (ch - 60) / h) * view.zoom;
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  return {
+    scale,
+    toScreen(x, y, z) {
+      const [px, py] = proj(x, y, z);
+      return [(px - cx) * scale + cw / 2 + view.panX, (py - cy) * scale + ch / 2 + view.panY];
+    },
+  };
+}
+
+// ---- geometry sets --------------------------------------------------------
+let solidSet = null, gooSet = null, whiteSet = null;
+const key = (x, y, z) => x + "," + y + "," + z;
+function buildSets() {
+  solidSet = new Set(geom.solid.map(c => key(c[0], c[1], c[2])));
+  gooSet = new Set(geom.goo.map(c => key(c[0], c[1], c[2])));
+  whiteSet = new Set(geom.white.map(w => key(w[0], w[1], w[2]) + "," + w[3]));
+}
+function isSolid(x, y, z) {
+  const [sx, sy, sz] = geom.size;
+  if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz) return true;
+  return solidSet.has(key(x, y, z));
+}
+const AX = { "+x": [1, 0], "-x": [-1, 0], "+y": [0, 1], "-y": [0, -1], "+z": [0, 0], "-z": [0, 0] };
+
+// A face's quad, from the open cell (x,y,z) toward the solid side `d`.
+function faceQuad(x, y, z, d) {
+  switch (d) {
+    case "+x": return [[x + 1, y, z], [x + 1, y + 1, z], [x + 1, y + 1, z + 1], [x + 1, y, z + 1]];
+    case "-x": return [[x, y, z], [x, y + 1, z], [x, y + 1, z + 1], [x, y, z + 1]];
+    case "+y": return [[x, y + 1, z], [x + 1, y + 1, z], [x + 1, y + 1, z + 1], [x, y + 1, z + 1]];
+    case "-y": return [[x, y, z], [x + 1, y, z], [x + 1, y, z + 1], [x, y, z + 1]];
+    case "-z": return [[x, y, z], [x + 1, y, z], [x + 1, y + 1, z], [x, y + 1, z]];
+    default: return [[x, y, z + 1], [x + 1, y, z + 1], [x + 1, y + 1, z + 1], [x, y + 1, z + 1]];
+  }
+}
+// Depth of the outward normal of face `d` (how much it points at the camera).
+function nearFace(d) { const [vx, vy] = AX[d]; const [rx, ry] = rotXY(vx, vy); return rx + ry; }
+
+function poly(points, fill, stroke) {
+  const c = drawingCtx;
+  c.beginPath();
+  points.forEach((p, i) => { const [sx, sy] = tf.toScreen(p[0], p[1], p[2]); i ? c.lineTo(sx, sy) : c.moveTo(sx, sy); });
+  c.closePath();
+  if (fill) { c.fillStyle = fill; c.fill(); }
+  if (stroke) { c.strokeStyle = stroke; c.lineWidth = 1; c.stroke(); }
+}
+function dot(x, y, z, r, fill, stroke) {
+  const c = drawingCtx;
+  const [sx, sy] = tf.toScreen(x, y, z);
+  c.beginPath(); c.arc(sx, sy, r, 0, 2 * Math.PI);
+  c.fillStyle = fill; c.fill();
+  if (stroke) { c.strokeStyle = stroke; c.lineWidth = 1.5; c.stroke(); }
+}
+function floorColour(z, sz) { const v = 34 + Math.round(70 * (z / Math.max(1, sz - 1))); return `rgb(${v},${v + 5},${v + 12})`; }
+
+// ---- the static level (into `base`) ---------------------------------------
+function buildBase() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = cv.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  base.width = cv.width;
+  base.height = cv.height;
+  baseCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  baseCtx.clearRect(0, 0, w, h);
+  if (!geom) return;
+  tf = makeTransform(w, h);
+  const [sx, sy, sz] = geom.size;
+  const ops = [];
+  const depthOf = (x, y, z) => { const [rx, ry] = rotXY(x, y); return rx + ry; };
+
+  for (let z = 0; z < sz; z++) for (let y = 0; y < sy; y++) for (let x = 0; x < sx; x++) {
+    if (isSolid(x, y, z)) continue;
+    const cx = x + 0.5, cy = y + 0.5;
+    const dep = depthOf(cx, cy);
+    const goo = gooSet.has(key(x, y, z));
+    if (goo || isSolid(x, y, z - 1)) {
+      const col = goo ? C.goo : floorColour(z, sz);
+      ops.push({ d: dep, r: 0, f: () => poly(faceQuad(x, y, z, "-z"), col, "rgba(0,0,0,0.15)") });
+    }
+    for (const d of ["+x", "-x", "+y", "-y"]) {
+      if (!isSolid(x + AX[d][0], y + AX[d][1], z)) continue;
+      if (view.nearWalls === false && nearFace(d) > 0.01) continue;   // cut away the near walls
+      ops.push({ d: dep, r: 1, f: () => poly(faceQuad(x, y, z, d), C.wall, "rgba(0,0,0,0.25)") });
+    }
+    if (isSolid(x, y, z + 1)) {
+      // A white ceiling: a small marker at the face centre, so the roof doesn't hide the room.
+      if (whiteSet.has(key(x, y, z) + ",+z")) {
+        ops.push({ d: dep, r: 4, f: () => dot(cx, cy, z + 1, 4, C.white, "rgba(255,255,255,0.6)") });
+      }
+    }
+  }
+
+  for (const wf of geom.white) {
+    if (wf[3] === "+z" || wf[3] === "-z") continue;
+    const [x, y, z] = wf;
+    ops.push({ d: depthOf(x + 0.5, y + 0.5), r: 2, f: () => poly(faceQuad(x, y, z, wf[3]), C.white) });
+  }
+  for (const b of geom.barriers) for (const f of b.faces) {
+    const col = b.kind === "glass" ? C.glass : C.grating;
+    ops.push({ d: depthOf(f[0] + 0.5, f[1] + 0.5), r: 2, f: () => poly(faceQuad(f[0], f[1], f[2], f[3]), col) });
+  }
+  for (const h of geom.hazards) for (const f of h.faces) {
+    const col = h.kind === "fizzler" ? C.fizzler : C.laserfield;
+    ops.push({ d: depthOf(f[0] + 0.5, f[1] + 0.5), r: 2, f: () => poly(faceQuad(f[0], f[1], f[2], f[3]), col) });
+  }
+  for (const p of geom.paint) {
+    const col = C.paint[p.kind] || "#888";
+    const f = p.face, c = "rgba(0,0,0,0)";
+    ops.push({ d: depthOf(f[0] + 0.5, f[1] + 0.5), r: 2, f: () => poly(faceQuad(f[0], f[1], f[2], f[3]), hexA(col, 0.5), c) });
+    if (p.dropper) ops.push({ d: depthOf(p.dropper[0] + 0.5, p.dropper[1] + 0.5), r: 3, f: () => dot(p.dropper[0] + .5, p.dropper[1] + .5, p.dropper[2] + .5, 4, col, "#000") });
+  }
+
+  const idxCell = {};
+  for (const it of geom.items) {
+    if (it.i != null) idxCell[it.i] = it.p;
+    const p = it.p, col = itemColour(it);
+    ops.push({
+      d: depthOf(p[0] + .5, p[1] + .5), r: 3, f: () => {
+        dot(p[0] + .5, p[1] + .5, p[2] + .4, it.k === "turret" ? 7 : 5, col, "rgba(0,0,0,0.7)");
+      }
+    });
+  }
+  for (const [a, b] of geom.links) {
+    if (!idxCell[a] || !idxCell[b]) continue;
+    ops.push({
+      d: (depthOf(idxCell[a][0], idxCell[a][1]) + depthOf(idxCell[b][0], idxCell[b][1])) / 2, r: 3,
+      f: () => {
+        const [ax, ay] = tf.toScreen(idxCell[a][0] + .5, idxCell[a][1] + .5, idxCell[a][2] + .4);
+        const [bx, by] = tf.toScreen(idxCell[b][0] + .5, idxCell[b][1] + .5, idxCell[b][2] + .4);
+        baseCtx.strokeStyle = "rgba(255,255,255,0.18)"; baseCtx.setLineDash([3, 4]); baseCtx.lineWidth = 1;
+        baseCtx.beginPath(); baseCtx.moveTo(ax, ay); baseCtx.lineTo(bx, by); baseCtx.stroke();
+        baseCtx.setLineDash([]);
+      }
+    });
+  }
+
+  for (const line of (geom.beams || [])) {
+    if (line.length < 2) continue;
+    const pts = line.map(p => tf.toScreen(p[0], p[1], p[2]));
+    let dep = 0;
+    for (const p of line) { const [rx, ry] = rotXY(p[0], p[1]); dep += rx + ry; }
+    dep /= line.length;
+    ops.push({
+      d: dep, r: 4, f: () => {
+        const c = drawingCtx;
+        c.strokeStyle = "rgba(255,60,60,0.85)"; c.lineWidth = 2;
+        c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
+        c.strokeStyle = "rgba(255,200,200,0.9)"; c.lineWidth = 1;
+        c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
+      }
+    });
+  }
+
+  ops.sort((a, b) => (a.d - b.d) || (a.r - b.r));
+  const prev = drawingCtx;
+  drawingCtx = baseCtx;
+  for (const op of ops) op.f();
+  drawingCtx = prev;
+}
+
+function itemColour(it) {
+  if (it.k === "door") return ITEM[it.t] || "#fff";
+  return ITEM[it.k] || "#bbb";
+}
+function hexA(hex, a) {
+  if (!hex.startsWith("#") || hex.length !== 7) return hex;
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+// ---- overlay: the solution and the player ---------------------------------
+function stateAt(i) { return i <= 0 ? route.header.start : route.legs[i - 1].after; }
+const cellPt = c => [c[0] + .5, c[1] + .5, c[2] + .15];
+
+function buildPaths() {
+  legPaths = [];
+  for (let i = 0; i < L; i++) {
+    const from = stateAt(i).player, leg = route.legs[i];
+    const pts = [from, ...leg.walk];
+    const last = pts[pts.length - 1];
+    if (leg.after.player[0] !== last[0] || leg.after.player[1] !== last[1] || leg.after.player[2] !== last[2]) {
+      pts.push(leg.after.player);
+    }
+    legPaths.push(pts.filter((c, k) => k === 0 || c[0] !== pts[k - 1][0] || c[1] !== pts[k - 1][1] || c[2] !== pts[k - 1][2]));
+  }
+}
+function pointOn(path, t) {
+  if (path.length === 1) return path[0];
+  const segs = path.length - 1, s = Math.min(segs - 1e-6, t * segs), i = Math.floor(s), f = s - i;
+  const a = path[i], b = path[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = cv.getBoundingClientRect();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(base, 0, 0);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!geom) return;
+
+  // The whole plan, faint.
+  ctx.strokeStyle = C.path; ctx.lineWidth = 2; ctx.setLineDash([6, 5]);
+  ctx.beginPath();
+  legPaths.forEach((p, i) => p.forEach((c, k) => { const [x, y] = tf.toScreen(...cellPt(c)); (i || k) ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }));
+  ctx.stroke(); ctx.setLineDash([]);
+
+  // The part already played, bright.
+  ctx.strokeStyle = C.pathDone; ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  for (let i = 0; i < step; i++) legPaths[i].forEach((c, k) => { const [x, y] = tf.toScreen(...cellPt(c)); (i || k) ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  if (step > 0) ctx.stroke();
+
+  // Step markers.
+  for (let i = 0; i <= L; i++) {
+    const c = i === 0 ? route.header.start.player : route.legs[i - 1].after.player;
+    const [x, y] = tf.toScreen(...cellPt(c));
+    const done = i <= step;
+    ctx.beginPath(); ctx.arc(x, y, i === step ? 8 : 6, 0, 2 * Math.PI);
+    ctx.fillStyle = done ? "rgba(120,255,180,0.85)" : "rgba(255,255,255,0.25)"; ctx.fill();
+    ctx.fillStyle = "#0b0d10"; ctx.font = "600 10px Segoe UI"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(String(i), x, y + 0.5);
+  }
+
+  // Portals and cubes of the current state.
+  const st = stateAt(step);
+  st.portals.forEach((f, k) => { if (f) drawPortal(f, k === 0 ? C.blue : C.orange); });
+  (st.cubes || []).forEach((c, k) => {
+    if (!Array.isArray(c)) return;
+    const [x, y] = tf.toScreen(c[0] + .5, c[1] + .5, c[2] + .25);
+    ctx.fillStyle = C.cube; ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.rect(x - 6, y - 6, 12, 12); ctx.fill(); ctx.stroke();
+  });
+
+  // The player.
+  let pt;
+  if (playing && step < L) pt = pointOn(legPaths[step], playT);
+  else pt = cellPt(stateAt(Math.min(step, L)).player);
+  const [px, py] = tf.toScreen(pt[0], pt[1], pt[2]);
+  ctx.beginPath(); ctx.arc(px, py + 3, 9, 0, 2 * Math.PI); ctx.fillStyle = "rgba(0,0,0,0.35)"; ctx.fill();
+  dot(pt[0], pt[1], pt[2], 8, C.player, "#5a4a00");
+}
+
+function drawPortal(f, col) {
+  const c = f.centre || [f.cell[0] + .5, f.cell[1] + .5, f.cell[2] + .5];
+  const [x, y] = tf.toScreen(c[0], c[1], c[2]);
+  ctx.beginPath();
+  const flat = f.dir === "+z" || f.dir === "-z";
+  ctx.ellipse(x, y, flat ? 14 : 9, flat ? 6 : 12, 0, 0, 2 * Math.PI);
+  ctx.fillStyle = hexA(col, 0.5); ctx.fill();
+  ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.stroke();
+}
+
+// ---- playback -------------------------------------------------------------
+let raf = null, lastT = 0;
+function tick(t) {
+  if (!playing) return;
+  const dt = Math.min(0.1, (t - lastT) / 1000); lastT = t;
+  playT += dt * (1.4 * speed);
+  while (playT >= 1) {
+    playT -= 1; step++;
+    if (step >= L) { step = L; playT = 0; setPlaying(false); break; }
+  }
+  syncControls(); draw();
+  if (playing) raf = requestAnimationFrame(tick);
+}
+function setPlaying(on) {
+  playing = on;
+  document.getElementById("play").textContent = on ? "⏸ Pause" : "▶ Play";
+  if (on) { if (step >= L) { step = 0; playT = 0; } lastT = performance.now(); raf = requestAnimationFrame(tick); }
+  else if (raf) { cancelAnimationFrame(raf); raf = null; }
+}
+function setStep(s) {
+  step = Math.max(0, Math.min(L, s)); playT = 0;
+  syncControls(); draw();
+}
+
+// ---- controls -------------------------------------------------------------
+function syncControls() {
+  document.getElementById("prev").disabled = step <= 0;
+  document.getElementById("next").disabled = step >= L;
+  document.getElementById("stepcount").textContent = `${step} / ${L}`;
+  const rows = document.querySelectorAll("#steps .step");
+  rows.forEach((r, i) => {
+    r.classList.toggle("done", i < step);
+    r.classList.toggle("now", i === step);
+    r.classList.toggle("todo", i >= step);
+  });
+}
+function wireControls() {
+  document.getElementById("prev").onclick = () => { setPlaying(false); setStep(step - 1); };
+  document.getElementById("next").onclick = () => { setPlaying(false); setStep(step + 1); };
+  document.getElementById("rst").onclick = () => { setPlaying(false); setStep(0); };
+  document.getElementById("play").onclick = () => setPlaying(!playing);
+  document.getElementById("speed").onchange = e => speed = parseFloat(e.target.value);
+  document.getElementById("rot").onclick = () => { view.yaw += Math.PI / 2; buildBase(); draw(); };
+  document.getElementById("zin").onclick = () => { view.zoom *= 1.2; buildBase(); draw(); };
+  document.getElementById("zout").onclick = () => { view.zoom /= 1.2; buildBase(); draw(); };
+  document.getElementById("fit").onclick = () => { view = { yaw: 0, zoom: 1, panX: 0, panY: 0, nearWalls: view.nearWalls }; buildBase(); draw(); };
+  document.getElementById("nearw").onchange = e => { view.nearWalls = e.target.checked; buildBase(); draw(); };
+  document.getElementById("save").onclick = saveStandalone;
+
+  let dragging = false, lx = 0, ly = 0;
+  cv.addEventListener("mousedown", e => { dragging = true; lx = e.clientX; ly = e.clientY; cv.classList.add("drag"); });
+  window.addEventListener("mouseup", () => { dragging = false; cv.classList.remove("drag"); });
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    view.panX += e.clientX - lx; view.panY += e.clientY - ly; lx = e.clientX; ly = e.clientY;
+    buildBase(); draw();
+  });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    view.zoom *= e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    buildBase(); draw();
+  }, { passive: false });
+  window.addEventListener("resize", () => { if (geom) { buildBase(); draw(); } });
+  if (window.ResizeObserver) new ResizeObserver(() => { if (geom) { buildBase(); draw(); } }).observe(document.getElementById("stage"));
+  window.addEventListener("keydown", e => {
+    if (e.target.tagName === "INPUT") return;
+    if (e.key === "ArrowLeft") { setPlaying(false); setStep(step - 1); }
+    else if (e.key === "ArrowRight") { setPlaying(false); setStep(step + 1); }
+    else if (e.key === " ") { e.preventDefault(); setPlaying(!playing); }
+  });
+}
+
+function renderLegend() {
+  document.getElementById("legend").innerHTML = LEGEND
+    .map(([n, c]) => `<span><i style="background:${c}"></i>${n}</span>`).join("");
+}
+
+function renderSteps() {
+  const box = document.getElementById("steps");
+  box.innerHTML = "";
+  if (!route) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  route.legs.forEach((leg, i) => {
+    const el = document.createElement("div");
+    el.className = "step todo";
+    el.innerHTML = `<span class="n">${i + 1}</span><span>${escapeHtml(leg.text)}</span>`;
+    el.onclick = () => { setPlaying(false); setStep(i + 1); };
+    box.appendChild(el);
+  });
+}
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// ---- loading --------------------------------------------------------------
+function showItem(item) {
+  geom = item.geometry; route = item.route; name = item.name || route.header.title || "level";
+  L = route.legs.length;
+  buildSets(); buildPaths();
+  step = 0; playT = 0; setPlaying(false);
+  view = { yaw: 0, zoom: 1, panX: 0, panY: 0, nearWalls: false };
+  document.getElementById("nearw").checked = false;
+  document.getElementById("empty").style.display = "none";
+  const [sx, sy, sz] = route.header.size || geom.size;
+  document.getElementById("title").innerHTML = `${escapeHtml(route.header.title || name)} <small>${sx}×${sy}×${sz} · ${L} step${L === 1 ? "" : "s"}</small>`;
+  renderSteps(); renderLegend();
+  buildBase(); syncControls(); draw();
+}
+function selectItem(path, el) {
+  activePath = path;
+  document.querySelectorAll("#list .item").forEach(n => n.classList.remove("active"));
+  if (el) el.classList.add("active");
+  fetch("/api/item?path=" + encodeURIComponent(path))
+    .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error(t); }))
+    .then(showItem)
+    .catch(err => { document.getElementById("empty").style.display = "flex"; document.getElementById("empty").textContent = "could not load: " + err.message; });
+}
+function saveStandalone() {
+  if (!activePath) return;
+  fetch("/api/standalone?path=" + encodeURIComponent(activePath))
+    .then(r => r.text())
+    .then(html => {
+      const blob = new Blob([html], { type: "text/html" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = (name || "solution") + ".sol.html";
+      a.click(); URL.revokeObjectURL(a.href);
+    });
+}
+
+// ---- the solution list (server mode) --------------------------------------
+let items = [];
+function renderList() {
+  const q = document.getElementById("search").value.toLowerCase();
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  const shown = items.filter(it => !q || (it.title + " " + it.group).toLowerCase().includes(q));
+  document.getElementById("count").textContent = `${shown.length} of ${items.length}`;
+  let group = null;
+  for (const it of shown) {
+    if (it.group !== group) {
+      group = it.group;
+      const h = document.createElement("li"); h.className = "group"; h.textContent = group || "(root)";
+      list.appendChild(h);
+    }
+    const li = document.createElement("li");
+    li.className = "item" + (it.path === activePath ? " active" : "");
+    const [sx, sy, sz] = it.size;
+    li.innerHTML = `<div class="t">${escapeHtml(it.title || it.path.split(/[\\/]/).pop())}</div>
+      <div class="m">${sx}×${sy}×${sz} · ${it.legs} step${it.legs === 1 ? "" : "s"}</div>`;
+    li.onclick = () => selectItem(it.path, li);
+    list.appendChild(li);
+  }
+}
+function loadItems() {
+  fetch("/api/items").then(r => r.json()).then(list => {
+    items = list; renderList();
+    if (!activePath && list.length) selectItem(list[0].path, document.querySelector("#list .item.active"));
+  });
+}
+
+// ---- boot -----------------------------------------------------------------
+wireControls();
+if (DATA) {
+  document.getElementById("sidebar").style.display = "none";
+  document.getElementById("rescan").style.display = "none";
+  document.getElementById("save").style.display = "none";
+  showItem(DATA);
+} else {
+  document.getElementById("search").oninput = renderList;
+  document.getElementById("rescan").onclick = () => fetch("/api/rescan").then(r => r.json()).then(list => { items = list; renderList(); });
+  renderLegend();
+  loadItems();
+}
+</script>
+</body>
+</html>

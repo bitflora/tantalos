@@ -361,6 +361,21 @@ cell, portals, cubes); one that didn't work is put right by teleporting (`setpos
 coordinates, movement and these commands instead of playing. **Not yet run in the game**: it
 has only been run against a fake netcon server.
 
+## Looking at solutions in a browser
+`glados view` is a local browser app for the solutions you already have on disk. It scans folders
+for `<name>.route.jsonl` files with their `<name>.p2c` beside them — what `glados route FILE >
+NAME.route.jsonl` and `glados check --route DIR` write — lists them in a sidebar (grouped by
+folder) and draws the chamber in oblique 2.5D (Z up, open-top cutaway) with its portalable faces,
+gel, barriers, hazards, laser beams and devices, then plays the route back: the walks, the
+portals and the cube, driven by each leg's `after` state. Picking a solution parses its `.p2c`
+and reads its route — it never solves — so switching is instant, and `Save .html` writes a
+self-contained copy with the data inlined.
+
+`glados view [--roots DIR]... [--port N] [--no-open] [--list]`: `--roots`/`--dir` add scan roots
+(default `fixtures`, `out`, `runs`), `--port` fixes the port (default: any free one), `--no-open`
+doesn't launch the browser, and `--list` just prints what it found. It works the same for a plan
+the Rust solver made (`glados route`) and for one the solver net wrote (`glados check --route`).
+
 ## Plans as tokens (for a solver net)
 `src/plan.rs` writes a route as plan tokens, one group per step in the level's own coordinates
 and without the walks: `fire blue 0 5 4 -x fire orange 7 0 1 +x pickup 2 2 1 enter orange
