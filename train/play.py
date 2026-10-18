@@ -660,7 +660,7 @@ class Game:
                 last = k == len(points) - 1
                 reach = tol if last else 28.0
                 best, best_t, hopped = 1e9, time.time(), False
-                floor_t, waiting = 0.0, 0.0
+                floor_t, waiting, beam_t = 0.0, 0.0, 0.0
                 end = time.time() + (timeout or 10 + hdist(self.obs()["o"], p) / 100)
                 while True:
                     s = self.obs()
@@ -670,12 +670,12 @@ class Game:
                         return s
                     if launched and s["v"][2] > 150:
                         return s  # thrown: hands off (steering in the air spoils the arc)
-                    # Burnt (a laser beam across the way, which also pushes back): duck under it.
-                    hurt = now - getattr(self, "hurt_at", 0.0)
-                    if hurt < 1.0:
-                        self.hold("duck")
-                    elif hurt > 2.5:
-                        self.release("duck")
+                    # Burnt (a laser beam across the way, which also pushes back): jump it.
+                    if now - getattr(self, "hurt_at", 0.0) < 0.3 and now - beam_t > 3.0 and abs(s["v"][2]) < 5:
+                        beam_t = now
+                        self.jump_beam(s, p)
+                        best, best_t = 1e9, time.time()
+                        continue
                     d = hdist(s["o"], p)
                     if d < reach:
                         if not (last and stop) or self.speed(s) <= 30:
@@ -686,7 +686,7 @@ class Game:
                         best, best_t, hopped = d, now, False
                     if now - best_t > 2.5 or now > end:
                         raise Stuck(f"stuck at {fmt(s['o'])} walking to {fmt(p)}")
-                    if now - best_t > 1.0 and not hopped and abs(s["v"][2]) < 5 and "duck" not in self.held:
+                    if now - best_t > 1.0 and not hopped and abs(s["v"][2]) < 5:
                         # Pushing against something low (a bridge out of a portal sits 24 up,
                         # higher than a step): hop up onto it.
                         self.tap("jump")
@@ -696,7 +696,13 @@ class Game:
                     # elsewhere): wait for the floor to come, then go on (riding it).
                     if len(p) > 2 and abs(p[2] - s["o"][2]) < 20 and now - floor_t > 0.25:
                         floor_t = now
-                        if not self.floor_ahead(s, p):
+                        rise = self.ground_ahead(s, p)
+                        if rise is not None and 18 < rise <= 40 and not hopped and abs(s["v"][2]) < 5:
+                            # A low ledge ahead (a bridge out of a portal sits 24 up): hop.
+                            self.tap("jump")
+                            hopped = True
+                            self.event("hop", f"{rise:.0f} up ahead of {fmt(s['o'])}: jumped", shot=False)
+                        if rise is None:
                             if not waiting:
                                 waiting = now
                                 self.event("waiting", f"no floor ahead of {fmt(s['o'])}", shot=False)
@@ -722,18 +728,46 @@ class Game:
                     else:
                         self.release("forward")
         finally:
-            self.release(*MOVES, "duck")
+            self.release(*MOVES)
             self.set_speed(self.top_speed)
             self.set_side_speed(self.side_speed)
         return self.settle() if stop else self.obs()
 
-    def floor_ahead(self, s, p, ahead=40.0):
-        """Whether there is floor `ahead` units on toward p (or at p, if nearer)."""
+    def ground_ahead(self, s, p, ahead=40.0):
+        """How high the ground is `ahead` units on toward p (or at p, if nearer), over the
+        player's feet: None if there is none down to 24 under them. (Unknown counts as 0.)"""
         d = hdist(s["o"], p)
         k = min(1.0, ahead / max(d, 1.0))
         x, y = s["o"][0] + (p[0] - s["o"][0]) * k, s["o"][1] + (p[1] - s["o"][1]) * k
-        frac = self.trace_line([x, y, s["o"][2] + 8], [x, y, s["o"][2] - 24])
-        return frac is None or frac < 1.0
+        frac = self.trace_line([x, y, s["o"][2] + 44], [x, y, s["o"][2] - 24])
+        if frac is None:
+            return 0.0
+        return None if frac >= 1.0 else 44 - 68 * frac
+
+    def jump_beam(self, s, p, back=80.0):
+        """Over a laser beam across the way to p: back off from where it burnt, run at it and
+        jump just before it (it pushes back and burns on touch; a running jump clears it)."""
+        burnt = s["o"][:2]
+        d = hdist(burnt, p)
+        u = ((p[0] - burnt[0]) / max(d, 1), (p[1] - burnt[1]) / max(d, 1))
+        self.event("laser jump", f"burnt at {fmt(s['o'])}: running jump", shot=False)
+        self.release(*MOVES)
+        self.turn(0, math.degrees(math.atan2(u[1], u[0])))
+        self.shift_to([burnt[0] - u[0] * back, burnt[1] - u[1] * back], tol=8, timeout=4)
+        self.set_speed(self.top_speed)
+        self.hold("forward")
+        jumped, end = False, time.time() + 4
+        try:
+            while time.time() < end:
+                q = self.obs()
+                ahead = (q["o"][0] - burnt[0]) * u[0] + (q["o"][1] - burnt[1]) * u[1]
+                if not jumped and ahead > -36:
+                    self.tap("jump")
+                    jumped = True
+                if jumped and ahead > 48 and abs(q["v"][2]) < 5:
+                    break
+        finally:
+            self.release(*MOVES)
 
     def move_toward(self, yaw, speed):
         """Moves toward heading `yaw` whatever way the view faces: forward/back and the strafe
