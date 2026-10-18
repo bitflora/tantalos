@@ -423,6 +423,15 @@ class Game:
                 if i in (0, len(pts) - 1) or not self._collinear(cells[i - 1], cells[i], cells[i + 1])]
         return self.walk(keep, tol)
 
+    def walk_points(self, points, cells, tol=8.0):
+        """Walks a leg's straightened walk (`points`: cells to head for in turn, straight
+        lines checked clear by `glados route`), or its `cells` in routes made before those."""
+        if points is None:
+            return self.walk_cells(cells, tol)
+        if not points:
+            return self.obs()
+        return self.walk([self.floor(c) for c in points], tol)
+
     @staticmethod
     def _collinear(a, b, c):
         return a[2] == b[2] == c[2] and (b[0] - a[0], b[1] - a[1]) == (c[0] - b[0], c[1] - b[1])
@@ -1042,7 +1051,7 @@ def play(game, head, legs):
         game.show(f"{leg['leg']}/{len(legs)}: {leg['text']}")
         ok, why = False, ""
         try:
-            game.walk_cells(leg["walk"])
+            game.walk_points(leg.get("points"), leg["walk"])
             ok = getattr(game, "act_" + leg["action"])(leg)
         except Stuck as e:
             why = str(e)

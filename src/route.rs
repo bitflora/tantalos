@@ -182,6 +182,9 @@ pub struct Leg {
     /// Cells to walk through first, in order, each one step from the last (the player's cell
     /// before the first). Every cell of a walk is standable.
     pub walk: Vec<Cell>,
+    /// The walk as cells to head for in turn, straight across where nothing is in the way
+    /// (`Grounder::straighten`): some of `walk`'s cells, its last one included.
+    pub points: Vec<Cell>,
     pub act: Act,
     /// Where things are afterwards.
     pub after: Here,
@@ -218,17 +221,20 @@ pub fn route_plan(level: &Level, model: &Model, plan: &[Action]) -> Result<Route
     let mut here = start.clone();
     let mut legs = Vec::new();
     for (i, a) in plan.iter().enumerate() {
-        let leg = g
+        let mut leg = g
             .leg(&here, &states[i], a, &states[i + 1])
             .ok_or_else(|| format!("step {}: can't ground \"{}\"", i + 1, model.describe(a)))?;
         g.check(&leg.after, &states[i + 1])
             .map_err(|e| format!("step {}: {e}", i + 1))?;
+        leg.points = g.straighten(&here, &states[i], &leg.walk);
         here = leg.after.clone();
         legs.push(leg);
     }
     let last = states.last().unwrap();
     if !last.escaped {
-        legs.push(g.exit(&here, last).ok_or("can't walk to the exit door")?);
+        let mut leg = g.exit(&here, last).ok_or("can't walk to the exit door")?;
+        leg.points = g.straighten(&here, last, &leg.walk);
+        legs.push(leg);
     }
     Ok(Route {
         entry: g.entry,
@@ -579,6 +585,69 @@ impl<'a> Grounder<'a> {
             }
         }
         None
+    }
+
+    /// The walk from `h.player` through `walk` as cells to head for in turn: from each one, the
+    /// furthest later cell on the same floor that a straight line reaches with nothing in the
+    /// way (`clear`). Drops and other moves that aren't steps stay where they are.
+    fn straighten(&self, h: &Here, s: &State, walk: &[Cell]) -> Vec<Cell> {
+        let path: Vec<Cell> = std::iter::once(h.player).chain(walk.iter().copied()).collect();
+        let is_step = |i: usize| self.steps_in_region(path[i]).any(|n| n == path[i + 1]);
+        let mut out = Vec::new();
+        let mut a = 0;
+        while a + 1 < path.len() {
+            let mut b = a + 1;
+            if is_step(a) {
+                let mut end = a + 1;
+                while end + 1 < path.len() && is_step(end) {
+                    end += 1;
+                }
+                b = (a + 2..=end)
+                    .rev()
+                    .find(|&b| self.clear(h, s, &path[a..=b]))
+                    .unwrap_or(a + 1);
+            }
+            out.push(path[b]);
+            a = b;
+        }
+        out
+    }
+
+    /// Whether the player can walk straight from the first of `walked` (cells one step apart
+    /// on one floor) to the last, with room on either side: every cell the line comes within
+    /// a quarter cell of is in the same region, open to its neighbours on the line, and has
+    /// nothing in the way (`in_the_way`) unless `walked` already went through it.
+    fn clear(&self, h: &Here, s: &State, walked: &[Cell]) -> bool {
+        const ROOM: f64 = 0.25;
+        let (a, b) = (walked[0], walked[walked.len() - 1]);
+        let (dx, dy) = ((b[0] - a[0]) as f64, (b[1] - a[1]) as f64);
+        let len = dx.hypot(dy);
+        if len == 0.0 {
+            return false;
+        }
+        let (nx, ny) = (-dy / len * ROOM, dx / len * ROOM);
+        let n = (len * 32.0).ceil() as i32;
+        let mut cells: Vec<Cell> = Vec::new();
+        for i in 0..=n {
+            let t = i as f64 / n as f64;
+            for k in [-1.0, 0.0, 1.0] {
+                let x = a[0] as f64 + 0.5 + dx * t + nx * k;
+                let y = a[1] as f64 + 0.5 + dy * t + ny * k;
+                let c = [x.floor() as i32, y.floor() as i32, a[2]];
+                if !cells.contains(&c) {
+                    cells.push(c);
+                }
+            }
+        }
+        let r = self.region(a);
+        cells.iter().all(|&c| {
+            self.region(c) == r
+                && (walked.contains(&c) || !self.in_the_way(h, s, c))
+                && Dir::HORIZONTAL.into_iter().all(|d| {
+                    let n = step(c, d);
+                    !cells.contains(&n) || self.steps_in_region(c).any(|m| m == n)
+                })
+        })
     }
 
     /// Cells next to `c` in its region (to stand in while handling something in `c`).
@@ -1055,6 +1124,7 @@ impl<'a> Grounder<'a> {
                             Leg {
                                 text: model.describe(a),
                                 walk,
+                                points: Vec::new(),
                                 act,
                                 after,
                             }
@@ -1248,6 +1318,7 @@ impl<'a> Grounder<'a> {
         Some(Leg {
             text: model.describe(a),
             walk,
+            points: Vec::new(),
             act,
             after,
         })
@@ -1328,6 +1399,7 @@ impl<'a> Grounder<'a> {
         Some(Leg {
             text: "walk out of the exit".into(),
             walk,
+            points: Vec::new(),
             act: Act::Exit { cell, normal },
             after,
         })
@@ -1609,10 +1681,11 @@ impl Route {
         )];
         for (i, leg) in self.legs.iter().enumerate() {
             out.push(format!(
-                "{{\"leg\":{},\"text\":{},\"walk\":{},{},\"after\":{}}}",
+                "{{\"leg\":{},\"text\":{},\"walk\":{},\"points\":{},{},\"after\":{}}}",
                 i + 1,
                 json_str(&leg.text),
                 cells_json(&leg.walk),
+                cells_json(&leg.points),
                 act_json(&leg.act),
                 here_json(&leg.after)
             ));
