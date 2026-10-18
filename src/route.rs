@@ -22,7 +22,7 @@ use crate::dynamics;
 use crate::flings;
 use crate::gel;
 use crate::geom::{step, Cell, Dir};
-use crate::level::{CubeKind, FaceInfo, ItemKind, Level, PaintKind, PanelKind, ProjectorKind};
+use crate::level::{CubeKind, FaceInfo, HazardKind, ItemKind, Level, PaintKind, PanelKind, ProjectorKind};
 use crate::metrics::replay;
 use crate::portals::{self, Face};
 use crate::regions::{Cond, Geo, Move};
@@ -188,6 +188,8 @@ pub struct Leg {
     pub act: Act,
     /// Where things are afterwards.
     pub after: Here,
+    /// The hazard fields (bits over `Level::hazards`) on before or after the step.
+    pub fields: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -197,6 +199,8 @@ pub struct Route {
     pub exit: (Cell, Dir),
     pub start: Here,
     pub legs: Vec<Leg>,
+    /// `Level::hazards`: each field's kind and the faces it covers.
+    pub hazards: Vec<(&'static str, Vec<Face>)>,
 }
 
 /// Grounds the conservative plan of `level` (searching at most `budget` states).
@@ -227,6 +231,7 @@ pub fn route_plan(level: &Level, model: &Model, plan: &[Action]) -> Result<Route
         g.check(&leg.after, &states[i + 1])
             .map_err(|e| format!("step {}: {e}", i + 1))?;
         leg.points = g.straighten(&here, &states[i], &leg.walk);
+        leg.fields = model.hazards_on_in(&states[i], None) | model.hazards_on_in(&states[i + 1], None);
         here = leg.after.clone();
         legs.push(leg);
     }
@@ -234,13 +239,26 @@ pub fn route_plan(level: &Level, model: &Model, plan: &[Action]) -> Result<Route
     if !last.escaped {
         let mut leg = g.exit(&here, last).ok_or("can't walk to the exit door")?;
         leg.points = g.straighten(&here, last, &leg.walk);
+        leg.fields = model.hazards_on_in(last, None);
         legs.push(leg);
     }
+    let hazards = level
+        .hazards
+        .iter()
+        .map(|hz| {
+            let kind = match hz.kind {
+                HazardKind::Fizzler => "fizzler",
+                HazardKind::LaserField => "laser field",
+            };
+            (kind, hz.faces.clone())
+        })
+        .collect();
     Ok(Route {
         entry: g.entry,
         exit: g.exit_door,
         start,
         legs,
+        hazards,
     })
 }
 
@@ -551,19 +569,22 @@ impl<'a> Grounder<'a> {
     }
 
     /// The nearest cell on foot in the player's region where `try_at` finds something to do,
-    /// with the walk there: first never walking through a cell with something in the way,
-    /// then if need be through anything.
+    /// with the walk there: first never walking through or acting from a cell with something
+    /// in the way, then acting from one if need be (a floor portal's own cell), then walking
+    /// through anything. (Acting from such a cell can mean walking into it: a walk across a
+    /// field from the cell of a cube on a button gets stuck on the cube.)
     fn find<T>(
         &self,
         h: &Here,
         s: &State,
         mut try_at: impl FnMut(Cell) -> Option<T>,
     ) -> Option<(Vec<Cell>, T)> {
-        for avoid in [true, false] {
+        for (avoid, clear_target) in [(true, true), (true, false), (false, false)] {
             let mut prev: HashMap<Cell, Cell> = HashMap::from([(h.player, h.player)]);
             let mut queue = VecDeque::from([h.player]);
             while let Some(c) = queue.pop_front() {
-                if let Some(t) = try_at(c) {
+                let blocked = avoid && c != h.player && self.in_the_way(h, s, c);
+                if let Some(t) = if blocked && clear_target { None } else { try_at(c) } {
                     let mut walk = Vec::new();
                     let mut x = c;
                     while x != h.player {
@@ -573,7 +594,7 @@ impl<'a> Grounder<'a> {
                     walk.reverse();
                     return Some((walk, t));
                 }
-                if avoid && c != h.player && self.in_the_way(h, s, c) {
+                if blocked {
                     continue;
                 }
                 for n in self.steps_in_region(c) {
@@ -735,26 +756,34 @@ impl<'a> Grounder<'a> {
                         }
                         (walk, (act, after))
                     }),
-                Move::Bounce => self.find(h, s, |c| {
-                    let &f = self.face_id.get(&(c, Dir::NegZ))?;
-                    if !model.painted(s, f, PaintKind::Bounce) {
-                        return None;
-                    }
-                    gel::bounces(level, c, rules.gel)
-                        .into_iter()
-                        .find_map(|(t, hz)| {
-                            if hz != hazards || self.region(t) != Some(to) {
-                                return None;
-                            }
-                            let mut after = h.clone();
-                            after.player = t;
-                            if fizzles(hz, on) {
-                                Self::fizzle(&mut after);
-                            }
-                            self.fits(after, next)
-                                .map(|after| (Act::Bounce { gel: c, to: t }, after))
-                        })
-                }),
+                // From a splat's own cell if one will do: gel reaches less far around it than
+                // the solver's radius (in-game, the middle of a cell beside the splat can be
+                // bare).
+                Move::Bounce => {
+                    let splat = |c: Cell| level.gels.iter().any(|g| g.face == (c, Dir::NegZ));
+                    let try_at = |c: Cell, splat_only: bool| {
+                        let &f = self.face_id.get(&(c, Dir::NegZ))?;
+                        if !model.painted(s, f, PaintKind::Bounce) || (splat_only && !splat(c)) {
+                            return None;
+                        }
+                        gel::bounces(level, c, rules.gel)
+                            .into_iter()
+                            .find_map(|(t, hz)| {
+                                if hz != hazards || self.region(t) != Some(to) {
+                                    return None;
+                                }
+                                let mut after = h.clone();
+                                after.player = t;
+                                if fizzles(hz, on) {
+                                    Self::fizzle(&mut after);
+                                }
+                                self.fits(after, next)
+                                    .map(|after| (Act::Bounce { gel: c, to: t }, after))
+                            })
+                    };
+                    self.find(h, s, |c| try_at(c, true))
+                        .or_else(|| self.find(h, s, |c| try_at(c, false)))
+                }
                 // `c` is where the run starts, `leap_run - 1` cells back from the take-off.
                 Move::Leap => self.find(h, s, |c| {
                     Dir::HORIZONTAL.into_iter().find_map(|d| {
@@ -1125,6 +1154,7 @@ impl<'a> Grounder<'a> {
                                 text: model.describe(a),
                                 walk,
                                 points: Vec::new(),
+            fields: 0,
                                 act,
                                 after,
                             }
@@ -1319,6 +1349,7 @@ impl<'a> Grounder<'a> {
             text: model.describe(a),
             walk,
             points: Vec::new(),
+            fields: 0,
             act,
             after,
         })
@@ -1400,6 +1431,7 @@ impl<'a> Grounder<'a> {
             text: "walk out of the exit".into(),
             walk,
             points: Vec::new(),
+            fields: 0,
             act: Act::Exit { cell, normal },
             after,
         })
@@ -1669,25 +1701,39 @@ impl Route {
                 dir_name(d)
             )
         };
+        let hazards: Vec<String> = self
+            .hazards
+            .iter()
+            .map(|(kind, faces)| {
+                let faces: Vec<String> = faces.iter().map(|&f| face_json(f)).collect();
+                format!("{{\"kind\":\"{kind}\",\"faces\":[{}]}}", faces.join(","))
+            })
+            .collect();
         let mut out = vec![format!(
-            "{{\"title\":{},\"size\":{},\"entry\":{},\"exit\":{},\"cubes\":[{}],\"start\":{},\"legs\":{}}}",
+            "{{\"title\":{},\"size\":{},\"entry\":{},\"exit\":{},\"cubes\":[{}],\"start\":{},\"hazards\":[{}],\"legs\":{}}}",
             json_str(title),
             cell_json(size),
             door(self.entry),
             door(self.exit),
             cubes.join(","),
             here_json(&self.start),
+            hazards.join(","),
             self.legs.len()
         )];
         for (i, leg) in self.legs.iter().enumerate() {
             out.push(format!(
-                "{{\"leg\":{},\"text\":{},\"walk\":{},\"points\":{},{},\"after\":{}}}",
+                "{{\"leg\":{},\"text\":{},\"walk\":{},\"points\":{},{},\"after\":{},\"fields\":[{}]}}",
                 i + 1,
                 json_str(&leg.text),
                 cells_json(&leg.walk),
                 cells_json(&leg.points),
                 act_json(&leg.act),
-                here_json(&leg.after)
+                here_json(&leg.after),
+                (0..self.hazards.len())
+                    .filter(|h| leg.fields & (1 << h) != 0)
+                    .map(|h| h.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
         }
         out

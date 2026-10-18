@@ -68,6 +68,64 @@ def alive(pid):
     return code.value == 259  # STILL_ACTIVE
 
 
+def game_window(pid):
+    """The game's main window (a visible top-level window of process `pid`), or None."""
+    u32 = ctypes.WinDLL("user32", use_last_error=True)
+    found = []
+    proc = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    def each(hwnd, _):
+        owner = wt.DWORD()
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and u32.IsWindowVisible(hwnd) and not u32.GetWindow(hwnd, 4):  # GW_OWNER
+            found.append(hwnd)
+        return True
+
+    u32.EnumWindows(proc(each), 0)
+    return found[0] if found else None
+
+
+def focused(pid):
+    """Whether the game's window is the one in front (what a console-built level needs to start)."""
+    u32 = ctypes.WinDLL("user32", use_last_error=True)
+    u32.GetForegroundWindow.restype = wt.HWND
+    hwnd = u32.GetForegroundWindow()
+    if not hwnd:
+        return False
+    owner = wt.DWORD()
+    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+    return owner.value == pid
+
+
+def focus(pid):
+    """Brings the game's window to the front; True if it is there afterwards. (Windows only lets
+    the foreground's own thread hand focus over, so this joins that thread's input first, and
+    taps Alt, which also unlocks SetForegroundWindow.)"""
+    if focused(pid):
+        return True
+    hwnd = game_window(pid)
+    if hwnd is None:
+        return False
+    u32 = ctypes.WinDLL("user32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    u32.GetForegroundWindow.restype = wt.HWND
+    fg = u32.GetForegroundWindow()
+    me = k32.GetCurrentThreadId()
+    other = u32.GetWindowThreadProcessId(fg, None) if fg else 0
+    joined = bool(other) and other != me and u32.AttachThreadInput(me, other, True)
+    try:
+        u32.keybd_event(0x12, 0, 0, 0)  # Alt down, up
+        u32.keybd_event(0x12, 0, 2, 0)
+        u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        u32.BringWindowToTop(hwnd)
+        u32.SetForegroundWindow(hwnd)
+    finally:
+        if joined:
+            u32.AttachThreadInput(me, other, False)
+    time.sleep(0.3)
+    return focused(pid)
+
+
 class Console:
     """The game's TCP console (-netconport): command lines in, everything it prints out."""
 

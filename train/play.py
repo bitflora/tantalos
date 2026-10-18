@@ -9,9 +9,25 @@ This loads the level into the Puzzle Maker (train/portal2.py), builds it, and pl
 player's own controls: `setang` to look (a perfect mouse, turning smoothly so it can be watched;
 --fast snaps it, for validation runs) and +forward, +jump, +attack (blue),
 +attack2 (orange) and +use, steering by the positions a small VScript reports each tick. The
-step being played shows on screen. Each step's result is checked against the route; one that
-didn't work out is put right by teleporting (setpos, a cube's SetOrigin, portal_place) and
-counted as recovered, and the run carries on. The terminal gets one line per step.
+step being played shows on screen. Each step's result is checked against the route.
+
+The game is saved before each step. A step that didn't work out is screenshotted, loaded back
+and tried again carefully (the route's own cells walked, the player put exactly where the
+action starts, the view snapped); what that shows classifies it: exec (the careful retry worked:
+the harness played it badly), route (the route's path crosses a live field it didn't plan to),
+blocked (the route's cells can't be walked), plan? (done carefully it still fails: the game may
+disagree with the solver). Only then is it put right by teleporting (setpos, a cube's
+SetOrigin, portal_place) and counted as recovered, and the run carries on. The terminal gets
+one line per step.
+
+    python train/play.py --list LEVELS.txt --launch --fast --out out/play/NAME
+
+--out keeps the evidence, per level: legs.jsonl (each step's tries, problems, events, probes),
+trace.jsonl (every look: player, portals, cubes), events.jsonl (what happened unasked: a portal
+lost, a field crossed by the player or a cube, hurt, died, a cube gone) and screenshots; and
+summary.jsonl for the batch (levels already in it are skipped; a file STOP there ends the batch
+after the level being played). With --launch the game is restarted every --restart-every
+levels and after it goes down. train/playreport.py sums a batch up.
 
 The game is driven over its TCP console. --launch starts it (refusing if it's already running)
 with -insecure and -netconport/-netconpassword, under portal2.py's safety rules, and quits it at
@@ -23,7 +39,7 @@ player uses on the first level, and prints what it found instead of playing.
 Keep the game window focused while it plays: in the background, a level built from the console
 never starts (unlit, entry door shut, droppers holding their cubes), and arrival gets stuck.
 """
-import argparse, json, math, re, subprocess, sys, time
+import argparse, json, math, re, shutil, subprocess, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -103,6 +119,19 @@ function glados_start() {
 		}
 	}
 }
+// How far a straight line from a to b gets before something solid stops it (0..1).
+function glados_trace(ax, ay, az, bx, by, bz) {
+	printl("GLADOS_TRACE " + TraceLine(Vector(ax, ay, az), Vector(bx, by, bz), GetPlayer()))
+}
+// What is within r of a point: class, name, origin (what a blocked walk ran into).
+function glados_near(x, y, z, r) {
+	local e = null
+	while ((e = Entities.FindInSphere(e, Vector(x, y, z), r)) != null) {
+		local c = e.GetClassname()
+		if (c != "player" && c != "weapon_portalgun" && c != "predicted_viewmodel" && c != "info_target")
+			printl("GLADOS_NEAR " + c + " " + e.GetName() + " " + glados_v(e.GetOrigin()) + " " + glados_v(e.GetAngles()))
+	}
+}
 printl("GLADOS_SCRIPT loaded")
 """
 
@@ -153,9 +182,25 @@ class Game:
         self.held_id = None     # the cube picked up, until it's let go
         self.hold_dist = 75.0   # how far in front of the eye a held cube hangs (measured)
         self.text_made = False
+        # Evidence for the report (see play): every look, what happened, screenshots.
+        self.leg_no = 0
+        self.trace = []         # one compact record per look
+        self.events = []        # what happened that the route didn't ask for
+        self.shots = []         # screenshot names taken
+        self.shot_prefix = "glados"
+        self.firing = False     # portals are expected to move (a shot, portal_place)
+        self.hazards = []       # [(index, kind, axis, plane, lo, hi)] in world units
+        self.fields_on = set()  # hazard indices on during this leg
+        self.last_event_shot = 0.0
+        self.last_fire = None
+        self.intended = set()   # hazard indices the route's walk crosses this leg
+        self.crossed = set()    # (leg, cube, hazard) crossings already noted
         out = con.ask(["cl_forwardspeed"], 5) or ""
         m = re.search(r'"cl_forwardspeed" = "([\d.]+)"', out)
         self.top_speed = float(m.group(1)) if m else 175.0
+        out = con.ask(["cl_sidespeed"], 5) or ""
+        m = re.search(r'"cl_sidespeed" = "([\d.]+)"', out)
+        self.side_speed = float(m.group(1)) if m else 175.0
 
     # positions: route voxels -> world units
     def world(self, p):
@@ -188,11 +233,182 @@ class Game:
             if l.startswith(f"GLADOS_ENT {n} "):
                 _, _, kind, item = l.split(" ", 3)
                 s[kind].append(json.loads(item))
+        jump = False
         if self.last is not None:
             dt = max(s["t"] - self.last["t"], 0.0)
             if math.dist(s["o"], self.last["o"]) > 64 + 600 * dt:
-                self.jumped = True
+                self.jumped = jump = True
+                # Going through a portal turns the view: read where it looks now, or turns
+                # and shuffles (shift_to) work from the old heading.
+                self.sync_view()
+            self._events(self.last, s, jump)
+        self.trace.append({"leg": self.leg_no, "t": round(s["t"], 2), "o": [round(v) for v in s["o"]],
+                           "v": [round(v) for v in s["v"]], "hp": s["hp"],
+                           "p": [[p["id"]] + [round(v) for v in p["o"]] for p in s["portals"]],
+                           "c": [[c["id"]] + [round(v) for v in c["o"]] for c in s["cubes"]]})
         self.last = s
+        return s
+
+    def event(self, kind, text, shot=True, **extra):
+        """Notes something that happened (and screenshots it, at most once a second)."""
+        e = {"leg": self.leg_no, "t": round(self.last["t"], 2) if self.last else None,
+             "kind": kind, "text": text, **extra}
+        if shot and time.time() - self.last_event_shot > 1.0:
+            e["shot"] = self.screenshot(kind.replace(" ", "-"))
+            self.last_event_shot = time.time()
+        self.events.append(e)
+        print(f"    event: {kind}: {text}", flush=True)
+
+    def _events(self, a, b, jump):
+        """What changed between two looks that the harness didn't do itself."""
+        if b["hp"] < a["hp"]:
+            self.hurt_at = time.time()
+            if b["hp"] <= 0:
+                self.event("died", f"hp {a['hp']} -> 0 at {fmt(b['o'])}")
+            elif time.time() - getattr(self, "hurt_logged", 0) > 3:
+                self.hurt_logged = time.time()
+                self.event("hurt", f"hp {a['hp']} -> {b['hp']} at {fmt(b['o'])}")
+        ids = {c["id"] for c in b["cubes"]}
+        for c in a["cubes"]:
+            if c["id"] not in ids:
+                self.event("cube gone", f"cube {c['id']} last at {fmt(c['o'])}")
+        if not self.firing:
+            now = {p["id"]: p for p in b["portals"]}
+            for p in a["portals"]:
+                q = now.get(p["id"])
+                if q is None or math.dist(q["o"], p["o"]) > 8:
+                    color = next((k for k, v in self.portal_ids.items() if v == p["id"]), "a")
+                    self.event("portal lost", f"{color} portal {p['id']} at {fmt(p['o'])} "
+                               + ("gone" if q is None else f"now at {fmt(q['o'])}")
+                               + f"; player at {fmt(b['o'])}")
+        if not jump:
+            mid = lambda o: [o[0], o[1], o[2] + 36]  # the middle of the player, not the feet
+            hit = self.field_between(mid(a["o"]), mid(b["o"]))
+            if hit:
+                h, kind, x = hit
+                self.event("crossed field", f"{kind} {h} at {fmt(x)}", hazard=h)
+        before = {c["id"]: c for c in a["cubes"]}
+        for c in b["cubes"]:
+            if c["id"] in before:
+                hit = self.field_between(before[c["id"]]["o"], c["o"])
+                if hit and (self.leg_no, c["id"], hit[0]) not in self.crossed:
+                    self.crossed.add((self.leg_no, c["id"], hit[0]))
+                    h, kind, x = hit
+                    self.event("cube crossed field", f"cube {c['id']} through {kind} {h} at {fmt(x)}"
+                               + (" (held)" if c["id"] == self.held_id else ""), hazard=h)
+
+    def field_between(self, a, b, skip=()):
+        """The first live hazard field the straight line a-b goes through: (index, kind,
+        where), or None. `skip`: hazard indices to leave out."""
+        for h, kind, axis, plane, lo, hi in self.hazards:
+            if h not in self.fields_on or h in skip:
+                continue
+            pa, pb = a[axis] - plane, b[axis] - plane
+            if pa * pb >= 0:
+                continue
+            k = pa / (pa - pb)
+            x = [a[i] + (b[i] - a[i]) * k for i in range(3)]
+            if all(lo[i] - 16 <= x[i] <= hi[i] + 16 for i in range(3) if i != axis):
+                return h, kind, x
+        return None
+
+    def guarding(self):
+        """Whether a held cube has fields to keep out of (live ones the route doesn't cross)."""
+        return self.held_id is not None and bool(self.fields_on - self.intended)
+
+    def cube_clear(self, s, yaw):
+        """Whether the held cube, hanging in front of a view heading `yaw`, stays out of the
+        fields the route doesn't cross: not across one, nor within a cube's size of one."""
+        if not self.guarding():
+            return True
+        here = [s["o"][0], s["o"][1], s["eye"][2] - 20]
+        r = math.radians(yaw)
+        c = [here[0] + self.hold_dist * math.cos(r), here[1] + self.hold_dist * math.sin(r), here[2]]
+        if self.field_between(here, c, skip=self.intended):
+            return False
+        for h, kind, axis, plane, lo, hi in self.hazards:
+            if (h in self.fields_on and h not in self.intended and abs(c[axis] - plane) < 40
+                    and all(lo[i] - 32 <= c[i] <= hi[i] + 32 for i in range(3) if i != axis)):
+                return False
+        return True
+
+    def cube_yaw(self, s, yaw):
+        """A view heading near `yaw` that keeps the held cube out of fields (`cube_clear`):
+        `yaw` itself if that is clear (or nothing is)."""
+        if not self.guarding():
+            return yaw
+        for k in range(0, 13):
+            for y in ((yaw,) if k == 0 else (yaw + 15 * k, yaw - 15 * k)):
+                if self.cube_clear(s, y):
+                    return y
+        return yaw
+
+    def screenshot(self, tag):
+        """Writes portal2/screenshots/<prefix>-<leg>-<tag>-<n>.jpg; returns its name."""
+        name = f"{self.shot_prefix}-{self.leg_no:02d}-{tag}-{len(self.shots):03d}"
+        self.con.send(f"jpeg {name} 80")
+        self.shots.append(name)
+        return name
+
+    def set_hazards(self, head):
+        """The level's hazard fields (`glados route`'s head), as planes in world units."""
+        self.hazards = []
+        for h, hz in enumerate(head.get("hazards", [])):
+            for face in hz["faces"]:
+                axis = "xyz".index(face["dir"][1])
+                c = self.world(face["centre"])
+                lo = [c[i] - VOXEL / 2 for i in range(3)]
+                hi = [c[i] + VOXEL / 2 for i in range(3)]
+                self.hazards.append((h, hz["kind"], axis, c[axis], lo, hi))
+
+    def trace_line(self, a, b):
+        """How far (0..1) a straight line from a to b gets before something solid."""
+        out = self.con.ask([f"script glados_trace({a[0]:.1f},{a[1]:.1f},{a[2]:.1f},"
+                            f"{b[0]:.1f},{b[1]:.1f},{b[2]:.1f})"], 5) or ""
+        m = re.search(r"GLADOS_TRACE ([-\d.e]+)", out)
+        return float(m.group(1)) if m else None
+
+    def near(self, p, r):
+        """Entities within r of p: [class name origin angles], nearest first."""
+        out = self.con.ask([f"script glados_near({p[0]:.1f},{p[1]:.1f},{p[2]:.1f},{r})"], 5) or ""
+        found = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("GLADOS_NEAR ")]
+        return found[:20]
+
+    # saving and loading: a leg is retried from where it started
+    def save(self):
+        out = self.con.ask(["save glados_leg"], 20) or ""
+        return "SAVEGAME" in out
+
+    def load(self, before):
+        """Loads the save from the start of the leg and finds the portals and the held cube
+        again (a load gives entities new numbers). `before`: the route's state then."""
+        self.release_all()
+        self.con.send("load glados_leg")
+        if self.con.until(lambda l: "END loading assets" in l, 60) is None:
+            raise GameUnavailable("the save didn't load")
+        time.sleep(1.0)
+        end = time.time() + 20
+        while "GLADOS_SCRIPT loaded" not in (self.con.ask(["script_execute glados_play"], 10) or ""):
+            if time.time() > end:
+                raise GameUnavailable("the script didn't load after loading the save")
+            time.sleep(0.5)
+        self.last = None
+        self.jumped = False
+        self.sync_view()
+        s = self.obs()
+        self.portal_ids = {}
+        for color, face in zip(COLORS, before["portals"]):
+            if face:
+                c = self.world(face["centre"])
+                p = min(s["portals"], key=lambda p: math.dist(p["o"], c), default=None)
+                if p is not None and math.dist(p["o"], c) < 64:
+                    self.portal_ids[color] = p["id"]
+        self.held_id = None
+        if None in before["cubes"]:
+            c = self.nearest_cube(s, s["eye"], within=120)
+            if c is not None:
+                self.held_id = c["id"]
+                self.hold_dist = math.dist(c["o"], s["eye"])
         return s
 
     @staticmethod
@@ -296,14 +512,24 @@ class Game:
 
     def turn(self, pitch, yaw):
         """Turns the view to (pitch, yaw) at `turn_rate` degrees a second, so it can be seen
-        (at once with --fast)."""
+        (at once with --fast). A held cube swings round with the view: it goes the way that
+        keeps the cube out of fields, and with --fast in steps the cube can follow."""
         rate = self.turn_rate
+        dy = (yaw - self.yaw + 180) % 360 - 180
+        guard = self.guarding() and self.last is not None
+        if guard:
+            s = self.last
+            arc = lambda d: all(self.cube_clear(s, self.yaw + d * k / 12) for k in range(13))
+            if dy and not arc(dy) and arc(dy - math.copysign(360, dy)):
+                dy -= math.copysign(360, dy)
+            if math.isinf(rate):
+                rate = 360.0
         if math.isinf(rate):
             self.look(pitch, yaw)
             return
+        goal = self.yaw + dy
         while True:
-            dy = (yaw - self.yaw + 180) % 360 - 180
-            dp = pitch - self.pitch
+            dy, dp = goal - self.yaw, pitch - self.pitch
             step = rate / 60
             if abs(dy) <= step and abs(dp) <= step:
                 self.look(pitch, yaw)
@@ -390,17 +616,30 @@ class Game:
                     dt, tick = now - tick, now
                     if self.jumped and on_jump == "stop":
                         return s
+                    # Burnt (a laser beam across the way, which also pushes back): duck under it.
+                    hurt = now - getattr(self, "hurt_at", 0.0)
+                    if hurt < 1.0:
+                        self.hold("duck")
+                    elif hurt > 2.5:
+                        self.release("duck")
                     d = hdist(s["o"], p)
                     if d < reach:
                         if not (last and stop) or self.speed(s) <= 30:
                             break
-                        self.release("forward")  # there: coast to a stop
+                        self.release(*MOVES)  # there: coast to a stop
                         continue
                     if d < best - 2:
                         best, best_t = d, now
                     if now - best_t > 2.5 or now > end:
                         raise Stuck(f"stuck at {fmt(s['o'])} walking to {fmt(p)}")
                     yaw = math.degrees(math.atan2(p[1] - s["o"][1], p[0] - s["o"][0]))
+                    view = self.cube_yaw(s, yaw)
+                    if view != yaw:
+                        # Face away from the field and walk sideways (or backwards) there.
+                        self.steer(view, dt)
+                        self.move_toward(yaw, 3.0 * d if last and stop else self.top_speed)
+                        continue
+                    self.release("back", "moveleft", "moveright")
                     off = self.steer(yaw, dt)
                     # Slow for the stop at the end, and while turning a corner.
                     self.set_speed(3.0 * d if last and stop else self.top_speed * (1 - off / 90))
@@ -409,9 +648,30 @@ class Game:
                     else:
                         self.release("forward")
         finally:
-            self.release(*MOVES)
+            self.release(*MOVES, "duck")
             self.set_speed(self.top_speed)
+            self.set_side_speed(self.side_speed)
         return self.settle() if stop else self.obs()
+
+    def move_toward(self, yaw, speed):
+        """Moves toward heading `yaw` whatever way the view faces: forward/back and the strafe
+        keys, at speeds in proportion."""
+        phi = math.radians(yaw - self.yaw)
+        f, l = math.cos(phi), math.sin(phi)
+        self.set_speed(speed * abs(f))
+        self.set_side_speed(speed * abs(l))
+        for key, other, comp in (("forward", "back", f), ("moveleft", "moveright", l)):
+            if abs(comp) < 0.2:
+                self.release(key, other)
+            else:
+                self.release(other if comp > 0 else key)
+                self.hold(key if comp > 0 else other)
+
+    def set_side_speed(self, v):
+        v = round(max(MIN_SPEED, min(self.side_speed, v)) / 10) * 10
+        if v != getattr(self, "side_now", None):
+            self.con.send(f"cl_sidespeed {v}")
+            self.side_now = v
 
     def walk_cells(self, cells, tol=8.0):
         """Walks the route's cells (each one step or a drop from the last), straight lines
@@ -483,14 +743,22 @@ class Game:
         eye = self.world(leg["eye"])
         if hdist(self.obs()["o"], eye) > 10:
             self.shift_to(eye)
-        for _ in range(2):
+        for k in range(2):
+            # Devices take a moment: a field switched off by the button stood on, a panel.
+            time.sleep(1.0 if "stand on" in leg["text"] and k == 0 else 1.5 * k)
             s = self.settle()
             self.look_at(target, s["eye"])
             time.sleep(0.15)
             before = {p["id"]: p for p in self.obs()["portals"]}
-            self.tap(FIRE_KEY[color])
-            time.sleep(0.5)
-            s = self.obs()
+            self.firing = True
+            try:
+                self.tap(FIRE_KEY[color])
+                time.sleep(0.5)
+                s = self.obs()
+            finally:
+                self.firing = False
+            self.last_fire = {"eye": [round(v, 1) for v in s["eye"]], "target": [round(v, 1) for v in target],
+                              "pitch": round(self.pitch, 2), "yaw": round(self.yaw, 2)}
             moved = [p for p in s["portals"] if before.get(p["id"]) != p]
             if moved:  # the first shot can make both portal entities: take the one there
                 self.portal_ids[color] = min(moved, key=lambda p: math.dist(p["o"], target))["id"]
@@ -613,27 +881,75 @@ class Game:
         if face["dir"] == "-z":
             c = self.world(face["centre"])
             return self.place_cube(c, 20, c)
-        # Into a wall portal: walk at it until the cube goes through, then let go.
-        self.turn(0, yaw_of(DIRS[face["dir"]]))
+        # Into a wall portal: square in front of it, a held cube's reach and a bit back, walk
+        # straight at it and let go just before the cube gets there, so it flies in with the
+        # walk's speed and nothing sideways (that would carry it off where it comes out).
+        d = DIRS[face["dir"]]
+        c = self.world(face["centre"])
         s = self.obs()
         cube = self.holding(s)
         if cube is None:
             return False
+        self.turn(0, yaw_of(d))
+        time.sleep(0.3)
+        back = self.hold_dist + 60
+        self.shift_to([c[0] - d[0] * back, c[1] - d[1] * back], tol=4, timeout=6)
+        self.look(0, yaw_of(d))
+        time.sleep(0.3)
         self.hold("forward")
         end = time.time() + 5
-        went = False
-        while time.time() < end and not went:
-            s = self.obs()
-            now = next((c for c in s["cubes"] if c["id"] == cube["id"]), None)
-            went = now is None or math.dist(now["o"], cube["o"]) > 160
-            if now is not None and not went:
+        went = dropped = False
+        try:
+            while time.time() < end and not went:
+                s = self.obs()
+                now = next((q for q in s["cubes"] if q["id"] == cube["id"]), None)
+                went = now is None or math.dist(now["o"], cube["o"]) > 160
+                if now is None or went:
+                    break
                 cube = now
-        self.release("forward")
+                # How far the cube's middle is from the portal's plane.
+                gap = sum((c[i] - now["o"][i]) * d[i] for i in range(3))
+                if not dropped and gap < 40:
+                    self.tap("use")
+                    dropped = True
+                    self.release("forward")
+                    end = time.time() + 2
+        finally:
+            self.release("forward")
+        if dropped:
+            self.held_id = None
+            return went
         return self.let_go() and went
 
     def act_press(self, leg):
         """Presses a pedestal button: close up, looking at its button (on top of the column,
-        about PEDESTAL_TOP over its base) rather than a guess at the cell."""
+        about PEDESTAL_TOP over its base) rather than a guess at the cell. Holding a cube, use
+        would drop it rather than press: it is put down first and picked up again after."""
+        cube = self.holding(self.obs()) if self.held_id is not None else None
+        if cube is not None:
+            self.turn(30, self.yaw + 180)  # behind, out of the way of the button
+            time.sleep(0.3)
+            if not self.let_go():
+                return False
+            time.sleep(0.5)
+        ok = self._press(leg)
+        if cube is not None:
+            s = self.obs()
+            near = self.nearest_cube(s, s["o"], within=160)
+            if near is None:
+                return False
+            self.look_at(near["o"])
+            time.sleep(0.15)
+            self.tap("use")
+            time.sleep(0.4)
+            if not self.follows_view(near["id"]):
+                return False
+            self.held_id = near["id"]
+            self.hold_dist = math.dist(next(c for c in self.obs()["cubes"] if c["id"] == near["id"])["o"],
+                                       self.obs()["eye"])
+        return ok
+
+    def _press(self, leg):
         p = self.world(leg["look"])
         s = self.obs()
         ped = min(s["pedestals"], key=lambda e: hdist(e["o"], p), default=None)
@@ -753,8 +1069,9 @@ class Game:
         return False
 
     def act_dive(self, leg):
-        """Off the ledge (with a running jump if the portal is two cells out), steering into
-        the floor portal, and out of the other one at speed."""
+        """Off the ledge (with a running jump if the portal is two cells out), steering in the
+        air so the fall ends in the middle of the floor portal (on its rim the player just
+        lands), and out of the other one at speed."""
         d = DIRS[leg["dir"]]
         edge = self.floor(leg["edge"])
         portal = self.floor(leg["face"]["cell"])
@@ -770,17 +1087,36 @@ class Game:
                 if leg["out"] > 1 and not jumped and ahead > 40:
                     self.tap("jump")
                     jumped = True
-                # Over the portal: stop pushing, let it fall in.
-                if hdist(s["o"], portal) < 24:
-                    self.release("forward")
-                elif s["o"][2] < edge[2] - 32:
-                    yaw = math.degrees(math.atan2(portal[1] - s["o"][1], portal[0] - s["o"][0]))
-                    self.look(0, yaw)
-                    self.hold("forward")
+                if s["o"][2] < edge[2] - 8 or jumped and ahead > 64:
+                    self.air_steer(s, portal)
         finally:
-            self.release("forward")
+            self.release(*MOVES)
+            self.set_speed(self.top_speed)
+            self.set_side_speed(self.side_speed)
         went = self.jumped
         return went and self.in_cell(self.wait_landed(timeout=10)["o"], leg["landing"])
+
+    def air_steer(self, s, target, gravity=600.0):
+        """One tick of air control toward landing on `target` (a floor point): the velocity
+        that would get there by the time the fall reaches its height, pushed for with the
+        move keys whatever way the view faces. In the air the keys only add speed up to 30
+        units a second along where they push (Source's air control), so in practice this
+        brakes: it aims a little long (better to brake late than fall short) and only pushes
+        where that does something."""
+        z, vz = s["o"][2] - target[2], s["v"][2]
+        # Time until the fall comes down to the target's height: z + vz t - g t^2 / 2 = 0.
+        t = (vz + math.sqrt(max(vz * vz + 2 * gravity * max(z, 0.0), 0.0))) / gravity
+        t = max(t, 0.1)
+        v = s["v"][:2]
+        sp = math.hypot(*v)
+        long = [v[i] / sp * 10 if sp > 1 else 0.0 for i in range(2)]
+        want = [(target[i] + long[i] - s["o"][i]) / t for i in range(2)]
+        dv = [want[i] - v[i] for i in range(2)]
+        n = math.hypot(*dv)
+        if n < 20 or (v[0] * dv[0] + v[1] * dv[1]) / n >= 30:
+            self.release(*MOVES)  # close enough, or pushing that way can't add speed
+        else:
+            self.move_toward(math.degrees(math.atan2(dv[1], dv[0])), self.top_speed)
 
     def act_exit(self, leg):
         """Out through the exit door: done at its linked door, or when the level restarts
@@ -795,6 +1131,12 @@ class Game:
             self.held.discard("forward")
             return True
         self.release("forward")
+        if not self.jumped:
+            s = self.obs()
+            door = self.floor(self.exit_cell)
+            near = hdist(s["o"], door) < 1.5 * VOXEL
+            raise Stuck(f"not out of the exit: stopped at {fmt(s['o'])}"
+                        + (", at its door (shut?)" if near else f", {hdist(s['o'], door):.0f} from its door"))
         if self.jumped:
             # Out: leave before the elevator ends the level. A preview built from the console
             # has no editor session to go back to, so the level change shuts the server down
@@ -820,7 +1162,7 @@ class Game:
             if want == "gone":
                 continue
             if want is None:
-                if held is None:
+                if held is None or not self.follows_view(held["id"]):
                     out.append("not holding the cube")
                 continue
             here = next((c for c in free if self.in_cell(c["o"], want, slack=16)), None)
@@ -836,6 +1178,13 @@ class Game:
     def recover(self, after):
         """Teleports things to where the route expects them after a leg."""
         s = self.obs()
+        if None not in after["cubes"]:
+            near = self.nearest_cube(s, s["eye"], within=120)
+            if near is not None and self.follows_view(near["id"]):
+                self.held_id = near["id"]
+                self.let_go()
+            self.held_id = None
+            s = self.obs()
         if not self.in_cell(s["o"], after["player"]):
             self.teleport(self.floor(after["player"]))
         s = self.obs()
@@ -844,8 +1193,12 @@ class Game:
                 c = self.world(face["centre"])
                 n = [-v for v in DIRS[face["dir"]]]
                 pitch = -90 if n[2] > 0 else 90 if n[2] < 0 else 0
+                self.firing = True
                 self.con.send(f"portal_place 0 {k} {c[0] + n[0]:.1f} {c[1] + n[1]:.1f} "
                               f"{c[2] + n[2]:.1f} {pitch} {yaw_of(n) if not n[2] else 0:.0f} 0")
+                time.sleep(0.3)
+                self.obs()
+                self.firing = False
                 self.portal_ids.pop(color, None)
         s = self.obs()
         held = self.holding(s)
@@ -891,10 +1244,14 @@ def glados_exe(path=None):
     sys.exit("no glados.exe: run `cargo build --release`")
 
 
+class NoRoute(Exception):
+    """`glados route` can't play the level."""
+
+
 def route(exe, level):
     out = subprocess.run([str(exe), "route", str(level)], capture_output=True, text=True, encoding="utf-8")
     if out.returncode != 0:
-        sys.exit(f"{level}: {out.stderr.strip() or out.stdout.strip()}")
+        raise NoRoute(f"{level}: {out.stderr.strip() or out.stdout.strip()}")
     lines = [json.loads(l) for l in out.stdout.splitlines() if l.strip()]
     return lines[0], lines[1:]
 
@@ -1014,14 +1371,25 @@ def arrive(game, head):
 
 def wait_for_cubes(game, head, timeout=15):
     """Droppers drop their cubes a little after the puzzle starts: wait for a cube in every
-    cube's starting cell."""
+    cube's starting cell, and for the cubes to come to rest (one can bounce or roll on)."""
     end = time.time() + timeout
+    still = None
+    prev = None
     while time.time() < end:
         s = game.obs()
-        if all(any(game.in_cell(c["o"], want["home"], slack=16) for c in s["cubes"])
-               for want in head["cubes"]):
-            return
-        time.sleep(0.3)
+        here = {c["id"]: c["o"] for c in s["cubes"]}
+        moving = prev is None or prev.keys() != here.keys() or any(
+            math.dist(here[k], prev[k]) > 1 for k in here)
+        prev = here
+        homed = all(any(game.in_cell(c["o"], want["home"], slack=16) for c in s["cubes"])
+                    for want in head["cubes"])
+        if moving or not homed and len(s["cubes"]) < len(head["cubes"]):
+            still = None
+        else:
+            still = still or time.time()
+            if time.time() - still > 1.0:
+                return
+        time.sleep(0.2)
 
 
 def walk_out(game, seconds):
@@ -1035,52 +1403,238 @@ def walk_out(game, seconds):
     return game.jumped
 
 
-def play(game, head, legs):
-    """Plays a route; returns one (status, text, problems) per leg. Status: ok, unconfirmed
-    (the action couldn't see that it worked, e.g. a turret still standing, but nothing the
-    route tracks is wrong), recovered (put right by teleporting) or failed."""
+# Where a leg's action starts matters (aim, reach, a run-up): a careful retry puts the player
+# exactly there after walking. For the rest the walk is the action, or a device moves them.
+PLACED = ("fire", "pickup", "putdown", "toss", "throw", "press", "knock", "enter", "leap", "dive",
+          "bounce")
+# Lining up a cube or reaching for something can take the player half a cell over.
+SLACK = ("pickup", "putdown", "toss", "throw", "press", "knock", "funnel", "plate", "dive", "ride")
+
+
+def intended_fields(game, before, leg):
+    """Hazards the route's own walk crosses (cell to cell): crossing those is the plan."""
+    faces = {}
+    for h, hz in enumerate(game.head.get("hazards", [])):
+        for f in hz["faces"]:
+            d = DIRS[f["dir"]]
+            faces[(tuple(f["cell"]), f["dir"])] = h
+            other = tuple(f["cell"][i] + d[i] for i in range(3))
+            faces[(other, ("+" if f["dir"][0] == "-" else "-") + f["dir"][1])] = h
+    out = set()
+    cells = [before["player"]] + leg["walk"]
+    for a, b in zip(cells, cells[1:]):
+        step_ = tuple(b[i] - a[i] for i in range(3))
+        for name, d in DIRS.items():
+            if step_[:2] == d[:2] and d[2] == 0 and (tuple(a), name) in faces:
+                out.add(faces[(tuple(a), name)])
+    return out
+
+
+def attempt(game, leg, before, careful=False):
+    """One go at a leg. Careful: the route's own cells walked (not straightened), the view
+    snapped, and the player put exactly where the action starts. Returns what happened."""
+    t0, n_events = time.time(), len(game.events)
+    ok, why = False, ""
+    rate = game.turn_rate
+    game.last_fire = None
+    intended = game.intended = intended_fields(game, before, leg)
+    try:
+        if careful:
+            game.turn_rate = math.inf
+            game.walk_cells(leg["walk"])
+            if leg["action"] in PLACED and (leg["walk"] or leg["action"] == "fire"):
+                if leg["action"] == "fire":
+                    e = game.world(leg["eye"])
+                    feet = [e[0], e[1], game.floor(leg["cell"])[2]]
+                else:
+                    feet = game.floor(leg["walk"][-1])
+                held = game.held_id
+                game.teleport(feet)
+                game.held_id = held
+                game.settle()
+        else:
+            game.walk_points(leg.get("points"), leg["walk"])
+        ok = getattr(game, "act_" + leg["action"])(leg)
+    except Stuck as e:
+        why = str(e)
+    finally:
+        game.release_all()
+        game.turn_rate = rate
+    if leg["walk"] and leg["after"]["player"] != leg["walk"][-1] and leg["action"] in (
+            "press", "putdown", "fire", "pickup", "toss", "throw", "knock"):
+        time.sleep(2.0)  # a device carried the player: let it get there
+        game.wait_landed()
+    exit_leg = leg["action"] == "exit" or leg.get("escape")
+    problems = [] if exit_leg else game.problems(leg["after"], 64 if leg["action"] in SLACK else 12)
+    events = game.events[n_events:]
+    for e in events:
+        if e["kind"] == "crossed field":
+            e["intended"] = e.get("hazard") in intended
+    r = {"ok": bool(ok), "why": why, "problems": problems, "events": events,
+         "seconds": round(time.time() - t0, 1)}
+    if game.last_fire:
+        r["fire"] = game.last_fire
+    return r
+
+
+def good(r, exit_leg):
+    return r["ok"] if exit_leg else (r["ok"] or not r["why"]) and not r["problems"]
+
+
+def classify(game, leg, first, retry):
+    """Why a leg failed: exec (the careful retry worked: the harness's playing is at fault),
+    route (the route's own path crosses a field it doesn't plan to), blocked (the route's own
+    cells can't be walked: the route or the solver's idea of the level is wrong; look),
+    plan? (done carefully it still fails: the game may disagree with the solver; look at the
+    evidence) or unknown (no retry)."""
+    if retry is None:
+        return "unknown"
+    if good(retry, leg["action"] == "exit" or leg.get("escape")):
+        return "exec"
+    if any(e["kind"] == "crossed field" and not e["intended"] for e in retry["events"]):
+        return "route"
+    if retry["why"].startswith("stuck") and "walking" in retry["why"]:
+        return "blocked"
+    return "plan?"
+
+
+def probe_target(game, leg):
+    """What a failed leg was about, to look at: a world point."""
+    a = leg["action"]
+    if a in ("fire", "enter", "throw") and leg.get("face"):
+        return game.world(leg["aim"] if leg.get("aim") else leg["face"]["centre"])
+    if a in ("bounce", "leap") and leg.get("gel"):
+        return game.floor(leg["gel"])
+    if a == "putdown":
+        return game.floor(leg["at"])
+    if leg.get("look"):
+        return game.world(leg["look"])
+    if leg.get("to"):
+        return game.floor(leg["to"])
+    if leg["walk"]:
+        s = game.obs()
+        # the first cell of the walk not reached
+        for c in leg["walk"]:
+            if not game.in_cell(s["o"], c):
+                return game.floor(c)
+    return None
+
+
+def probe(game, leg, r):
+    """Evidence about the geometry for a leg that failed done carefully: a screenshot looking
+    at what the leg was about, and for a shot, how far a straight line gets."""
+    out = {}
+    if r.get("why", "").startswith("stuck"):
+        o = game.obs()["o"]
+        out["near"] = game.near([o[0], o[1], o[2] + 36], 96)
+    target = probe_target(game, leg)
+    if target is not None:
+        game.look_at(target)
+        time.sleep(0.3)
+        out["look_shot"] = game.screenshot("look")
+    if leg["action"] == "fire":
+        eye = r.get("fire", {}).get("eye") or game.world(leg["eye"])
+        target = game.world(leg["aim"] if leg.get("aim") else leg["face"]["centre"])
+        hit = game.field_between(eye, target)
+        if hit:
+            out["through_field"] = f"{hit[1]} {hit[0]} (on, as the route has it) at {fmt(hit[2])}"
+        frac = game.trace_line(eye, target)
+        if frac is not None:
+            d = math.dist(eye, target)
+            out["line_of_sight"] = {"fraction": round(frac, 3), "short_by": round(d * (1 - frac), 1)}
+    return out
+
+
+def play(game, head, legs, deadline=None, report=None):
+    """Plays a route; returns one record per leg (also printed, and passed to `report`).
+
+    Before each leg the game is saved. A leg that doesn't work out is screenshotted, loaded
+    back and tried once more carefully (`attempt`); what the retry shows classifies it
+    (`classify`). Only if that fails too is it put right by teleporting (recover), so the rest
+    can be played. Status: ok, unconfirmed (the action couldn't see that it worked, e.g. a
+    turret still standing, but nothing the route tracks is wrong), retried (worked carefully),
+    recovered (put right by teleporting), failed, or skipped (out of time)."""
     game.exit_normal = head["exit"]["normal"]
+    game.exit_cell = head["exit"]["cell"]
+    game.head = head
+    game.set_hazards(head)
     results = []
+    game.leg_no = 0
     try:
         arrive(game, head)
+        game.arrival = "ok"
     except Stuck as e:
         print(f"  arrival: {e}; teleporting in", flush=True)
+        game.arrival = f"teleported: {e}"
         game.teleport(game.floor(head["entry"]["cell"]))
     wait_for_cubes(game, head)
+    before = head["start"]
+    start = game.problems(before, 12)
+    if start:
+        left = game.recover(before)
+        rec = {"leg": 0, "action": "start", "text": "the level as built", "status": "fixed" if not left else "off",
+               "problems": start, "after_recovery": left}
+        results.append(rec)
+        print("  start differs from the route's: " + "; ".join(start)
+              + ("" if not left else "; after recovery: " + "; ".join(left)), flush=True)
+        if report:
+            report(rec)
     for leg in legs:
+        game.leg_no = leg["leg"]
+        game.fields_on = set(leg.get("fields", []))
+        rec = {"leg": leg["leg"], "action": leg["action"], "text": leg["text"]}
+        if deadline and time.time() > deadline:
+            rec.update(status="skipped", cls=None)
+            results.append(rec)
+            if report:
+                report(rec)
+            continue
+        if getattr(game, "pid", None) and not portal2.focused(game.pid):
+            game.event("focus lost", f"refocused: {portal2.focus(game.pid)}", shot=False)
         game.show(f"{leg['leg']}/{len(legs)}: {leg['text']}")
-        ok, why = False, ""
-        try:
-            game.walk_points(leg.get("points"), leg["walk"])
-            ok = getattr(game, "act_" + leg["action"])(leg)
-        except Stuck as e:
-            why = str(e)
-        finally:
-            game.release_all()
-        if leg["walk"] and leg["after"]["player"] != leg["walk"][-1] and leg["action"] in (
-                "press", "putdown", "fire", "pickup", "toss", "throw", "knock"):
-            time.sleep(2.0)  # a device carried the player: let it get there
-            game.wait_landed()
+        saved = game.save()
         exit_leg = leg["action"] == "exit" or leg.get("escape")
-        # Lining up a cube or reaching for something can take the player half a cell over.
-        slack = 64 if leg["action"] in ("pickup", "putdown", "toss", "throw", "press", "knock",
-                                        "funnel", "plate", "dive", "ride") else 12
-        problems = [] if exit_leg else game.problems(leg["after"], slack)
-        if ok and not problems:
-            status = "ok"
-        elif exit_leg and not ok:
-            status = "failed"  # didn't get out of the level
-        elif not problems and not why:
-            status = "unconfirmed"  # the action couldn't see it work; nothing to put right
-        elif exit_leg:
-            status = "failed"
+        first = attempt(game, leg, before)
+        rec["first"] = first
+        retry = None
+        if good(first, exit_leg):
+            status = "ok" if first["ok"] or exit_leg else "unconfirmed"
         else:
-            problems = [why] * bool(why) + problems
-            left = game.recover(leg["after"])
-            status = "recovered" if not left else "failed"
-            problems += [f"after recovery: {p}" for p in left]
-        results.append((status, leg["text"], problems))
-        print(f"  {status:9} {leg['text']}" + "".join(f"\n            {p}" for p in problems), flush=True)
+            rec["fail_shot"] = game.screenshot("failed")
+            time.sleep(0.3)
+            if saved and not (exit_leg and first["ok"]):
+                try:
+                    game.load(before)
+                    retry = attempt(game, leg, before, careful=True)
+                except Stuck as e:
+                    retry = {"ok": False, "why": f"load: {e}", "problems": [], "events": [], "seconds": 0}
+                rec["retry"] = retry
+            if retry is not None and good(retry, exit_leg):
+                status = "retried"
+            elif exit_leg:
+                status = "failed"
+            else:
+                if retry is not None:
+                    rec["retry_shot"] = game.screenshot("retry-failed")
+                    rec["probe"] = probe(game, leg, retry)
+                left = game.recover(leg["after"])
+                status = "recovered" if not left else "failed"
+                rec["after_recovery"] = left
+            rec["cls"] = classify(game, leg, first, retry)
+            # After a leg was put right by teleporting, the game may not be quite what the
+            # route has (a button not held, a door shut): later failures may come from that.
+            rec["tainted"] = any(r["status"] in ("recovered", "failed") for r in results)
+        rec["status"] = status
+        results.append(rec)
+        why = [first["why"]] * bool(first["why"]) + first["problems"]
+        print(f"  {status:11} {leg['text']}" + (f"  [{rec['cls']}]" if rec.get("cls") else "")
+              + "".join(f"\n              {p}" for p in why)
+              + ("" if retry is None else "\n              careful retry: "
+                 + ("worked" if good(retry, exit_leg) else "; ".join([retry["why"]] * bool(retry["why"]) + retry["problems"]) or "failed")),
+              flush=True)
+        if report:
+            report(rec)
+        before = leg["after"]
     return results
 
 
@@ -1128,9 +1682,42 @@ def spike(game, head, exported):
 
 # --- main ----------------------------------------------------------------------------------
 
+def level_key(path):
+    """A name for a level's report folder: its path under the repository, flattened."""
+    path = Path(path).resolve()
+    try:
+        rel = path.relative_to(ROOT)
+    except ValueError:
+        rel = Path(path.name)
+    return re.sub(r"[^\w.-]+", "_", str(rel.with_suffix("")).replace("\\", "/").replace("/", "_"))
+
+
+def collect_shots(game, folder):
+    """Moves the level's screenshots from the game's folder into `folder`."""
+    src = portal2.GAME / "portal2" / "screenshots"
+    end = time.time() + 3
+    for name in game.shots:
+        f = src / f"{name}.jpg"
+        while not f.exists() and time.time() < end:
+            time.sleep(0.2)
+        if f.exists():
+            f.replace(folder / f.name)
+
+
+def tally(results):
+    keys = ("ok", "unconfirmed", "retried", "recovered", "failed", "skipped")
+    counts = {k: sum(r["status"] == k for r in results) for k in keys}
+    classes = {}
+    for r in results:
+        if r.get("cls"):
+            classes[r["cls"]] = classes.get(r["cls"], 0) + 1
+    return counts, classes
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("levels", nargs="+", help=".p2c files")
+    ap.add_argument("levels", nargs="*", help=".p2c files (or folders of them)")
+    ap.add_argument("--list", help="a file naming more .p2c files, one a line")
     ap.add_argument("--launch", action="store_true", help="start the game (and quit it at the end)")
     ap.add_argument("--keep", action="store_true", help="leave a launched game running")
     ap.add_argument("--port", type=int, help="console port of a game you started")
@@ -1140,43 +1727,142 @@ def main():
                     help="snap the view instead of turning smoothly (for validation runs)")
     ap.add_argument("--spike", action="store_true", help="check the harness on the first level")
     ap.add_argument("--glados", help="glados.exe (default: target/release, else target/debug)")
+    ap.add_argument("--out", help="folder for reports: per level legs.jsonl, trace.jsonl and "
+                    "screenshots, and summary.jsonl (levels already in it are skipped); "
+                    "a file named STOP there ends the batch after the level being played")
+    ap.add_argument("--restart-every", type=int, default=20,
+                    help="with --launch, restart the game after this many levels")
+    ap.add_argument("--level-timeout", type=float, default=900, help="seconds per level")
     a = ap.parse_args()
     exe = glados_exe(a.glados)
-    routes = [(p, *route(exe, p)) for p in a.levels]  # refuse unplayable levels up front
+    names = a.levels + (Path(a.list).read_text().split() if a.list else [])
+    if not names:
+        ap.error("no levels")
+    paths = [g for f in map(Path, names) for g in (sorted(f.glob("*.p2c")) if f.is_dir() else [f])]
+    out = Path(a.out) if a.out else None
+    done = set()
+    if out:
+        out.mkdir(parents=True, exist_ok=True)
+        summary_file = out / "summary.jsonl"
+        if summary_file.exists():
+            done = {json.loads(l)["key"] for l in summary_file.read_text().splitlines() if l.strip()}
+
+    def summarize(row):
+        if out:
+            with open(out / "summary.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+
+    routes = []
+    for p in paths:
+        if level_key(p) in done:
+            continue
+        try:
+            routes.append((p, *route(exe, p)))
+        except NoRoute as e:
+            if not out:
+                sys.exit(str(e))  # refuse unplayable levels up front
+            print(f"{e}", flush=True)
+            summarize({"key": level_key(p), "level": str(p), "error": f"no route: {e}"})
     saved = {p: p.read_bytes() for p in portal2.autosaves()}
     pid = con = None
+    played = 0  # levels since the game started
+    tries = {}
     summary = []
     try:
         SCRIPT.parent.mkdir(parents=True, exist_ok=True)
         SCRIPT.write_text(VSCRIPT, encoding="ascii")
-        if a.launch:
-            pid, con = portal2.launch(saved)
-        else:
-            proc = portal2.game_process()
-            if proc is None or "-insecure" not in proc[1].split():
-                raise GameUnavailable("no game started with -insecure (or use --launch)")
-            if not a.port:
-                raise GameUnavailable("pass --port (and --password) for a game you started")
-            con = Console(a.port, a.password)
-            open_editor(con)  # from wherever the game is, e.g. its main menu
-        for i, (path, head, legs) in enumerate(routes):
-            if i:
-                open_editor(con)
-            print(f"{path}: \"{head['title']}\", {len(legs)} legs", flush=True)
-            try:
-                exported = load_level(con, path)
-            except InvalidLevel as e:
-                print(f"{path}: invalid in the editor: {e}", flush=True)
-                continue
-            game = Game(con, calibrate(head) or (0.0, 0.0, 0.0), math.inf if a.fast else TURN_RATE)
-            if a.slow != 1.0:
-                con.send(f"host_timescale {a.slow}")
-            if a.spike:
-                spike(game, head, exported)
+        todo = list(routes)
+        while todo:
+            if out and (out / "STOP").exists():
+                print(f"{out / 'STOP'} found: stopping ({len(todo)} levels left)", flush=True)
                 break
-            results = play(game, head, legs)
-            summary.append((path, results))
-            time.sleep(2)
+            path, head, legs = todo[0]
+            key = level_key(path)
+            try:
+                if con is None:
+                    if a.launch:
+                        pid, con = portal2.launch(saved)
+                        played = 0
+                    else:
+                        proc = portal2.game_process()
+                        if proc is None or "-insecure" not in proc[1].split():
+                            raise GameUnavailable("no game started with -insecure (or use --launch)")
+                        if not a.port:
+                            raise GameUnavailable("pass --port (and --password) for a game you started")
+                        con = Console(a.port, a.password)
+                        open_editor(con)  # from wherever the game is, e.g. its main menu
+                        played = 0
+                elif played:
+                    open_editor(con)
+                print(f"{path}: \"{head['title']}\", {len(legs)} legs", flush=True)
+                t0 = time.time()
+                try:
+                    exported = load_level(con, path)
+                except InvalidLevel as e:
+                    print(f"{path}: invalid in the editor: {e}", flush=True)
+                    summarize({"key": key, "level": str(path), "error": f"invalid: {e}"})
+                    todo.pop(0)
+                    played += 1
+                    continue
+                if pid is not None and not portal2.focused(pid):
+                    print(f"  game window not in front; focus(): {portal2.focus(pid)}", flush=True)
+                game = Game(con, calibrate(head) or (0.0, 0.0, 0.0), math.inf if a.fast else TURN_RATE)
+                game.pid = pid
+                if a.slow != 1.0:
+                    con.send(f"host_timescale {a.slow}")
+                if a.spike:
+                    spike(game, head, exported)
+                    break
+                folder = None
+                report = None
+                if out:
+                    folder = out / key
+                    if folder.exists():
+                        shutil.rmtree(folder)  # a level cut short: play it again from the start
+                    folder.mkdir(parents=True)
+                    (folder / "route.jsonl").write_text(
+                        "\n".join(json.dumps(x) for x in [head] + legs) + "\n", encoding="utf-8")
+                    game.shot_prefix = f"glados-{key[-40:]}"
+
+                    def report(rec, folder=folder):
+                        with open(folder / "legs.jsonl", "a", encoding="utf-8") as f:
+                            f.write(json.dumps(rec) + "\n")
+                results = play(game, head, legs, deadline=time.time() + a.level_timeout, report=report)
+                counts, classes = tally(results)
+                row = {"key": key, "level": str(path), "title": head["title"], "legs": len(legs),
+                       "counts": counts, "classes": classes, "arrival": game.arrival,
+                       "events": len(game.events), "seconds": round(time.time() - t0)}
+                if folder:
+                    with open(folder / "trace.jsonl", "w", encoding="utf-8") as f:
+                        for t in game.trace:
+                            f.write(json.dumps(t) + "\n")
+                    with open(folder / "events.jsonl", "w", encoding="utf-8") as f:
+                        for e in game.events:
+                            f.write(json.dumps(e) + "\n")
+                    collect_shots(game, folder)
+                summarize(row)
+                summary.append((path, results))
+                todo.pop(0)
+                played += 1
+                time.sleep(2)
+                if a.launch and played >= a.restart_every and todo:
+                    portal2.quit_game(saved, pid, con)
+                    pid = con = None
+            except GameUnavailable as e:
+                if not (a.launch and out):
+                    raise
+                # The game went down or stopped answering: start it again; a level that does
+                # this twice is recorded and passed over.
+                tries[key] = tries.get(key, 0) + 1
+                print(f"{path}: Portal 2 unavailable ({e}); restarting it", flush=True)
+                if tries[key] >= 2:
+                    summarize({"key": key, "level": str(path), "error": f"game unavailable: {e}"})
+                    todo.pop(0)
+                if pid is not None or portal2.game_process() is not None:
+                    portal2.quit_game(saved, pid or portal2.game_process()[0], con)
+                pid = con = None
+                if sum(tries.values()) > 6:
+                    raise
     except GameUnavailable as e:
         print(f"Portal 2 unavailable: {e}", file=sys.stderr)
         sys.exit(portal2.UNAVAILABLE)
@@ -1187,8 +1873,9 @@ def main():
         elif pid is None:
             portal2.VMF.unlink(missing_ok=True)
     for path, results in summary:
-        counts = {k: sum(r[0] == k for r in results) for k in ("ok", "unconfirmed", "recovered", "failed")}
-        print(f"{path}: " + ", ".join(f"{v} {k}" for k, v in counts.items()))
+        counts, classes = tally(results)
+        print(f"{path}: " + ", ".join(f"{v} {k}" for k, v in counts.items() if v)
+              + ("" if not classes else "  (" + ", ".join(f"{v} {k}" for k, v in classes.items()) + ")"))
 
 
 if __name__ == "__main__":
