@@ -482,13 +482,21 @@ class Game:
         use again would pick it back up), so glance up: a held cube follows the view."""
         for _ in range(2):
             self.tap("use", 0.15)
-            time.sleep(1.0)
+            time.sleep(0.3)
             if self.held_id is None:
                 return True
-            before = next((c for c in self.obs()["cubes"] if c["id"] == self.held_id), None)
-            if before is None:  # gone (fizzled, dissolved): not held any more
+            cube = lambda: next((c for c in self.obs()["cubes"] if c["id"] == self.held_id), None)
+            a = cube()
+            time.sleep(0.3)
+            b = cube()
+            if a is None or b is None:  # gone (fizzled, dissolved): not held any more
                 self.held_id = None
                 return True
+            if b["o"][2] < a["o"][2] - 8:  # falling (glancing would see it move too)
+                self.held_id = None
+                time.sleep(0.6)
+                return True
+            time.sleep(0.4)
             if not self.follows_view(self.held_id):
                 self.held_id = None
                 return True
@@ -639,11 +647,12 @@ class Game:
                 still = None
         return self.obs()
 
-    def walk(self, points, tol=8.0, stop=True, timeout=None, on_jump="stop"):
+    def walk(self, points, tol=8.0, stop=True, timeout=None, on_jump="stop", launched=False):
         """Walks through world points (xy), turning smoothly toward each and walking on once
         roughly facing it. Intermediate points are passed within about a quarter voxel; the
         last within `tol`, easing into a stop if `stop`. A jump (portal, linked door) ends the
-        walk when `on_jump` is "stop". Raises Stuck if no progress is made for 2.5 s."""
+        walk when `on_jump` is "stop"; going up fast (a faith plate) ends it when `launched`.
+        Raises Stuck if no progress is made for 2.5 s."""
         self.jumped = False
         tick = time.time()
         try:
@@ -651,6 +660,7 @@ class Game:
                 last = k == len(points) - 1
                 reach = tol if last else 28.0
                 best, best_t, hopped = 1e9, time.time(), False
+                floor_t, waiting = 0.0, 0.0
                 end = time.time() + (timeout or 10 + hdist(self.obs()["o"], p) / 100)
                 while True:
                     s = self.obs()
@@ -658,6 +668,8 @@ class Game:
                     dt, tick = now - tick, now
                     if self.jumped and on_jump == "stop":
                         return s
+                    if launched and s["v"][2] > 150:
+                        return s  # thrown: hands off (steering in the air spoils the arc)
                     # Burnt (a laser beam across the way, which also pushes back): duck under it.
                     hurt = now - getattr(self, "hurt_at", 0.0)
                     if hurt < 1.0:
@@ -680,6 +692,20 @@ class Game:
                         self.tap("jump")
                         hopped = True
                         self.event("hop", f"no headway at {fmt(s['o'])}: jumped", shot=False)
+                    # Level ahead with no floor (a rail platform's track while the platform is
+                    # elsewhere): wait for the floor to come, then go on (riding it).
+                    if len(p) > 2 and abs(p[2] - s["o"][2]) < 20 and now - floor_t > 0.25:
+                        floor_t = now
+                        if not self.floor_ahead(s, p):
+                            if not waiting:
+                                waiting = now
+                                self.event("waiting", f"no floor ahead of {fmt(s['o'])}", shot=False)
+                            if now - waiting > 30:
+                                raise Stuck(f"no floor ahead of {fmt(s['o'])} for 30 s")
+                            self.release(*MOVES)
+                            best_t, end = now, end + 0.25
+                            continue
+                        waiting = 0.0
                     yaw = self.away_from_fields(s, math.degrees(math.atan2(p[1] - s["o"][1], p[0] - s["o"][0])))
                     view = self.cube_yaw(s, yaw)
                     if view != yaw:
@@ -700,6 +726,14 @@ class Game:
             self.set_speed(self.top_speed)
             self.set_side_speed(self.side_speed)
         return self.settle() if stop else self.obs()
+
+    def floor_ahead(self, s, p, ahead=40.0):
+        """Whether there is floor `ahead` units on toward p (or at p, if nearer)."""
+        d = hdist(s["o"], p)
+        k = min(1.0, ahead / max(d, 1.0))
+        x, y = s["o"][0] + (p[0] - s["o"][0]) * k, s["o"][1] + (p[1] - s["o"][1]) * k
+        frac = self.trace_line([x, y, s["o"][2] + 8], [x, y, s["o"][2] - 24])
+        return frac is None or frac < 1.0
 
     def move_toward(self, yaw, speed):
         """Moves toward heading `yaw` whatever way the view faces: forward/back and the strafe
@@ -823,11 +857,12 @@ class Game:
             # otherwise hang in a field beside it).
             yaw = yaw_of(DIRS[face["dir"]])
             self.turn(0, self.cube_yaw(self.obs(), yaw))
-            end = time.time() + 5
+            speed = self.entry_speed(leg)
+            end = time.time() + 5 + 150 / speed
             try:
                 while not self.jumped and time.time() < end:
                     self.obs()
-                    self.move_toward(yaw, self.top_speed)
+                    self.move_toward(yaw, speed)
             finally:
                 self.release(*MOVES)
                 self.set_speed(self.top_speed)
@@ -846,6 +881,25 @@ class Game:
                             "its partner is gone (fizzled?)")
         self.wait_landed()
         return went
+
+    def entry_speed(self, leg):
+        """How fast to walk into a wall portal: out of a wall portal the walk's speed carries
+        on, and a fall after it drifts that far (into a field beside the landing, say). So:
+        the speed whose fall out of the other portal ends in the middle of the landing cell."""
+        out = leg.get("out")
+        if not out or out["dir"] in ("-z", "+z"):
+            return self.top_speed
+        n = [-v for v in DIRS[out["dir"]]]  # out of the exit portal, into the room
+        c = self.world(out["centre"])
+        land = self.floor(leg["after"]["player"])
+        # The player comes out with its middle 16 in front of the portal, feet ~36 under it.
+        start = [c[0] + n[0] * 16, c[1] + n[1] * 16, c[2] - 36]
+        dist = (land[0] - start[0]) * n[0] + (land[1] - start[1]) * n[1]
+        height = start[2] - land[2]
+        if height < 16:
+            return self.top_speed
+        t = math.sqrt(2 * height / 600.0)
+        return max(MIN_SPEED, min(self.top_speed, dist / t))
 
     def land_clear(self, timeout=3):
         """Out of a portal: while falling, if the drift would carry the player across a live
@@ -1122,7 +1176,10 @@ class Game:
         time.sleep(1.5)
         s = self.obs()
         t = min(s["turrets"], key=lambda t: hdist(t["o"], p), default=None)
-        return t is not None and (abs(t["a"][0]) > 30 or abs(t["a"][2]) > 30)
+        if t is not None and abs(t["a"][0]) <= 30 and abs(t["a"][2]) <= 30:
+            # Still standing, it shoots: that's a failure to retry, not an unknown.
+            raise Stuck(f"turret at {fmt(t['o'])} still standing")
+        return t is not None
 
     def act_bounce(self, leg):
         to = self.floor(leg["to"])
@@ -1163,7 +1220,8 @@ class Game:
     def act_plate(self, leg):
         """Steps onto the faith plate and waits to come down where it throws."""
         try:
-            self.walk([self.floor(leg["plate"])], tol=16, stop=False, timeout=6, on_jump="ignore")
+            self.walk([self.floor(leg["plate"])], tol=16, stop=False, timeout=6, on_jump="ignore",
+                      launched=True)
         except Stuck:
             pass  # thrown before getting to its middle
         time.sleep(0.5)
@@ -1611,6 +1669,15 @@ def attempt(game, leg, before, careful=False):
         game.wait_landed()
     exit_leg = leg["action"] == "exit" or leg.get("escape")
     problems = [] if exit_leg else game.problems(leg["after"], 64 if leg["action"] in SLACK else 12)
+    # A cube for a button has to rest near its middle (in its cell but on the plate's rim, it
+    # doesn't press it; that only shows later, as a door that stays shut).
+    target = leg.get("at") if leg["action"] == "putdown" and leg.get("button") else         leg.get("landing") if leg["action"] in ("throw", "toss") and "button" in leg["text"] else None
+    if target and not problems:
+        f = game.floor(target)
+        s = game.obs()
+        near = min(s["cubes"], key=lambda c: hdist(c["o"], f), default=None)
+        if near is not None and hdist(near["o"], f) > 30:
+            problems.append(f"cube {hdist(near['o'], f):.0f} from the middle of the button in {target}")
     events = game.events[n_events:]
     for e in events:
         if e["kind"] == "crossed field":

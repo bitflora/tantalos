@@ -539,7 +539,7 @@ impl<'a> Grounder<'a> {
 
     /// Something stands in `c` that the player shouldn't walk into, stand on to act, or put a
     /// cube on: a cube, a floor button, a pedestal or a turret, gel on the floor, an open
-    /// portal in the floor (walking over it, the player falls in), or a faith plate.
+    /// portal in the floor (walking over it, the player falls in), a faith plate or stairs.
     fn in_the_way(&self, h: &Here, s: &State, c: Cell) -> bool {
         let open = h.portals.iter().all(Option::is_some);
         (open && h.portals.contains(&Some((c, Dir::NegZ))))
@@ -548,6 +548,13 @@ impl<'a> Grounder<'a> {
             || self.model.pedestals.iter().any(|p| p.cell == c)
             || self.model.turrets.iter().any(|t| t.cell == c)
             || self.level.plate_at(c).is_some()
+            // A deployed staircase is steps, up to most of a voxel high at its top end: no
+            // walking across it (in-game, a walk over its cells got stuck on the steps).
+            || self
+                .level
+                .stairs
+                .iter()
+                .any(|st| st.cell == c || step(st.cell, st.dir) == c)
             || self.face_id.get(&(c, Dir::NegZ)).is_some_and(|&f| {
                 [PaintKind::Bounce, PaintKind::Speed]
                     .iter()
