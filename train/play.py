@@ -287,6 +287,15 @@ class Game:
             if hit:
                 h, kind, x = hit
                 self.event("crossed field", f"{kind} {h} at {fmt(x)}", hazard=h)
+            else:
+                # The player's box reaches 16 either side of the middle: within a few units
+                # of a field it may touch it (a fizzler then takes the portals, unseen: a
+                # fizzled portal entity stays where it was).
+                near = self.field_near(mid(b["o"]), 24)
+                if near and (self.leg_no, "player", near[0]) not in self.crossed:
+                    self.crossed.add((self.leg_no, "player", near[0]))
+                    h, kind, d = near
+                    self.event("near field", f"{kind} {h}: player {d:.0f} from it at {fmt(b['o'])}", hazard=h)
         before = {c["id"]: c for c in a["cubes"]}
         for c in b["cubes"]:
             if c["id"] in before:
@@ -312,6 +321,26 @@ class Game:
                 return h, kind, x
         return None
 
+    def away_from_fields(self, s, yaw, reach=64.0):
+        """`yaw` bent away from live fields the route doesn't cross that the player is within
+        `reach` of (a laser field kills on touch; a fizzler takes the portals)."""
+        dx, dy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        mid = [s["o"][0], s["o"][1], s["o"][2] + 36]
+        bent = False
+        for h, kind, axis, plane, lo, hi in self.hazards:
+            if axis == 2 or h not in self.fields_on or h in self.intended:
+                continue
+            d = mid[axis] - plane
+            if abs(d) >= reach or not all(lo[i] - 16 <= mid[i] <= hi[i] + 16 for i in range(3) if i != axis):
+                continue
+            push = 1.5 * (reach - abs(d)) / reach * (1 if d > 0 else -1)
+            if axis == 0:
+                dx += push
+            else:
+                dy += push
+            bent = True
+        return math.degrees(math.atan2(dy, dx)) if bent else yaw
+
     def guarding(self):
         """Whether a held cube has fields to keep out of (live ones the route doesn't cross)."""
         return self.held_id is not None and bool(self.fields_on - self.intended)
@@ -327,10 +356,23 @@ class Game:
         if self.field_between(here, c, skip=self.intended):
             return False
         for h, kind, axis, plane, lo, hi in self.hazards:
-            if (h in self.fields_on and h not in self.intended and abs(c[axis] - plane) < 40
-                    and all(lo[i] - 32 <= c[i] <= hi[i] + 32 for i in range(3) if i != axis)):
+            # A cube carried at an angle reaches its half-diagonal (about 45) out, and the
+            # field has some thickness: 48 from the plane was seen to fizzle one.
+            if (h in self.fields_on and h not in self.intended and abs(c[axis] - plane) < 72
+                    and all(lo[i] - 48 <= c[i] <= hi[i] + 48 for i in range(3) if i != axis)):
                 return False
         return True
+
+    def field_near(self, p, reach):
+        """A live field the route doesn't cross within `reach` of point p (beside it, not
+        across): (index, kind, distance), or None."""
+        for h, kind, axis, plane, lo, hi in self.hazards:
+            if h not in self.fields_on or h in self.intended:
+                continue
+            d = abs(p[axis] - plane)
+            if d < reach and all(lo[i] <= p[i] <= hi[i] for i in range(3) if i != axis):
+                return h, kind, d
+        return None
 
     def cube_yaw(self, s, yaw):
         """A view heading near `yaw` that keeps the held cube out of fields (`cube_clear`):
@@ -608,7 +650,7 @@ class Game:
             for k, p in enumerate(points):
                 last = k == len(points) - 1
                 reach = tol if last else 28.0
-                best, best_t = 1e9, time.time()
+                best, best_t, hopped = 1e9, time.time(), False
                 end = time.time() + (timeout or 10 + hdist(self.obs()["o"], p) / 100)
                 while True:
                     s = self.obs()
@@ -629,10 +671,16 @@ class Game:
                         self.release(*MOVES)  # there: coast to a stop
                         continue
                     if d < best - 2:
-                        best, best_t = d, now
+                        best, best_t, hopped = d, now, False
                     if now - best_t > 2.5 or now > end:
                         raise Stuck(f"stuck at {fmt(s['o'])} walking to {fmt(p)}")
-                    yaw = math.degrees(math.atan2(p[1] - s["o"][1], p[0] - s["o"][0]))
+                    if now - best_t > 1.0 and not hopped and abs(s["v"][2]) < 5 and "duck" not in self.held:
+                        # Pushing against something low (a bridge out of a portal sits 24 up,
+                        # higher than a step): hop up onto it.
+                        self.tap("jump")
+                        hopped = True
+                        self.event("hop", f"no headway at {fmt(s['o'])}: jumped", shot=False)
+                    yaw = self.away_from_fields(s, math.degrees(math.atan2(p[1] - s["o"][1], p[0] - s["o"][0])))
                     view = self.cube_yaw(s, yaw)
                     if view != yaw:
                         # Face away from the field and walk sideways (or backwards) there.
@@ -771,19 +819,53 @@ class Game:
     def act_enter(self, leg):
         face = leg["face"]
         if not self.jumped and face["dir"] != "-z":
-            # A wall portal: walk into it.
-            self.turn(0, yaw_of(DIRS[face["dir"]]))
-            self.hold("forward")
+            # A wall portal: walk into it (looking a little aside if a held cube would
+            # otherwise hang in a field beside it).
+            yaw = yaw_of(DIRS[face["dir"]])
+            self.turn(0, self.cube_yaw(self.obs(), yaw))
             end = time.time() + 5
-            while not self.jumped and time.time() < end:
-                self.obs()
-            self.release("forward")
+            try:
+                while not self.jumped and time.time() < end:
+                    self.obs()
+                    self.move_toward(yaw, self.top_speed)
+            finally:
+                self.release(*MOVES)
+                self.set_speed(self.top_speed)
+                self.set_side_speed(self.side_speed)
         elif not self.jumped:
             # A floor portal: the walk ends on it; step onto its middle.
             self.walk([self.floor(face["cell"])], tol=4, stop=False, timeout=4)
         went = self.jumped
+        if went:
+            self.land_clear()
+        elif face["dir"] != "-z":
+            s = self.obs()
+            c = self.world(face["centre"])
+            if hdist(s["o"], c) < 48:
+                raise Stuck(f"at the portal on {face['cell']} {face['dir']} but not through it: "
+                            "its partner is gone (fizzled?)")
         self.wait_landed()
         return went
+
+    def land_clear(self, timeout=3):
+        """Out of a portal: while falling, if the drift would carry the player across a live
+        field the route doesn't cross, brake (in the air that snaps the speed down)."""
+        end = time.time() + timeout
+        while time.time() < end:
+            s = self.obs()
+            if abs(s["v"][2]) < 5 and self.speed(s) < 5:
+                return
+            # Where the drift goes in the next half second.
+            ahead = [s["o"][0] + s["v"][0] * 0.5, s["o"][1] + s["v"][1] * 0.5, s["o"][2] + 36]
+            here = [s["o"][0], s["o"][1], s["o"][2] + 36]
+            hit = self.field_between(here, ahead, skip=self.intended) or self.field_near(ahead, 32)
+            if hit and self.speed(s) > 20:
+                self.move_toward(math.degrees(math.atan2(-s["v"][1], -s["v"][0])), self.top_speed)
+            else:
+                self.release(*MOVES)
+        self.release(*MOVES)
+        self.set_speed(self.top_speed)
+        self.set_side_speed(self.side_speed)
 
     def act_pickup(self, leg):
         home = self.world(leg["look"])
@@ -881,9 +963,9 @@ class Game:
         if face["dir"] == "-z":
             c = self.world(face["centre"])
             return self.place_cube(c, 20, c)
-        # Into a wall portal: square in front of it, a held cube's reach and a bit back, walk
-        # straight at it and let go just before the cube gets there, so it flies in with the
-        # walk's speed and nothing sideways (that would carry it off where it comes out).
+        # Into a wall portal: square in front of it, a held cube's reach and a bit back, and
+        # walk straight at it (from aside, the cube can wedge beside the portal, or come out
+        # moving sideways).
         d = DIRS[face["dir"]]
         c = self.world(face["centre"])
         s = self.obs()
@@ -898,28 +980,80 @@ class Game:
         time.sleep(0.3)
         self.hold("forward")
         end = time.time() + 5
-        went = dropped = False
+        went = False
         try:
             while time.time() < end and not went:
                 s = self.obs()
                 now = next((q for q in s["cubes"] if q["id"] == cube["id"]), None)
                 went = now is None or math.dist(now["o"], cube["o"]) > 160
-                if now is None or went:
-                    break
-                cube = now
-                # How far the cube's middle is from the portal's plane.
-                gap = sum((c[i] - now["o"][i]) * d[i] for i in range(3))
-                if not dropped and gap < 40:
-                    self.tap("use")
-                    dropped = True
-                    self.release("forward")
-                    end = time.time() + 2
+                if now is not None and not went:
+                    cube = now
         finally:
             self.release("forward")
-        if dropped:
-            self.held_id = None
-            return went
-        return self.let_go() and went
+        if not went:
+            return False
+        # Held through the portal, it hangs out of the other one, about over where it lands:
+        # line it up there, then let go (a cube dropped short of a portal can stick halfway
+        # through it).
+        time.sleep(0.3)
+        if leg.get("landing"):
+            self.align_held(cube["id"], self.floor(leg["landing"]))
+        self.tap("use", 0.15)
+        self.held_id = None
+        time.sleep(1.5)
+        return True
+
+    def align_held(self, cube_id, target, tol=10.0, tries=6):
+        """Moves a cube held through a portal over `target` (xy) before it is let go. How the
+        cube moves when the player steps sideways or looks up depends on the portals, so it is
+        measured: a small step and a small tilt, then corrections solved from those."""
+        def where():
+            c = next((q for q in self.obs()["cubes"] if q["id"] == cube_id), None)
+            return None if c is None else c["o"]
+
+        p0 = where()
+        if p0 is None:
+            return
+        if math.hypot(target[0] - p0[0], target[1] - p0[1]) < tol:
+            return
+        yaw = math.radians(self.yaw)
+        right = (math.sin(yaw), -math.cos(yaw))
+        o = self.obs()["o"]
+        self.shift_to([o[0] + right[0] * 12, o[1] + right[1] * 12], tol=3, timeout=3)
+        time.sleep(0.4)
+        p1 = where()
+        self.look(self.pitch - 6, self.yaw)
+        time.sleep(0.4)
+        p2 = where()
+        if p1 is None or p2 is None:
+            return
+        o1 = self.obs()["o"]
+        step = right[0] * (o1[0] - o[0]) + right[1] * (o1[1] - o[1])
+        if abs(step) < 3:
+            return
+        # Columns: cube movement per unit of sideways step, per degree of looking up.
+        a, c = (p1[0] - p0[0]) / step, (p1[1] - p0[1]) / step
+        b, d = (p2[0] - p1[0]) / 6, (p2[1] - p1[1]) / 6
+        det = a * d - b * c
+        if abs(det) < 1e-3:
+            print(f"    align: no handle on the cube (moves {a:.2f},{c:.2f} / {b:.2f},{d:.2f})", flush=True)
+            return
+        for _ in range(tries):
+            p = where()
+            if p is None:
+                return
+            ex, ey = target[0] - p[0], target[1] - p[1]
+            if math.hypot(ex, ey) < tol:
+                break
+            u = max(-48.0, min(48.0, (d * ex - b * ey) / det))
+            v = max(-20.0, min(20.0, (a * ey - c * ex) / det))
+            o = self.obs()["o"]
+            self.shift_to([o[0] + right[0] * u, o[1] + right[1] * u], tol=3, timeout=3)
+            self.look(max(-80.0, min(80.0, self.pitch - v)), self.yaw)
+            time.sleep(0.4)
+        p = where()
+        if p is not None:
+            print(f"    align: cube {math.hypot(target[0] - p[0], target[1] - p[1]):.0f} from the landing", flush=True)
 
     def act_press(self, leg):
         """Presses a pedestal button: close up, looking at its button (on top of the column,
@@ -1069,30 +1203,41 @@ class Game:
         return False
 
     def act_dive(self, leg):
-        """Off the ledge (with a running jump if the portal is two cells out), steering in the
-        air so the fall ends in the middle of the floor portal (on its rim the player just
-        lands), and out of the other one at speed."""
+        """Off the ledge (with a running jump if the portal is two cells out) into the floor
+        portal, and out of the other one at speed. The run-up speed is worked out so the fall
+        ends in the portal's middle (on its rim the player just lands): in the air the keys
+        hardly help (braking snaps the speed down to about 73 and it can't be got back)."""
         d = DIRS[leg["dir"]]
         edge = self.floor(leg["edge"])
         portal = self.floor(leg["face"]["cell"])
+        jump = leg["out"] > 1
+        height = edge[2] - portal[2]
+        dist = (portal[0] - edge[0]) * d[0] + (portal[1] - edge[1]) * d[1]
+        # Where the fall starts: the player's box (16 either side) off the edge, or the jump
+        # (taken 40 past the edge cell's middle, 226 up).
+        start = 40.0 if jump else VOXEL / 2 + 16
+        vz = 226.0 if jump else 0.0
+        t = (vz + math.sqrt(vz * vz + 2 * 600.0 * height)) / 600.0
+        speed = max(MIN_SPEED, min(self.top_speed, (dist - start) / t))
+        print(f"    dive: {dist - start:.0f} to go over a {height:.0f} fall: run at {speed:.0f}", flush=True)
         self.turn(0, yaw_of(d))
         # Back up to the far side of the edge cell for a run-up.
         self.shift_to([edge[0] - d[0] * 40, edge[1] - d[1] * 40])
+        self.set_speed(speed)
         self.hold("forward")
         jumped, end = False, time.time() + 10
         try:
             while time.time() < end and not self.jumped:
                 s = self.obs()
                 ahead = (s["o"][0] - edge[0]) * d[0] + (s["o"][1] - edge[1]) * d[1]
-                if leg["out"] > 1 and not jumped and ahead > 40:
+                if jump and not jumped and ahead > 40:
                     self.tap("jump")
                     jumped = True
-                if s["o"][2] < edge[2] - 8 or jumped and ahead > 64:
-                    self.air_steer(s, portal)
+                if s["o"][2] < edge[2] - 8:
+                    self.release(*MOVES)  # falling: hands off
         finally:
             self.release(*MOVES)
             self.set_speed(self.top_speed)
-            self.set_side_speed(self.side_speed)
         went = self.jumped
         return went and self.in_cell(self.wait_landed(timeout=10)["o"], leg["landing"])
 
