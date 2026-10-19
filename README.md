@@ -356,10 +356,24 @@ for watching: it loads the level into the editor (as the in-game check does), bu
 `puzzlemaker_compile_and_preview`, walks out of the elevator, and plays each step with `setang`
 (a perfect mouse) and +forward, +jump, +attack, +attack2 and +use, steering by positions a small
 VScript prints each tick. Commands go over the game's TCP console, as for the in-game check. Each step is checked (player
-cell, portals, cubes); one that didn't work is put right by teleporting (`setpos`, a cube's
-`SetOrigin`, `portal_place`) and reported as recovered. `--spike` checks the console, VScript,
-coordinates, movement and these commands instead of playing. **Not yet run in the game**: it
-has only been run against a fake netcon server.
+cell, portals, cubes); one that didn't work is loaded back and retried carefully, and only then
+put right by teleporting (`setpos`, a cube's `SetOrigin`, `portal_place`) and reported as
+recovered. `--out DIR` keeps the evidence per level and runs batches; `train/playreport.py`
+sums one up. `--spike` checks the console, VScript, coordinates, movement and these commands
+instead of playing. It has played batches of generated levels in the game (see
+`out/play/REPORT.md`); `play.Session` lets other scripts drive the game a level at a time.
+
+`glados route --plan "TOKENS" FILE` routes a given plan (the solver net's) instead of the
+solver's own. A plan that doesn't solve the level is routed as far as its steps fit, then an
+`attempt` leg tries the step that fits no move (a shot at the face it names, or a walk toward
+the cell); the head line's `net` says what `plan::check` found. play.py plays an attempt leg once
+and marks it `net-failed`.
+
+## Broadcasting
+`train/broadcast.py` runs the loop for a Twitch stream: the level net writes levels, the solver
+net solves them, Portal 2 plays them, and both nets train on each round's levels before the next
+asks for harder ones (`train/tier.py`). Its overlay is an OBS browser source; see
+`docs/streaming.md`.
 
 ## Looking at solutions in a browser
 `glados view` is a local browser app for the solutions you already have on disk. It scans folders

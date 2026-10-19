@@ -486,15 +486,24 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
 /// goal. `None` if it doesn't replay. One action (a timed dash) can lead to more than one
 /// state, so this backtracks over those.
 pub fn replay(model: &Model, plan: &[Action]) -> Option<Vec<State>> {
-    fn go(model: &Model, plan: &[Action], path: &mut Vec<State>) -> bool {
+    replay_to(model, plan, true)
+}
+
+/// `replay`, for the start of a plan: the states may end anywhere.
+pub fn replay_part(model: &Model, plan: &[Action]) -> Option<Vec<State>> {
+    replay_to(model, plan, false)
+}
+
+fn replay_to(model: &Model, plan: &[Action], goal: bool) -> Option<Vec<State>> {
+    fn go(model: &Model, plan: &[Action], goal: bool, path: &mut Vec<State>) -> bool {
         let s = path.last().unwrap().clone();
         let Some(a) = plan.get(path.len() - 1) else {
-            return model.is_goal(&s);
+            return !goal || model.is_goal(&s);
         };
         for (b, n) in model.successors(&s) {
             if b == *a {
                 path.push(n);
-                if go(model, plan, path) {
+                if go(model, plan, goal, path) {
                     return true;
                 }
                 path.pop();
@@ -503,7 +512,7 @@ pub fn replay(model: &Model, plan: &[Action]) -> Option<Vec<State>> {
         false
     }
     let mut path = vec![model.initial()];
-    go(model, plan, &mut path).then_some(path)
+    go(model, plan, goal, &mut path).then_some(path)
 }
 
 /// Longest weighted chain of plan steps where each needs an earlier one. Step `j` needs step

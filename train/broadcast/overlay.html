@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GLaDOS overlay</title>
+<!-- The stream overlay for train/broadcast.py: an OBS browser source at 1920x1080 over the
+     game capture (1280x800, top left). It polls state.json beside it every half second. -->
+<style>
+  :root {
+    --bg: #0d1014;
+    --panel: rgba(13, 16, 20, 0.94);
+    --line: #262c35;
+    --text: #e8ecf1;
+    --dim: #8a94a3;
+    --blue: #3fa9ff;
+    --orange: #ff9a2e;
+    --good: #5fd38d;
+    --bad: #ff5d5d;
+    --warn: #ffd166;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent;
+    color: var(--text); font: 20px/1.35 "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+  body.solid { background: var(--bg); }   /* ?solid in the URL, for checking it in a browser */
+  .side { position: absolute; left: 1280px; top: 0; width: 640px; height: 800px; background: var(--panel);
+    border-left: 2px solid var(--line); padding: 22px 26px; display: flex; flex-direction: column; gap: 14px; }
+  .bottom { position: absolute; left: 0; top: 800px; width: 1920px; height: 280px; background: var(--panel);
+    border-top: 2px solid var(--line); display: grid; grid-template-columns: 520px 760px 640px; }
+  .bottom > div { padding: 18px 24px; border-right: 2px solid var(--line); min-width: 0; }
+  .bottom > div:last-child { border-right: 0; }
+  .stage { position: absolute; left: 0; top: 0; width: 1280px; height: 800px; display: none;
+    background: var(--bg); padding: 48px 56px; flex-direction: column; gap: 22px; }
+  .stage.on { display: flex; }
+  h1 { margin: 0; font-size: 30px; letter-spacing: 0.04em; font-weight: 700; }
+  h2 { margin: 0; font-size: 15px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  .row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .chip { display: inline-block; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line);
+    font-size: 16px; color: var(--dim); white-space: nowrap; }
+  .chip.tier { color: var(--orange); border-color: var(--orange); font-weight: 700; }
+  .chip.phase { color: var(--blue); border-color: var(--blue); }
+  .brand { display: flex; justify-content: space-between; align-items: center; }
+  .brand .dot { width: 14px; height: 14px; border-radius: 50%; background: var(--orange); display: inline-block;
+    margin-right: 10px; box-shadow: 0 0 12px var(--orange); }
+  .card { display: grid; grid-template-columns: 220px 1fr; gap: 14px; align-items: start; }
+  .card img { width: 220px; height: auto; border-radius: 6px; border: 1px solid var(--line); background: #000; }
+  .facts { font-size: 17px; color: var(--dim); }
+  .facts b { color: var(--text); font-weight: 600; }
+  .verdict { font-size: 22px; font-weight: 700; }
+  .verdict.good { color: var(--good); } .verdict.bad { color: var(--bad); }
+  .problem { font-size: 16px; color: var(--warn); }
+  .steps { flex: 1; overflow: hidden; display: flex; flex-direction: column; gap: 3px; font-size: 17px;
+    border-top: 1px solid var(--line); padding-top: 10px; }
+  .steps .part { font-size: 14px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); margin: 6px 0 2px; }
+  .step { display: grid; grid-template-columns: 26px 1fr; gap: 6px; color: var(--dim); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .step span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .step.playing { color: var(--text); font-weight: 600; }
+  .step.ok, .step.unconfirmed, .step.retried { color: var(--text); }
+  .step.ok .m, .step.unconfirmed .m { color: var(--good); }
+  .step.retried .m { color: var(--warn); }
+  .step.recovered .m, .step.failed .m { color: var(--bad); }
+  .step.net-failed { color: var(--bad); font-weight: 600; }
+  .step.playing .m { color: var(--blue); }
+  .big { font-size: 46px; font-weight: 700; line-height: 1.05; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+  .stats .big { font-size: 40px; }
+  .stats .lab { font-size: 15px; color: var(--dim); }
+  .ticker { font-size: 17px; color: var(--dim); display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+  .ticker div:last-child { color: var(--text); }
+  svg text { fill: var(--dim); font: 14px "Segoe UI", Arial, sans-serif; }
+  .stage .big { font-size: 64px; }
+  .stage .sub { font-size: 26px; color: var(--dim); }
+  .previews { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: auto; }
+  .previews img { width: 100%; border-radius: 6px; border: 1px solid var(--line); background: #000; }
+  .clock { font-variant-numeric: tabular-nums; }
+  .legend { display: flex; gap: 16px; font-size: 14px; color: var(--dim); }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <h2 id="stage-kicker">GLaDOS</h2>
+  <div class="big" id="stage-title">Starting</div>
+  <div class="sub" id="stage-sub"></div>
+  <svg id="loss" width="1168" height="330" viewBox="0 0 1168 330"></svg>
+  <div class="previews" id="previews"></div>
+</div>
+
+<div class="side">
+  <div class="brand">
+    <h1><span class="dot"></span>GLaDOS</h1>
+    <div class="row"><span class="chip phase" id="phase">starting</span><span class="chip tier" id="tier">T?</span></div>
+  </div>
+  <div class="facts" id="models"></div>
+  <div class="card" id="card" style="display:none">
+    <img id="card-img" alt="">
+    <div>
+      <h2 id="card-kicker">Chamber</h2>
+      <div class="facts" id="card-facts"></div>
+      <div class="verdict" id="card-verdict"></div>
+      <div class="problem" id="card-problem"></div>
+    </div>
+  </div>
+  <div class="steps" id="steps"></div>
+</div>
+
+<div class="bottom">
+  <div>
+    <h2>This stream</h2>
+    <div class="stats">
+      <div><div class="big" id="played">0</div><div class="lab">chambers played</div></div>
+      <div><div class="big" id="solved">–</div><div class="lab">solved by the net</div></div>
+      <div><div class="big" id="clean">–</div><div class="lab">played cleanly</div></div>
+    </div>
+    <div class="facts" style="margin-top:10px">Round <b id="round">0</b> · <span id="phase-text"></span> <span class="clock" id="clock"></span></div>
+  </div>
+  <div>
+    <div class="row" style="justify-content:space-between">
+      <h2>Rounds</h2>
+      <div class="legend"><span><i style="background:var(--blue)"></i>net solves (greedy)</span><span><i style="background:var(--orange)"></i>within 9 tries</span><span><i style="background:var(--good)"></i>tier</span></div>
+    </div>
+    <svg id="history" width="712" height="210" viewBox="0 0 712 210"></svg>
+  </div>
+  <div>
+    <h2>Log</h2>
+    <div class="ticker" id="ticker"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+if (location.search.includes("solid")) document.body.classList.add("solid");
+const MARK = { pending: "·", playing: "▶", ok: "✓", unconfirmed: "✓", retried: "↻", recovered: "✗", failed: "✗",
+  skipped: "–", "net-failed": "✗" };
+const pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "–";
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const short = p => (p || "").replace(/\\/g, "/").split("/").slice(-2, -1)[0] || p || "";
+const ns = "http://www.w3.org/2000/svg";
+
+function svg(el, kids) { el.innerHTML = kids.join(""); }
+
+function stepList(title, steps) {
+  if (!steps || !steps.length) return "";
+  // Keep the step being played in view: show a window around it.
+  const at = Math.max(0, steps.findIndex(s => s.status === "playing" || s.status === "pending"));
+  const start = Math.max(0, Math.min(at - 4, steps.length - 16));
+  const shown = steps.slice(start, start + 16);
+  return `<div class="part">${esc(title)}${start ? ` · from step ${start + 1}` : ""}</div>` +
+    shown.map(s => `<div class="step ${esc(s.status)}"><span class="m">${MARK[s.status] || "?"}</span><span>${esc(s.text)}</span></div>`).join("");
+}
+
+function drawLoss(points) {
+  const el = $("loss"), W = 1168, H = 330, P = 40;
+  if (!points || points.length < 2) { svg(el, [`<text x="${P}" y="${H / 2}">waiting for the first steps…</text>`]); return; }
+  const xs = points.map(p => p[0]);
+  const ys = points.flatMap(p => [p[1], p[2]]).filter(v => v != null);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const X = x => P + (W - 2 * P) * (x - x0) / Math.max(1, x1 - x0);
+  const Y = y => H - P - (H - 2 * P) * (y - y0) / Math.max(1e-9, y1 - y0);
+  const path = k => points.filter(p => p[k] != null).map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[k]).toFixed(1)}`).join("");
+  svg(el, [
+    `<line x1="${P}" y1="${H - P}" x2="${W - P}" y2="${H - P}" stroke="#262c35"/>`,
+    `<path d="${path(1)}" fill="none" stroke="#3fa9ff" stroke-width="2.5"/>`,
+    `<path d="${path(2)}" fill="none" stroke="#ff9a2e" stroke-width="3"/>`,
+    `<text x="${P}" y="${P - 12}">loss · train (blue) and validation (orange); lower is better</text>`,
+    `<text x="${W - P}" y="${H - 12}" text-anchor="end">step ${x1}</text>`,
+    `<text x="${P}" y="${Y(y1) + 4}" dx="-6" text-anchor="end">${y1.toFixed(2)}</text>`,
+    `<text x="${P}" y="${Y(y0) + 4}" dx="-6" text-anchor="end">${y0.toFixed(2)}</text>`,
+  ]);
+}
+
+function drawHistory(rows) {
+  const el = $("history"), W = 712, H = 210, P = 28;
+  if (!rows || !rows.length) { svg(el, [`<text x="${P}" y="${H / 2}">the first round is under way</text>`]); return; }
+  rows = rows.slice(-12);
+  const bw = (W - 2 * P) / rows.length;
+  const Y = v => H - P - (H - 2 * P) * v;
+  const kids = [`<line x1="${P}" y1="${H - P}" x2="${W - P}" y2="${H - P}" stroke="#262c35"/>`,
+    `<line x1="${P}" y1="${Y(0.5)}" x2="${W - P}" y2="${Y(0.5)}" stroke="#262c35" stroke-dasharray="4 6"/>`,
+    `<text x="${P - 4}" y="${Y(0.5) + 4}" text-anchor="end">50%</text>`];
+  let tierPath = "";
+  rows.forEach((r, i) => {
+    const x = P + i * bw;
+    kids.push(`<rect x="${x + bw * 0.12}" y="${Y(r.net_pass || 0)}" width="${bw * 0.76}" height="${Y(0) - Y(r.net_pass || 0)}" fill="#ff9a2e" opacity="0.35"/>`);
+    kids.push(`<rect x="${x + bw * 0.12}" y="${Y(r.net_solved || 0)}" width="${bw * 0.76}" height="${Y(0) - Y(r.net_solved || 0)}" fill="#3fa9ff"/>`);
+    kids.push(`<text x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${r.round}</text>`);
+    const t = (parseInt(String(r.tier).slice(1)) || 1) / 4;
+    tierPath += `${i ? "L" : "M"}${(x + bw / 2).toFixed(1)},${Y(t).toFixed(1)}`;
+    kids.push(`<text x="${x + bw / 2}" y="${Y(t) - 8}" text-anchor="middle" style="fill:#5fd38d">${esc(r.tier)}</text>`);
+  });
+  kids.push(`<path d="${tierPath}" fill="none" stroke="#5fd38d" stroke-width="2.5"/>`);
+  svg(el, kids);
+}
+
+function clock(ends) {
+  if (!ends) return "";
+  const s = Math.max(0, (new Date(ends) - new Date()) / 1000);
+  return `· about ${Math.ceil(s / 60)} min left`;
+}
+
+let last = null;
+function render(st) {
+  $("phase").textContent = st.phase;
+  $("tier").textContent = st.tier ? st.tier.name : "T?";
+  $("round").textContent = st.round || 0;
+  $("phase-text").textContent = st.phase_text || "";
+  $("clock").textContent = clock(st.phase_ends);
+  const m = st.models || {};
+  $("models").innerHTML = `level net <b>${esc(short(m.gen))}</b> · solver net <b>${esc(short(m.solve))}</b>`;
+  const sc = st.score || {};
+  $("played").textContent = sc.played || 0;
+  $("solved").textContent = pct(sc.net_solved || 0, sc.played || 0);
+  $("clean").textContent = pct(sc.clean || 0, sc.played || 0);
+  $("ticker").innerHTML = (st.ticker || []).slice(-7).map(t => `<div>${esc(t)}</div>`).join("");
+  drawHistory(st.history);
+
+  const lv = st.level;
+  const playing = st.phase === "playing" && lv;
+  $("card").style.display = lv ? "" : "none";
+  if (lv) {
+    $("card-img").src = lv.preview ? lv.preview + "?v=" + encodeURIComponent(lv.file) : "";
+    $("card-kicker").textContent = `Chamber ${lv.n} of ${lv.of} · ${lv.tier}`;
+    const size = lv.size ? lv.size.join("×") : "?";
+    $("card-facts").innerHTML = `<b>${esc(size)}</b> · shortest solution <b>${esc(lv.min_len)}</b> steps · chain depth <b>${esc(lv.chain_depth)}</b><br>` +
+      esc((lv.mechanics || []).join(", ") || lv.summary || "");
+    const net = lv.net || {};
+    const solved = net.verdict === "solved";
+    $("card-verdict").className = "verdict " + (net.verdict ? (solved ? "good" : "bad") : "");
+    $("card-verdict").textContent = !net.verdict ? "" : solved ? "The solver net has a solution"
+      : `The net's plan breaks at step ${(net.steps_ok || 0) + 1}`;
+    $("card-problem").textContent = solved ? "" : (net.problem || "");
+    let html = stepList(lv.part === "reference" ? "The net's plan (played)" : "The net's plan", net.steps);
+    if (lv.reference) html += stepList("GLaDOS's reference solution", lv.reference.steps);
+    $("steps").innerHTML = html;
+  } else {
+    $("steps").innerHTML = "";
+  }
+
+  // Between plays the game isn't running: the stage covers its area.
+  const stage = !playing;
+  $("stage").classList.toggle("on", stage);
+  if (stage) {
+    const tr = st.training;
+    if (st.phase === "training" && tr) {
+      $("stage-kicker").textContent = `Round ${st.round} · training`;
+      $("stage-title").textContent = `Teaching the ${tr.task === "solve" ? "solver" : "level"} net`;
+      $("stage-sub").textContent = tr.result ? tr.result : `${tr.state || ""} · ${Math.round(tr.hours * 60)} minutes ${clock(st.phase_ends)}`;
+      drawLoss(tr.losses);
+    } else {
+      $("stage-kicker").textContent = st.round ? `Round ${st.round}` : "GLaDOS";
+      $("stage-title").textContent = st.phase_text || st.phase;
+      $("stage-sub").textContent = (st.ticker || []).slice(-1)[0] || "";
+      svg($("loss"), []);
+    }
+    const pv = (st.previews || []).slice(0, 8);
+    const k = Math.floor(Date.now() / 6000) % Math.max(1, Math.ceil(pv.length / 4));
+    const four = pv.slice(k * 4, k * 4 + 4);
+    const key = four.join("|");
+    if ($("previews").dataset.key !== key) {
+      $("previews").dataset.key = key;
+      $("previews").innerHTML = four.map(p => `<img src="${esc(p)}" alt="">`).join("");
+    }
+  }
+}
+
+async function tick() {
+  try {
+    const r = await fetch("state.json?t=" + Date.now(), { cache: "no-store" });
+    if (r.ok) { last = await r.json(); }
+  } catch (e) { /* the loop may be between writes, or not started */ }
+  if (last) render(last);
+}
+tick();
+setInterval(tick, 500);
+</script>
+</body>
+</html>

@@ -7,7 +7,7 @@ use glados::level::Level;
 use glados::p2c::Puzzle;
 use glados::plan::{check, decode, encode, step_text, vocab, Step};
 use glados::rng::Rng;
-use glados::route::route;
+use glados::route::{route, route_plan, route_prefix};
 use glados::solver::{Mode, Model, Verdict};
 
 const BUDGET: usize = 50_000;
@@ -137,4 +137,42 @@ fn decoder_rejects_garbage() {
         decode("putdown 1 2 3 +x enter blue exit").unwrap().len(),
         2
     );
+}
+
+/// `glados route --plan`: a plan that solves the level routes like the solver's own; one sent
+/// somewhere it can't go routes the steps before that, then a try at it.
+#[test]
+fn given_plans_route() {
+    let mut tried = 0;
+    for (name, level, tokens, _) in plans() {
+        let steps = decode(&tokens).unwrap();
+        let model = Model::new(&level, Mode::Conservative).unwrap();
+        let c = check(&model, &steps);
+        let own = route(&level, BUDGET).unwrap();
+        let given = route_plan(&level, &model, &c.plan).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(given.legs.len(), own.legs.len(), "{name}");
+        assert!(given.attempt.is_none(), "{name}");
+        for (i, s) in steps.iter().enumerate() {
+            let bad = match *s {
+                Step::Fire(k, c, d) => Step::Fire(k, [c[0], c[1], NOWHERE[2]], d),
+                Step::Walk(_) => Step::Walk(NOWHERE),
+                _ => continue,
+            };
+            let mut wrong = steps.clone();
+            wrong[i] = bad;
+            let c = check(&model, &wrong);
+            assert!(!c.solved && c.steps_ok == i, "{name}: step {}", i + 1);
+            let r = route_prefix(&level, &model, &c.plan, Some((&wrong[i], "fits no move")))
+                .unwrap_or_else(|e| panic!("{name}: step {}: {e}", i + 1));
+            assert_eq!(r.legs.len(), i, "{name}: step {}", i + 1);
+            let t = r.attempt.as_ref().expect("an attempt");
+            assert_eq!(t.step, step_text(&wrong[i]));
+            assert_eq!(t.fire.is_some(), matches!(bad, Step::Fire(..)), "{name}: step {}", i + 1);
+            let lines = r.json_lines("t", level.size);
+            assert_eq!(lines.len(), i + 2, "{name}: step {}", i + 1);
+            assert!(lines.last().unwrap().contains("\"action\":\"attempt\""));
+            tried += 1;
+        }
+    }
+    assert!(tried > 50, "only {tried} attempts");
 }

@@ -61,6 +61,36 @@ def known_hashes(paths):
     return hashes
 
 
+def candidate(r):
+    """Solvable and needs a portal (a `glados score` result)."""
+    if r["verdict"] != "solvable":
+        return False
+    if "needs_portals" not in r:
+        sys.exit("glados score didn't report needs_portals: rebuild it (cargo build --release)")
+    return bool(r["needs_portals"])
+
+
+def novel(candidates, data, max_similarity=0.9, counts=None):
+    """The candidates that are distinct, not copies of a level in the `data` files, and have no
+    same-size level there with Jaccard similarity `max_similarity` or more. Returns (kept, the
+    nearest similarity of each non-copy)."""
+    counts = Counter() if counts is None else counts
+    distinct = list({r["tokens"]: r for r in candidates}.values())
+    counts["distinct"] = len(distinct)
+    hashes = known_hashes(data)
+    fresh = [r for r in distinct if hash(r["tokens"]) not in hashes]
+    counts["not copies"] = len(fresh)
+    near = nearest(data, [(-1, r["tokens"]) for r in fresh])
+    kept = [r for r, s in zip(fresh, near) if s is None or s < max_similarity]
+    counts["novel (kept)"] = len(kept)
+    return kept, near
+
+
+def keep(results, data, max_similarity=0.9, counts=None):
+    """harvest's rules on `glados score` results: solvable, needs portals, novel (`novel`)."""
+    return novel([r for r in results if candidate(r)], data, max_similarity, counts)[0]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checkpoint")
@@ -108,24 +138,15 @@ def main():
             if r["verdict"] != "solvable":
                 continue
             counts["solvable"] += 1
-            if "needs_portals" not in r:
-                sys.exit("glados score didn't report needs_portals: rebuild it (cargo build --release)")
-            if r["needs_portals"]:
+            if candidate(r):
                 counts["needs portals"] += 1
                 candidates.append(r)
         print(f"  {counts['sampled']:>6} sampled in {time.time() - t0:.0f}s: "
               f"{counts['solvable']} solvable, {counts['needs portals']} need portals", flush=True)
 
     # Novelty: distinct, not in --data, and no near neighbour there.
-    distinct = list({r["tokens"]: r for r in candidates}.values())
-    counts["distinct"] = len(distinct)
-    print(f"checking {len(distinct)} levels against {len(data)} data files", flush=True)
-    hashes = known_hashes(data)
-    fresh = [r for r in distinct if hash(r["tokens"]) not in hashes]
-    counts["not copies"] = len(fresh)
-    near = nearest(data, [(-1, r["tokens"]) for r in fresh])
-    kept = [r for r, s in zip(fresh, near) if s is None or s < args.max_similarity]
-    counts["novel (kept)"] = len(kept)
+    print(f"checking {len(candidates)} levels against {len(data)} data files", flush=True)
+    kept, near = novel(candidates, data, args.max_similarity, counts)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8", newline="\n") as f:

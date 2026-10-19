@@ -23,7 +23,8 @@ use crate::flings;
 use crate::gel;
 use crate::geom::{step, Cell, Dir};
 use crate::level::{CubeKind, FaceInfo, HazardKind, ItemKind, Level, PaintKind, PanelKind, ProjectorKind};
-use crate::metrics::replay;
+use crate::metrics::{replay, replay_part};
+use crate::plan::{step_text, step_verb, Step};
 use crate::portals::{self, Face};
 use crate::regions::{Cond, Geo, Move};
 use crate::solver::{Action, Color, Cube, CubeLoc, Mode, Model, Signal, State, Verdict};
@@ -201,6 +202,37 @@ pub struct Route {
     pub legs: Vec<Leg>,
     /// `Level::hazards`: each field's kind and the faces it covers.
     pub hazards: Vec<(&'static str, Vec<Face>)>,
+    /// A route for a plan that doesn't solve the level (`route_prefix`): what the plan's
+    /// check found, and a try at the step that didn't fit.
+    pub net: Option<NetCheck>,
+    pub attempt: Option<Attempt>,
+}
+
+/// What `plan::check` said about a plan that was routed (`glados route --plan`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct NetCheck {
+    /// solved, illegal, unfinished, unknown or unparsed.
+    pub verdict: String,
+    pub steps: usize,
+    pub steps_ok: usize,
+    pub problem: Option<String>,
+}
+
+/// A try at the step of a plan that fits no move, so the game shows what the plan meant: a
+/// walk as near `target` as the level allows, or a shot at `fire`'s face from the nearest
+/// cell that sees it (from where the player stands if none does).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attempt {
+    /// The step's tokens and verb.
+    pub step: String,
+    pub verb: &'static str,
+    pub problem: String,
+    pub walk: Vec<Cell>,
+    pub points: Vec<Cell>,
+    /// Colour, face, the cell fired from and the eye there.
+    pub fire: Option<(Color, Face, Cell, [f64; 3])>,
+    pub target: Option<Cell>,
+    pub after: Here,
 }
 
 /// Grounds the conservative plan of `level` (searching at most `budget` states).
@@ -218,6 +250,30 @@ pub fn route(level: &Level, budget: usize) -> Result<Route, String> {
 /// own, or one `plan::check` accepted.
 pub fn route_plan(level: &Level, model: &Model, plan: &[Action]) -> Result<Route, String> {
     let states = replay(model, plan).ok_or("the plan doesn't replay")?;
+    ground(level, model, plan, &states, true)
+}
+
+/// Grounds `prefix`, the actions of the steps of a plan that fit (`plan::check`'s `plan`,
+/// from the start, not reaching the goal), with no walk out of the exit; then, if `failed`
+/// names the step that fit no move and why, a try at it (`Attempt`).
+pub fn route_prefix(
+    level: &Level,
+    model: &Model,
+    prefix: &[Action],
+    failed: Option<(&Step, &str)>,
+) -> Result<Route, String> {
+    let states = replay_part(model, prefix).ok_or("the steps that fit don't replay")?;
+    let mut r = ground(level, model, prefix, &states, false)?;
+    if let Some((step, problem)) = failed {
+        let here = r.legs.last().map_or(&r.start, |l| &l.after).clone();
+        let g = Grounder::new(level, model);
+        r.attempt = Some(g.attempt(&here, states.last().unwrap(), step, problem));
+    }
+    Ok(r)
+}
+
+/// The legs of `plan` through `states` (its replay), and with `exit`, the walk out at the end.
+fn ground(level: &Level, model: &Model, plan: &[Action], states: &[State], exit: bool) -> Result<Route, String> {
     let g = Grounder::new(level, model);
     let start = g.settle(g.start()?, &states[0]);
     g.check(&start, &states[0])
@@ -236,7 +292,7 @@ pub fn route_plan(level: &Level, model: &Model, plan: &[Action]) -> Result<Route
         legs.push(leg);
     }
     let last = states.last().unwrap();
-    if !last.escaped {
+    if exit && !last.escaped {
         let mut leg = g.exit(&here, last).ok_or("can't walk to the exit door")?;
         leg.points = g.straighten(&here, last, &leg.walk);
         leg.fields = model.hazards_on_in(last, None);
@@ -259,6 +315,8 @@ pub fn route_plan(level: &Level, model: &Model, plan: &[Action]) -> Result<Route
         start,
         legs,
         hazards,
+        net: None,
+        attempt: None,
     })
 }
 
@@ -1429,6 +1487,82 @@ impl<'a> Grounder<'a> {
     }
 
     /// The last leg: walk to the exit door's cell and out through it.
+    /// A try at `step`, which fits no move from `s` (`Attempt`).
+    fn attempt(&self, h: &Here, s: &State, step: &Step, problem: &str) -> Attempt {
+        let level = self.level;
+        let sight = self.model.rules.sight;
+        let (mut walk, mut fire, mut target) = (Vec::new(), None, None);
+        match *step {
+            Step::Fire(color, c, d) => {
+                let face = (c, d);
+                let sees = |at: Cell| {
+                    portals::eye_points(level, at)
+                        .into_iter()
+                        .find(|&eye| portals::shots_from(level, at, eye, face, sight).next().is_some())
+                };
+                match self.find(h, s, |at| sees(at).map(|eye| (at, eye))) {
+                    Some((w, (at, eye))) => {
+                        walk = w;
+                        fire = Some((color, face, at, eye));
+                    }
+                    None => {
+                        let eye = portals::eye_points(level, h.player)[0];
+                        fire = Some((color, face, h.player, eye));
+                    }
+                }
+            }
+            Step::Enter(_) => {}
+            Step::Walk(c)
+            | Step::PickUp(c)
+            | Step::PutDown(c, _)
+            | Step::Toss(c)
+            | Step::Throw(_, c)
+            | Step::Press(c)
+            | Step::Dash(c, _)
+            | Step::Knock(c)
+            | Step::Bounce(c)
+            | Step::Leap(c)
+            | Step::Plate(c)
+            | Step::Climb(c)
+            | Step::Funnel(c)
+            | Step::Ride(c)
+            | Step::Dive(_, c) => {
+                target = Some(c);
+                // The reachable cell nearest the target (height counts double: a cell under a
+                // ledge isn't near the top of it).
+                let mut reach = Vec::new();
+                self.find(h, s, |at| {
+                    reach.push(at);
+                    None::<()>
+                });
+                let gap = |a: Cell| {
+                    let d: Vec<i64> = (0..3).map(|i| (a[i] - c[i]) as i64).collect();
+                    d[0] * d[0] + d[1] * d[1] + 4 * d[2] * d[2]
+                };
+                if let Some(&best) = reach.iter().min_by_key(|&&a| gap(a)) {
+                    if best != h.player {
+                        walk = self.find(h, s, |at| (at == best).then_some(())).map_or(Vec::new(), |w| w.0);
+                    }
+                }
+            }
+        }
+        let points = self.straighten(h, s, &walk);
+        let mut after = h.clone();
+        if let Some(&end) = walk.last() {
+            after.player = end;
+        }
+        Attempt {
+            step: step_text(step),
+            verb: step_verb(step),
+            problem: problem.to_string(),
+            walk,
+            points,
+            fire,
+            target,
+            after,
+        }
+    }
+
     fn exit(&self, h: &Here, s: &State) -> Option<Leg> {
         let (cell, normal) = self.exit_door;
         let (walk, ()) = self.find(h, s, |c| (c == cell).then_some(()))?;
@@ -1716,8 +1850,17 @@ impl Route {
                 format!("{{\"kind\":\"{kind}\",\"faces\":[{}]}}", faces.join(","))
             })
             .collect();
+        let net = self.net.as_ref().map_or(String::new(), |n| {
+            format!(
+                ",\"net\":{{\"verdict\":\"{}\",\"steps\":{},\"steps_ok\":{}{}}}",
+                n.verdict,
+                n.steps,
+                n.steps_ok,
+                n.problem.as_ref().map_or(String::new(), |p| format!(",\"problem\":{}", json_str(p)))
+            )
+        });
         let mut out = vec![format!(
-            "{{\"title\":{},\"size\":{},\"entry\":{},\"exit\":{},\"cubes\":[{}],\"start\":{},\"hazards\":[{}],\"legs\":{}}}",
+            "{{\"title\":{},\"size\":{},\"entry\":{},\"exit\":{},\"cubes\":[{}],\"start\":{},\"hazards\":[{}],\"legs\":{}{net}}}",
             json_str(title),
             cell_json(size),
             door(self.entry),
@@ -1725,7 +1868,7 @@ impl Route {
             cubes.join(","),
             here_json(&self.start),
             hazards.join(","),
-            self.legs.len()
+            self.legs.len() + self.attempt.is_some() as usize
         )];
         for (i, leg) in self.legs.iter().enumerate() {
             out.push(format!(
@@ -1741,6 +1884,30 @@ impl Route {
                     .map(|h| h.to_string())
                     .collect::<Vec<_>>()
                     .join(",")
+            ));
+        }
+        if let Some(t) = &self.attempt {
+            let what = match (t.fire, t.target) {
+                (Some((color, face, cell, eye)), _) => format!(
+                    ",\"color\":\"{}\",\"face\":{},\"cell\":{},\"eye\":{}",
+                    color_name(color),
+                    face_json(face),
+                    cell_json(cell),
+                    point_json(eye)
+                ),
+                (None, Some(c)) => format!(",\"target\":{}", cell_json(c)),
+                (None, None) => String::new(),
+            };
+            out.push(format!(
+                "{{\"leg\":{},\"text\":{},\"walk\":{},\"points\":{},\"action\":\"attempt\",\"verb\":\"{}\",\"step\":{},\"problem\":{}{what},\"after\":{},\"fields\":[]}}",
+                self.legs.len() + 1,
+                json_str(&format!("try {} (it fits no move)", t.step)),
+                cells_json(&t.walk),
+                cells_json(&t.points),
+                t.verb,
+                json_str(&t.step),
+                json_str(&t.problem),
+                here_json(&t.after)
             ));
         }
         out

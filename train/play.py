@@ -617,6 +617,8 @@ class Game:
     def show(self, text):
         """Puts `text` on screen (a game_text the harness creates)."""
         text = re.sub(r'[";:,\\]', " ", text)
+        if getattr(self, "stream", False):  # the overlay says the rest
+            text = text[:60]
         if not self.text_made:
             self.con.send('ent_create game_text targetname glados_text x 0.02 y 0.92 channel 3 '
                           'holdtime 9999 fadein 0 fadeout 0 color "255 220 120"')
@@ -1381,6 +1383,32 @@ class Game:
             self.con.send("disconnect")
         return self.jumped
 
+    def act_attempt(self, leg):
+        """The solver net's step that fits no move (`glados route --plan`): after the walk
+        toward it, a shot at the face it names (from the nearest cell that sees it, else from
+        here), or nothing more. Never counts as done."""
+        if leg.get("verb") == "fire" and leg.get("face"):
+            target = self.world(leg["face"]["centre"])
+            eye = self.world(leg["eye"])
+            if hdist(self.obs()["o"], eye) > 10:
+                try:
+                    self.shift_to(eye)
+                except Stuck:
+                    pass
+            s = self.settle()
+            self.look_at(target, s["eye"])
+            time.sleep(0.15)
+            self.firing = True
+            try:
+                self.tap(FIRE_KEY[leg["color"]])
+                time.sleep(0.5)
+                self.obs()
+            finally:
+                self.firing = False
+        time.sleep(2.0)
+        self.screenshot("net-failed")
+        return False
+
     # --- checking and putting right ----------------------------------------------------
 
     def problems(self, after, slack=12):
@@ -1485,12 +1513,20 @@ class NoRoute(Exception):
     """`glados route` can't play the level."""
 
 
-def route(exe, level):
-    out = subprocess.run([str(exe), "route", str(level)], capture_output=True, text=True, encoding="utf-8")
+def route(exe, level, plan=None):
+    """(head, legs) of `glados route` for the level: the solver's plan, or with `plan` (plan
+    tokens) that one, as far as it fits (src/main.rs print_route)."""
+    cmd = [str(exe), "route"] + (["--plan", plan] if plan is not None else []) + [str(level)]
+    out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if out.returncode != 0:
         raise NoRoute(f"{level}: {out.stderr.strip() or out.stdout.strip()}")
-    lines = [json.loads(l) for l in out.stdout.splitlines() if l.strip()]
-    return lines[0], lines[1:]
+    return route_lines(out.stdout.splitlines())
+
+
+def route_lines(lines):
+    """(head, legs) from `glados route`'s JSON lines."""
+    rows = [json.loads(l) for l in lines if l.strip()]
+    return rows[0], rows[1:]
 
 
 def calibrate(head):
@@ -1791,7 +1827,7 @@ def probe(game, leg, r):
     return out
 
 
-def play(game, head, legs, deadline=None, report=None):
+def play(game, head, legs, deadline=None, report=None, on_leg=None):
     """Plays a route; returns one record per leg (also printed, and passed to `report`).
 
     Before each leg the game is saved. A leg that doesn't work out is screenshotted, loaded
@@ -1799,7 +1835,9 @@ def play(game, head, legs, deadline=None, report=None):
     (`classify`). Only if that fails too is it put right by teleporting (recover), so the rest
     can be played. Status: ok, unconfirmed (the action couldn't see that it worked, e.g. a
     turret still standing, but nothing the route tracks is wrong), retried (worked carefully),
-    recovered (put right by teleporting), failed, or skipped (out of time)."""
+    recovered (put right by teleporting), failed, or skipped (out of time). An "attempt" leg
+    (the solver net's step that fits no move) is played once, as is, and is net-failed.
+    `on_leg(event, rec)`: "start" before each leg, "done" with its record after."""
     game.exit_normal = head["exit"]["normal"]
     game.exit_cell = head["exit"]["cell"]
     game.head = head
@@ -1837,7 +1875,19 @@ def play(game, head, legs, deadline=None, report=None):
             continue
         if getattr(game, "pid", None) and not portal2.focused(game.pid):
             game.event("focus lost", f"refocused: {portal2.focus(game.pid)}", shot=False)
-        game.show(f"{leg['leg']}/{len(legs)}: {leg['text']}")
+        if on_leg:
+            on_leg("start", dict(rec))
+        game.show(leg["text"] if getattr(game, "stream", False) else f"{leg['leg']}/{len(legs)}: {leg['text']}")
+        if leg["action"] == "attempt":
+            rec["first"] = attempt(game, leg, before)
+            rec.update(status="net-failed", verb=leg.get("verb"), step=leg.get("step"), problem=leg.get("problem"))
+            results.append(rec)
+            print(f"  net-failed  {leg['text']}: {leg.get('problem')}", flush=True)
+            if report:
+                report(rec)
+            if on_leg:
+                on_leg("done", rec)
+            continue
         saved = game.save()
         exit_leg = leg["action"] == "exit" or leg.get("escape")
         first = attempt(game, leg, before)
@@ -1880,13 +1930,15 @@ def play(game, head, legs, deadline=None, report=None):
               flush=True)
         if report:
             report(rec)
+        if on_leg:
+            on_leg("done", rec)
         before = leg["after"]
     return results
 
 
 # --- the spike -----------------------------------------------------------------------------
 
-def spike(game, head, exported):
+def spike_check(game, head, exported):
     """Checks what playing relies on and prints what it found."""
     con = game.con
     say = lambda k, v: print(f"  {k:24} {v}", flush=True)
@@ -1951,13 +2003,153 @@ def collect_shots(game, folder):
 
 
 def tally(results):
-    keys = ("ok", "unconfirmed", "retried", "recovered", "failed", "skipped")
+    keys = ("ok", "unconfirmed", "retried", "recovered", "failed", "skipped", "net-failed")
     counts = {k: sum(r["status"] == k for r in results) for k in keys}
     classes = {}
     for r in results:
         if r.get("cls"):
             classes[r["cls"]] = classes.get(r["cls"], 0) + 1
     return counts, classes
+
+
+class Session:
+    """A game to play levels in, one after another: launched (restarted every `restart_every`
+    levels and after it goes down), or one started with -insecure and attached on `port`.
+    Keeps the editor autosaves the levels overwrite and puts them back on close (so never kill
+    the process using it: stop it, or kill portal2.exe first). Use it in a with block.
+
+        with Session(launch=True) as s:
+            row, results = s.play_level(path, *route(exe, path), folder)
+    """
+
+    MAX_RESTARTS = 6  # game restarts after it went down, over the session
+
+    def __init__(self, launch=False, port=None, password="", restart_every=20, turn_rate=TURN_RATE,
+                 slow=1.0, keep=False, stream=False):
+        self.launch, self.port, self.password = launch, port, password
+        self.restart_every, self.turn_rate, self.slow = restart_every, turn_rate, slow
+        self.keep, self.stream = keep, stream
+        self.pid = self.con = None
+        self.played = 0  # levels since the game started
+        self.downs = 0
+
+    def __enter__(self):
+        self.saved = {p: p.read_bytes() for p in portal2.autosaves()}
+        SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+        SCRIPT.write_text(VSCRIPT, encoding="ascii")
+        return self
+
+    def __exit__(self, *exc):
+        SCRIPT.unlink(missing_ok=True)
+        if self.pid is not None and not self.keep:
+            portal2.quit_game(self.saved, self.pid, self.con)
+        elif self.pid is None:
+            portal2.VMF.unlink(missing_ok=True)
+        self.pid = self.con = None
+        return False
+
+    def ready(self):
+        """A game with the editor open."""
+        if self.con is None:
+            if self.launch:
+                self.pid, self.con = portal2.launch(self.saved)
+            else:
+                proc = portal2.game_process()
+                if proc is None or "-insecure" not in proc[1].split():
+                    raise GameUnavailable("no game started with -insecure (or use --launch)")
+                if not self.port:
+                    raise GameUnavailable("pass --port (and --password) for a game you started")
+                self.con = Console(self.port, self.password)
+                open_editor(self.con)  # from wherever the game is, e.g. its main menu
+            self.played = 0
+        elif self.played:
+            open_editor(self.con)
+
+    def restart(self):
+        """Ends the game this session launched (it is launched again for the next level). A game
+        this session didn't launch (someone is playing) is never touched."""
+        if self.pid is not None:
+            portal2.quit_game(self.saved, self.pid, self.con)
+        self.pid = self.con = None
+
+    def play_level(self, path, head, legs, folder=None, on_leg=None, timeout=900, spike=False, retry=None):
+        """Loads, builds and plays one level's route; returns (summary row, leg records). With
+        `folder`, keeps the evidence there (route, legs, trace, events, screenshots). A level the
+        editor marks invalid comes back as an error row. If the game goes down, a launched one
+        is restarted and the level played again once (`retry`, default: when launching); a
+        level that brings it down twice is an error row. A game this session didn't launch
+        (someone already playing) is never restarted: that raises GameUnavailable."""
+        retry = self.launch if retry is None else retry
+        key = level_key(path)
+        for tries in (1, 2):
+            try:
+                return self._play(path, head, legs, folder, on_leg, timeout, spike, key)
+            except GameUnavailable as e:
+                # A game someone else is playing: this session didn't launch it, so it must not
+                # restart (kill) it, and retrying would only spin. Refuse instead.
+                if not retry or (self.pid is None and portal2.game_process() is not None):
+                    raise
+                self.downs += 1
+                print(f"{path}: Portal 2 unavailable ({e}); restarting it", flush=True)
+                self.restart()
+                if self.downs > self.MAX_RESTARTS:
+                    raise
+                if tries == 2:
+                    return {"key": key, "level": str(path), "error": f"game unavailable: {e}"}, []
+
+    def _play(self, path, head, legs, folder, on_leg, timeout, spike, key):
+        self.ready()
+        print(f"{path}: \"{head['title']}\", {len(legs)} legs", flush=True)
+        t0 = time.time()
+        try:
+            exported = load_level(self.con, path)
+        except InvalidLevel as e:
+            print(f"{path}: invalid in the editor: {e}", flush=True)
+            self.played += 1
+            return {"key": key, "level": str(path), "error": f"invalid: {e}"}, []
+        if self.pid is not None and not portal2.focused(self.pid):
+            print(f"  game window not in front; focus(): {portal2.focus(self.pid)}", flush=True)
+        game = Game(self.con, calibrate(head) or (0.0, 0.0, 0.0), self.turn_rate)
+        game.pid = self.pid
+        game.stream = self.stream
+        if self.slow != 1.0:
+            self.con.send(f"host_timescale {self.slow}")
+        if spike:
+            spike_check(game, head, exported)
+            return None, []
+        report = None
+        if folder:
+            folder = Path(folder)
+            if folder.exists():
+                shutil.rmtree(folder)  # a level cut short: play it again from the start
+            folder.mkdir(parents=True)
+            (folder / "route.jsonl").write_text(
+                "\n".join(json.dumps(x) for x in [head] + legs) + "\n", encoding="utf-8")
+            game.shot_prefix = f"glados-{key[-40:]}"
+
+            def report(rec, folder=folder):
+                with open(folder / "legs.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec) + "\n")
+        results = play(game, head, legs, deadline=time.time() + timeout, report=report, on_leg=on_leg)
+        counts, classes = tally(results)
+        row = {"key": key, "level": str(path), "title": head["title"], "legs": len(legs),
+               "counts": counts, "classes": classes, "arrival": game.arrival,
+               "events": len(game.events), "seconds": round(time.time() - t0)}
+        if "net" in head:
+            row["net"] = head["net"]
+        if folder:
+            with open(folder / "trace.jsonl", "w", encoding="utf-8") as f:
+                for t in game.trace:
+                    f.write(json.dumps(t) + "\n")
+            with open(folder / "events.jsonl", "w", encoding="utf-8") as f:
+                for e in game.events:
+                    f.write(json.dumps(e) + "\n")
+            collect_shots(game, folder)
+        self.played += 1
+        time.sleep(2)
+        if self.launch and self.played >= self.restart_every:
+            self.restart()
+        return row, results
 
 
 def main():
@@ -1979,6 +2171,8 @@ def main():
     ap.add_argument("--restart-every", type=int, default=20,
                     help="with --launch, restart the game after this many levels")
     ap.add_argument("--level-timeout", type=float, default=900, help="seconds per level")
+    ap.add_argument("--stream", action="store_true",
+                    help="for watching on stream: smooth turning, short on-screen step text")
     a = ap.parse_args()
     exe = glados_exe(a.glados)
     names = a.levels + (Path(a.list).read_text().split() if a.list else [])
@@ -2009,115 +2203,26 @@ def main():
                 sys.exit(str(e))  # refuse unplayable levels up front
             print(f"{e}", flush=True)
             summarize({"key": level_key(p), "level": str(p), "error": f"no route: {e}"})
-    saved = {p: p.read_bytes() for p in portal2.autosaves()}
-    pid = con = None
-    played = 0  # levels since the game started
-    tries = {}
     summary = []
     try:
-        SCRIPT.parent.mkdir(parents=True, exist_ok=True)
-        SCRIPT.write_text(VSCRIPT, encoding="ascii")
-        todo = list(routes)
-        while todo:
-            if out and (out / "STOP").exists():
-                print(f"{out / 'STOP'} found: stopping ({len(todo)} levels left)", flush=True)
-                break
-            path, head, legs = todo[0]
-            key = level_key(path)
-            try:
-                if con is None:
-                    if a.launch:
-                        pid, con = portal2.launch(saved)
-                        played = 0
-                    else:
-                        proc = portal2.game_process()
-                        if proc is None or "-insecure" not in proc[1].split():
-                            raise GameUnavailable("no game started with -insecure (or use --launch)")
-                        if not a.port:
-                            raise GameUnavailable("pass --port (and --password) for a game you started")
-                        con = Console(a.port, a.password)
-                        open_editor(con)  # from wherever the game is, e.g. its main menu
-                        played = 0
-                elif played:
-                    open_editor(con)
-                print(f"{path}: \"{head['title']}\", {len(legs)} legs", flush=True)
-                t0 = time.time()
-                try:
-                    exported = load_level(con, path)
-                except InvalidLevel as e:
-                    print(f"{path}: invalid in the editor: {e}", flush=True)
-                    summarize({"key": key, "level": str(path), "error": f"invalid: {e}"})
-                    todo.pop(0)
-                    played += 1
-                    continue
-                if pid is not None and not portal2.focused(pid):
-                    print(f"  game window not in front; focus(): {portal2.focus(pid)}", flush=True)
-                game = Game(con, calibrate(head) or (0.0, 0.0, 0.0), math.inf if a.fast else TURN_RATE)
-                game.pid = pid
-                if a.slow != 1.0:
-                    con.send(f"host_timescale {a.slow}")
-                if a.spike:
-                    spike(game, head, exported)
+        with Session(launch=a.launch, port=a.port, password=a.password, restart_every=a.restart_every,
+                     turn_rate=math.inf if a.fast else TURN_RATE, slow=a.slow, keep=a.keep,
+                     stream=a.stream) as session:
+            for path, head, legs in routes:
+                if out and (out / "STOP").exists():
+                    print(f"{out / 'STOP'} found: stopping", flush=True)
                     break
-                folder = None
-                report = None
-                if out:
-                    folder = out / key
-                    if folder.exists():
-                        shutil.rmtree(folder)  # a level cut short: play it again from the start
-                    folder.mkdir(parents=True)
-                    (folder / "route.jsonl").write_text(
-                        "\n".join(json.dumps(x) for x in [head] + legs) + "\n", encoding="utf-8")
-                    game.shot_prefix = f"glados-{key[-40:]}"
-
-                    def report(rec, folder=folder):
-                        with open(folder / "legs.jsonl", "a", encoding="utf-8") as f:
-                            f.write(json.dumps(rec) + "\n")
-                results = play(game, head, legs, deadline=time.time() + a.level_timeout, report=report)
-                counts, classes = tally(results)
-                row = {"key": key, "level": str(path), "title": head["title"], "legs": len(legs),
-                       "counts": counts, "classes": classes, "arrival": game.arrival,
-                       "events": len(game.events), "seconds": round(time.time() - t0)}
-                if folder:
-                    with open(folder / "trace.jsonl", "w", encoding="utf-8") as f:
-                        for t in game.trace:
-                            f.write(json.dumps(t) + "\n")
-                    with open(folder / "events.jsonl", "w", encoding="utf-8") as f:
-                        for e in game.events:
-                            f.write(json.dumps(e) + "\n")
-                    collect_shots(game, folder)
+                folder = out / level_key(path) if out else None
+                row, results = session.play_level(path, head, legs, folder, timeout=a.level_timeout,
+                                                  spike=a.spike, retry=bool(a.launch and out))
+                if a.spike:
+                    break
                 summarize(row)
-                summary.append((path, results))
-                todo.pop(0)
-                played += 1
-                time.sleep(2)
-                if a.launch and played >= a.restart_every and todo:
-                    portal2.quit_game(saved, pid, con)
-                    pid = con = None
-            except GameUnavailable as e:
-                if not (a.launch and out):
-                    raise
-                # The game went down or stopped answering: start it again; a level that does
-                # this twice is recorded and passed over.
-                tries[key] = tries.get(key, 0) + 1
-                print(f"{path}: Portal 2 unavailable ({e}); restarting it", flush=True)
-                if tries[key] >= 2:
-                    summarize({"key": key, "level": str(path), "error": f"game unavailable: {e}"})
-                    todo.pop(0)
-                if pid is not None or portal2.game_process() is not None:
-                    portal2.quit_game(saved, pid or portal2.game_process()[0], con)
-                pid = con = None
-                if sum(tries.values()) > 6:
-                    raise
+                if "error" not in row:
+                    summary.append((path, results))
     except GameUnavailable as e:
         print(f"Portal 2 unavailable: {e}", file=sys.stderr)
         sys.exit(portal2.UNAVAILABLE)
-    finally:
-        SCRIPT.unlink(missing_ok=True)
-        if pid is not None and not a.keep:
-            portal2.quit_game(saved, pid, con)
-        elif pid is None:
-            portal2.VMF.unlink(missing_ok=True)
     for path, results in summary:
         counts, classes = tally(results)
         print(f"{path}: " + ", ".join(f"{v} {k}" for k, v in counts.items() if v)

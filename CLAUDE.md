@@ -18,8 +18,8 @@ run's final model.
 A training run is exactly these steps:
 
 1. `.venv/Scripts/python train/run.py start NAME --hours H --note "WHAT IT IS FOR"`
-   (add `--from OLDRUN` only to continue an earlier run's model). If it refuses, tell the user
-   why and stop.
+   (`--from OLDRUN` continues that run's model; by default it is the most recently trained net,
+   see below). If it refuses, tell the user why and stop.
 2. `.venv/Scripts/python train/run.py wait NAME`, with the Bash tool's `run_in_background`.
    You are told when it ends. Don't poll; for a progress check, run `status NAME` once.
 3. When it ends, read the printed status and do every item under **NEXT STEPS**, in order.
@@ -38,6 +38,11 @@ A training run is exactly these steps:
 - Defaults (data/v5, learning rates, sizes) are already right: add no other options unless
   the user names them. Anything after `--` goes to train.py. `--no-ingame` skips the Portal 2
   steps: use it only if the user says not to launch the game.
+- **Warm-start by default:** unless the user says otherwise (or names a different `--from`),
+  continue the most recently trained net of the same task: pass the final model of the newest
+  completed run as `--from` (find it with `list`). Start a run from scratch only when the user
+  asks for a fresh model. Note the known risk: recent warm starts have diverged under the warm
+  rates (lr 2e-4) and finished well below their init, so report that if it happens again.
 - The Portal 2 steps launch the game themselves (in the background, no focus needed) and never
   touch a game that is already running.
 - Name runs short and dated by topic, e.g. `v5-fresh-2h`, `v5-cont-1h`. The name can't exist yet.
@@ -59,6 +64,22 @@ Training time: one run of 2 hours beats two chained 1-hour runs. Each run's lear
 warms up and decays to its minimum over its own time, so a chained run starts back at a high
 rate and spends its first part undoing the fine-tuning the last one ended with. Chain runs only
 to change something between them (data, settings) or to look at a model midway.
+
+## Broadcast (Twitch stream)
+
+`train/broadcast.py` runs the stream's loop in rounds: the level net writes levels, the solver net
+solves them, Portal 2 plays them, and both nets train on them (its own `run.py start --quick` runs,
+named `bc-NAME-rRR-gen` / `-solve`; never start those yourself). See docs/streaming.md.
+
+1. `.venv/Scripts/python train/broadcast.py start NAME` (e.g. `live-01`; add options only if the
+   user names them). If it refuses, tell the user why and stop.
+2. `.venv/Scripts/python train/broadcast.py wait NAME` with `run_in_background`. Don't poll; for
+   a progress check, run `status NAME` once.
+3. When it ends, do every item under **NEXT STEPS** in the printed status.
+
+- `stop NAME` ends it after the current level. Never kill its process (it holds the user's
+  editor autosaves).
+- No training run can start while a broadcast is going, and the other way round.
 
 ## Solver-net runs
 

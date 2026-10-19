@@ -52,8 +52,13 @@ const USAGE: &str = "usage:
                                 (the parent's workshop_id, or its line) and \"edits\"
   glados editor <file.p2c|dir>...
                                 items the Puzzle Maker would mark invalid, one JSON line per file
-  glados route <file.p2c>       the conservative plan made concrete for playing it in the game:
-                                where to stand, look, fire and walk (JSON lines, src/route.rs)
+  glados route [--plan TOKENS] <file.p2c>
+                                the conservative plan made concrete for playing it in the game:
+                                where to stand, look, fire and walk (JSON lines, src/route.rs).
+                                --plan: route that plan instead (plan tokens, src/plan.rs); one
+                                that doesn't solve the level is routed as far as its steps fit,
+                                then an \"attempt\" leg tries the step that fits no move, and
+                                the head line's \"net\" says what the check found
   glados view [--roots DIR]... [--port N] [--no-open] [--list]
                                 a browser app for saved solutions: scans the roots for
                                 <name>.route.jsonl with <name>.p2c beside it, serves them and
@@ -78,7 +83,7 @@ fn main() -> ExitCode {
         Some("check") => run_check(&args[1..]),
         Some("mutate") => run_mutate(&args[1..]),
         Some("editor") if args.len() > 1 => editor_check(&args[1..]),
-        Some("route") if args.len() == 2 => print_route(Path::new(&args[1])),
+        Some("route") => run_route(&args[1..]),
         Some("view") => run_view(&args[1..]),
         Some("roundtrip") if args.len() > 1 => {
             args[1..].iter().try_for_each(|f| roundtrip(Path::new(f)))
@@ -315,10 +320,79 @@ fn print_reach(model: &glados::solver::Model) {
     );
 }
 
-fn print_route(path: &Path) -> Result<()> {
+fn run_route(args: &[String]) -> Result<()> {
+    let mut plan = None;
+    let mut rest = Vec::new();
+    for (flag, value) in flags(args, &mut rest)? {
+        match flag {
+            "--plan" => plan = Some(value),
+            _ => return Err(format!("unknown flag {flag}
+{USAGE}").into()),
+        }
+    }
+    match rest.as_slice() {
+        [file] => print_route(Path::new(file), plan),
+        _ => Err(format!("route takes one .p2c file
+{USAGE}").into()),
+    }
+}
+
+/// `glados route FILE [--plan TOKENS]`: the solver's plan, or the given one, made concrete.
+/// A given plan that doesn't solve the level is routed as far as it fits, then a try at the
+/// step that fits no move; the head line says what its check found (`"net"`).
+fn print_route(path: &Path, plan: Option<&str>) -> Result<()> {
+    use glados::plan;
     let (_, puzzle) = load(path)?;
     let level = Level::from_puzzle(&puzzle);
-    let r = route::route(&level, DEFAULT_MAX_STATES).map_err(|e| format!("{}: {e}", path.display()))?;
+    let at = |e: String| format!("{}: {e}", path.display());
+    let r = match plan {
+        None => route::route(&level, DEFAULT_MAX_STATES).map_err(at)?,
+        Some(text) => {
+            let model = Model::new(&level, Mode::Conservative).map_err(|p| at(format!("{p:?}")))?;
+            let (verdict, steps, mut r) = match plan::decode(text) {
+                Err(e) => {
+                    let mut r = route::route_prefix(&level, &model, &[], None).map_err(at)?;
+                    r.net = Some(route::NetCheck {
+                        verdict: "unparsed".into(),
+                        steps: 0,
+                        steps_ok: 0,
+                        problem: Some(format!("plan: {e}")),
+                    });
+                    (None, 0, r)
+                }
+                Ok(steps) => {
+                    let c = plan::check(&model, &steps);
+                    let verdict = if c.solved {
+                        "solved"
+                    } else if c.steps_ok == steps.len() {
+                        "unfinished"
+                    } else if c.exhausted {
+                        "unknown"
+                    } else {
+                        "illegal"
+                    };
+                    let r = if c.solved {
+                        route::route_plan(&level, &model, &c.plan)
+                    } else {
+                        let failed = (verdict == "illegal")
+                            .then(|| (&steps[c.steps_ok], c.problem.as_deref().unwrap_or("")));
+                        route::route_prefix(&level, &model, &c.plan, failed)
+                    }
+                    .map_err(at)?;
+                    (Some((verdict, c.steps_ok, c.problem)), steps.len(), r)
+                }
+            };
+            if let Some((verdict, steps_ok, problem)) = verdict {
+                r.net = Some(route::NetCheck {
+                    verdict: verdict.into(),
+                    steps,
+                    steps_ok,
+                    problem,
+                });
+            }
+            r
+        }
+    };
     for line in r.json_lines(puzzle.title(), level.size) {
         println!("{line}");
     }

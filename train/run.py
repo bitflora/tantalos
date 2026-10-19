@@ -39,7 +39,14 @@ No Portal 2 steps, no training away, no play-test picks. The main score is EVAL 
 share of test-gen levels whose greedy plan solves. --from a level-writing run warm-starts from
 its weights with the fresh learning rates (a new task); --from a solve run continues it.
 
-Only one run at a time: they share the GPU.
+Quick runs (`start NAME --quick --from OLD --hours H`, for train/broadcast.py's rounds) fine-tune
+OLD at a low rate (1e-4 down to 1e-5), evaluate on a smaller sample (level runs: no generator
+timing, fewer per-condition levels; solve runs: no published set, pass@4), and skip the Portal 2,
+training-away and picking steps. Then a guard: if the EVAL score is more than 3 points (level
+runs; 5 for solve runs) under OLD's, WORSE is written and OLD stays the final model.
+
+Only one run at a time: they share the GPU. While a broadcast (train/broadcast.py) is going,
+only its own runs (--broadcast NAME) start.
 """
 
 import argparse
@@ -169,6 +176,12 @@ def start(a):
     if busy:
         sys.exit(f"{name_of(busy[0][0])} is still running (one run at a time). "
                  f"Wait for it, or: train/run.py stop {name_of(busy[0][0])}")
+    live = [b for b in broadcasts() if b != a.broadcast]
+    if live:
+        sys.exit(f"the broadcast {live[0]} is going (it uses the GPU and Portal 2): "
+                 f"train/broadcast.py stop {live[0]}, or wait for it")
+    if a.quick and not a.from_:
+        sys.exit("--quick fine-tunes a model: give --from")
     solve = a.task == "solve"
     if solve and not a.data and not PLANS.exists():
         sys.exit(f"{PLANS.relative_to(ROOT).as_posix()} is missing: a solve run needs plan data. Make it with "
@@ -189,7 +202,10 @@ def start(a):
     # learns a new task, at the fresh rates.
     warm = init is not None and task_of(init) == a.task
     lr, min_lr, warmup = ("2e-4", "2e-5", "200") if warm else ("1e-3", "1e-4", "300")
-    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "glados"], cwd=ROOT)
+    if a.quick:
+        lr, min_lr, warmup = QUICK_LR
+    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "glados"], cwd=ROOT) \
+        if not a.dry_run else subprocess.CompletedProcess([], 0)
     if build.returncode or not GLADOS.exists():
         sys.exit("`cargo build --release --bin glados` failed (output above): fix that first, no run started")
 
@@ -206,14 +222,25 @@ def start(a):
     if solve:
         tests = data[0].parent if (data[0].parent / "test-gen.jsonl").exists() else PLANS.parent
         evaluate = ["train/solve_eval.py", str(d / "best.pt"), "--plans", str(tests)]
+        if a.quick:
+            evaluate += ["--n-published", "0", "--k", "4"]
     else:
         evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
+        if a.quick:
+            evaluate += ["--n-cond", "8", "--generator-count", "0", "--neighbours", "64"]
+    if a.dry_run:
+        print("train:   ", " ".join(train))
+        print("evaluate:", " ".join(evaluate))
+        if a.quick:
+            print(f"guard:    WORSE if EVAL is more than {QUICK_WORSE[a.task]:.0%} under {Path(init).parent / 'eval'}")
+        return
 
     d.mkdir(parents=True)
     write_status(
         d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours, task=a.task,
-        ingame=not (a.no_ingame or solve), init=str(init or ""), train=train, evaluate=evaluate,
-        data=list(map(str, data)), vocab=str(vocab), extra=a.extra,
+        ingame=not (a.no_ingame or solve or a.quick), init=str(init or ""), train=train, evaluate=evaluate,
+        data=list(map(str, data)), vocab=str(vocab), extra=a.extra, quick=a.quick,
+        broadcast=a.broadcast or "",
     )
     p = detach(d)
     ends = now() + datetime.timedelta(hours=a.hours)
@@ -244,6 +271,45 @@ SOLVE_STEPS = ("training", "evaluating")  # a solver-net run's
 PLANS = ROOT / "data" / "plans" / "train.jsonl"  # its training data (train/plans.py)
 INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
 AWAY_MINUTES, AWAY_REPEAT, AWAY_WORSE = 15, 5, 0.03  # as runs/v5-away-invalid
+QUICK_LR = ("1e-4", "1e-5", "100")  # --quick: 30-minute warm starts at 1e-4 matched; 2e-4 diverged
+QUICK_WORSE = {"levels": 0.03, "solve": 0.05}  # --quick's guard against its parent
+
+
+def broadcasts():
+    """Names of the broadcasts going now (train/broadcast.py)."""
+    out = []
+    for f in sorted((ROOT / "out" / "broadcast").glob("*/status.json")):
+        try:
+            s = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if s.get("state") in ("starting", "prep", "checking", "playing", "training") and alive(s.get("pid", 0)):
+            out.append(f.parent.name)
+    return out
+
+
+def eval_score(eval_dir, task):
+    """The EVAL score in eval_dir: solvable share (level runs) or greedy solved share (solve runs)."""
+    try:
+        e = json.loads((Path(eval_dir) / "eval.json").read_text())
+        return e["headline"]["solved"] if task == "solve" else e["validity"]["solvable"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def quick_guard(d, s):
+    """--quick: WORSE if this run's EVAL is too far under its parent's; returns (final model, line)."""
+    task = s.get("task", "levels")
+    new = eval_score(d / "eval", task)
+    old = eval_score(Path(s["init"]).parent / "eval", task)
+    if new is None:
+        (d / "WORSE").touch()
+        return Path(s["init"]), "no EVAL score: the parent stays the final model"
+    if old is not None and new < old - QUICK_WORSE[task]:
+        (d / "WORSE").touch()
+        return Path(s["init"]), f"EVAL {new:.0%} vs the parent's {old:.0%}: worse, the parent stays the final model"
+    vs = f" vs the parent's {old:.0%}" if old is not None else " (the parent has no EVAL to compare)"
+    return d / "best.pt", f"EVAL {new:.0%}{vs}: this run is the final model"
 
 
 def away_train(d, s):
@@ -307,7 +373,7 @@ def pipeline(d, steps=STEPS):
     d = Path(d).resolve()
     s = write_status(d, pid=__import__("os").getpid())
     log = open(d / "run.log", "a", encoding="utf-8")
-    if s.get("task") == "solve":
+    if s.get("task") == "solve" or s.get("quick"):
         steps = [x for x in steps if x in SOLVE_STEPS]
 
     def say(msg):
@@ -366,7 +432,12 @@ def pipeline(d, steps=STEPS):
             except RuntimeError as e:
                 say(f"{e} (carrying on)")
             say(f"in-game check after training away: {ingame_outcome(d / 'away')[1]}")
-        write_status(d, final=str(final_dir(d) / "best.pt"))
+        if s.get("quick"):
+            final, why = quick_guard(d, s)
+            write_status(d, final=str(final), guard=why)
+            say(why)
+        else:
+            write_status(d, final=str(final_dir(d) / "best.pt"))
         if "picking" in steps:
             try:  # always: 5 levels to play-test; a failure here never sinks the run
                 phase("picking", ["train/pick.py", str(d), "--checkpoint", str(final_dir(d) / "best.pt")]
@@ -458,13 +529,16 @@ def describe(d):
         lines.append(f"  AFTER TRAINING AWAY from the levels Portal 2 rejected (runs/{name_of(away)}):"
                      f" EVAL {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse")
         lines.append(f"    in Portal 2: {aw_text if game or aw_done else 'not checked'}")
-    elif state == "done" and "data" in s and not solve:
+    elif state == "done" and "data" in s and not solve and not s.get("quick"):
         lines.append("  training away: didn't happen (see run.log)")
-    if state == "done":
+    if state == "done" and s.get("quick"):
+        lines.append(f"  quick run: {s.get('guard', 'no guard result')}")
+        lines.append(f"  final model: {s.get('final', d / 'best.pt')}")
+    elif state == "done":
         f = final_dir(d)
         why = " (training away made it worse)" if (away / "WORSE").exists() else ""
         lines.append(f"  final model: runs/{name_of(f)}/best.pt{why}")
-    if (state == "done" and not solve) or (d / "playtest" / "picks.json").exists():
+    if (state == "done" and not solve and not s.get("quick")) or (d / "playtest" / "picks.json").exists():
         lines.append(f"  play-test levels in the Puzzle Maker: {pk_text}")
     if state in ("failed", "died"):
         log = s.get("log", "train.log")
@@ -481,7 +555,9 @@ def describe(d):
                     f"  .venv/Scripts/python train/run.py ingame {n}  and then wait for it the same way.")
     if state in ("failed", "died"):
         todo.append("Report the log lines above to the user. Don't start the run again until the cause is fixed.")
-    if solve:
+    if s.get("broadcast"):
+        todo = [f"Nothing: train/broadcast.py ({s['broadcast']}) started this run and carries on by itself."]
+    elif solve:
         todo.append("Report everything above to the user.")
         todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
                     " (give the EVAL solved %, pass@8, the test-ws and published-liberal solved %, and how"
@@ -626,6 +702,10 @@ def main():
     p.add_argument("--no-ingame", action="store_true",
                    help="skip the Portal 2 checks. ONLY if the user says the game mustn't be launched")
     p.add_argument("--ingame", action="store_true", help=argparse.SUPPRESS)  # old flag: always on now
+    p.add_argument("--quick", action="store_true",
+                   help="a short fine-tune of --from with a small eval and a guard (train/broadcast.py's rounds)")
+    p.add_argument("--broadcast", default=None, help=argparse.SUPPRESS)  # set by train/broadcast.py
+    p.add_argument("--dry-run", action="store_true", help="print the train and evaluate commands, start nothing")
     p.set_defaults(fn=start)
     for cmd, fn, h in [("status", status, "what a run is doing"), ("wait", wait, "block until it ends")]:
         p = sub.add_parser(cmd, help=h)
