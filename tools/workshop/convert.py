@@ -527,6 +527,22 @@ def convert(bsp):
         keep.append((word, fields, sender))
     later["items"] = keep
 
+    goo = {c for c in open_cells if world.in_water([CELL * v + CELL / 2 for v in c])}
+    filled = settle_goo(goo, open_cells)
+    later_item_cells = [f for _, fields, _ in later["items"] for f in fields
+                        if isinstance(f, tuple) and len(f) == 3 and not isinstance(f[0], str)]
+    for c in [entry, exit_c] + item_cells + later_item_cells:
+        if c in filled:
+            raise Unsupported(f"item at {c} under a goo surface the editor can't make")
+    # Items the Puzzle Maker won't place in goo (src/editor.rs, in-goo; checked in the game).
+    in_goo = [entry, exit_c] + [f[1] for f in toks_fields]
+    in_goo += [b[0] for b in toks_buttons] + [p[0] for p in toks_pedestals]
+    in_goo += [t[0] for t in toks_turrets]
+    in_goo += [fields[0] for word, fields, _ in later["items"] if word in GOO_SHY]
+    for c in in_goo:
+        if c in goo:
+            raise Unsupported(f"item at {c} in goo")
+
     # Gel lands on the floor under its dropper.
     gels = []
     for dropper, kind, on in toks_gels:
@@ -534,8 +550,6 @@ def convert(bsp):
         while add(c, DOWN) in open_cells:
             c = add(c, DOWN)
         gels.append((c, kind, on))
-
-    goo = {c for c in open_cells if world.in_water([CELL * v + CELL / 2 for v in c])}
 
     # Glass and grating: thin window/grate brushes just inside the face they're on.
     panels = {}
@@ -579,6 +593,11 @@ def convert(bsp):
                     c = tuple(c)
                     if c in open_cells and add(c, d) in open_cells:
                         panels[(c, d)] = kind
+
+    # Glass or grating in goo, unless it lies on the goo's surface (src/editor.rs, in-goo).
+    for (c, d), kind in panels.items():
+        if c in goo and not (d == UP and add(c, UP) not in goo):
+            raise Unsupported(f"{kind} at {c} in goo")
 
     # Coordinates: as compiled, which is the editor's own frame (as in the .p2c, and like
     # generated levels: floors usually at z = 2, goo pits below). An axis that doesn't fit in
@@ -674,6 +693,52 @@ def convert(bsp):
         if sender is not None:
             out += wires(targets(sender))
     return " ".join(out)
+
+
+# Later items the Puzzle Maker won't place in goo; panels, pistons, rails and bridges it
+# mostly accepts there (src/editor.rs, in-goo).
+GOO_SHY = {"laser", "catcher", "relay", "plate", "funnel", "stairs"}
+
+
+def settle_goo(goo, open_cells):
+    """Make the goo a shape the Puzzle Maker can build, and return the cells it fills in.
+
+    The editor's goo item sits on a floor and floods sideways and down (checked in the game,
+    2026-10-20: one on a ledge fills the shaft beside it to the bottom; one at the bottom of a
+    pit fills only its own voxel; one over open air, over goo or over an item is invalid). So
+    a pool's surface layer needs a cell with a floor under it. Workshop maps have pools two or
+    more deep with none (in 1,085 of 7,302 levels; not buildable in the editor, however their
+    authors made them): their cells under the surface become solid, which plays the same, since
+    goo kills at any depth. Changes `goo` and `open_cells` in place.
+    """
+    filled = set()
+    changed = True
+    while changed:
+        changed = False
+        seen = set()
+        for start in sorted(goo):
+            if start in seen:
+                continue
+            seen.add(start)
+            group = [start]
+            for c in group:
+                for d in DIRS[:4]:
+                    n = add(c, d)
+                    if n in goo and n not in seen:
+                        seen.add(n)
+                        group.append(n)
+            # Fed from above, or with a floor for the goo item: fine as it is.
+            if any(add(c, UP) in goo for c in group) or any(add(c, DOWN) not in open_cells for c in group):
+                continue
+            for c in group:
+                below = add(c, DOWN)
+                while below in goo:
+                    goo.discard(below)
+                    open_cells.discard(below)
+                    filled.add(below)
+                    below = add(below, DOWN)
+            changed = True
+    return filled
 
 
 def dir_of(angles, v=(1, 0, 0), what="item"):

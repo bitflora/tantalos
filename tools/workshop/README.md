@@ -44,6 +44,11 @@ id as `<src:ws>` and the subscribers as `<tier:top>` (≥ 100) or `<tier:mid>` (
     empty BSP leaves, never out through the door corridors;
   - white faces are wall materials named `white`; goo is water brushes; glass/grating are thin
     window/grate brushes inside the face's cell, merged into rectangles;
+  - goo is kept to shapes the editor can build: its goo item sits on a floor and floods
+    sideways and down (checked in the game), so a pool two or more deep whose surface has no
+    cell over a floor (15% of Workshop maps) gets solid cells under its surface, which plays
+    the same. A map with an item under such a surface, or an item the editor won't place in
+    goo standing in it (turrets, buttons, doors, fields, lasers, plates...), is unsupported;
   - item instances are named `<kind><p2c index>` (`button23-proxy`, `barrierhazard8_brush`);
     logic entities keep the instance's angles; an item's cell is floor((anchor + up) / 128);
   - wires are the outputs of each button's `func_instance_io_proxy`;
