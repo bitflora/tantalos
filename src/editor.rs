@@ -181,6 +181,16 @@ fn share_ok(a: &PlacedItem, b: &PlacedItem) -> bool {
     ok(a, b) || ok(b, a)
 }
 
+/// Whether `it` is glass or grating lying on top of goo: every face on a goo cell's +z side,
+/// with no goo above.
+fn on_goo_surface(level: &Level, it: &PlacedItem) -> bool {
+    level.barriers.iter().filter(|b| b.item == it.index).any(|b| {
+        b.faces
+            .iter()
+            .all(|&(c, d)| d == Dir::PosZ && !level.goo(step(c, Dir::PosZ)))
+    })
+}
+
 /// Everything the editor would flag in this level.
 pub fn editor_flags(level: &Level) -> Vec<Flag> {
     let mut flags = Flags::default();
@@ -239,30 +249,58 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
             ItemKind::Goo if !level.solid(step(it.cell, Dir::NegZ)) => {
                 flags.add(it, "goo-not-on-floor")
             }
-            // Only cubes and gel splats may anchor on goo (CanAnchorOnGoo).
+            // Only cubes and gel splats may anchor on goo (CanAnchorOnGoo). Not just in a goo
+            // item's own cell: anywhere its flood reaches. In-game checks of
+            // runs/v5-cont-10h-b (2026-10-20) flagged 118 of 119 turrets in goo cells, glass
+            // 19/19, grating 80/85, fields 42/42, pedestals 33/34, floor buttons 39/42, faith
+            // plates 14/15, lasers 9/9, funnels 10/10, stairs 9/9, doors 16/18. Glass or
+            // grating lying on the goo's surface is a floor over it (3 of 5 passed, and 53 in
+            // Workshop levels). Workshop levels also have turrets (22) and fields (7) in goo,
+            // but their goo comes from compiled maps and is unreliable (see goo-not-on-floor).
             ItemKind::FloorButton
             | ItemKind::PedestalButton
-            | ItemKind::CubeDropper
             | ItemKind::EntryDoor
             | ItemKind::ExitDoor
             | ItemKind::Turret
-            | ItemKind::PaintDropper
             | ItemKind::LaserEmitter
             | ItemKind::LaserCatcher
             | ItemKind::LaserRelay
             | ItemKind::FaithPlate
-            | ItemKind::LightBridge
             | ItemKind::Funnel
+            | ItemKind::Stairs
+            | ItemKind::Glass
+            | ItemKind::Grating
+            | ItemKind::Fizzler
+            | ItemKind::LaserField
+                if (level.goo(it.cell) || goo_items.contains(&it.cell))
+                    && !on_goo_surface(level, it) =>
+            {
+                flags.add(it, "in-goo")
+            }
+            // Surface items flooded by goo were mostly accepted (pistons 3 of 16 flagged,
+            // panels 5 of 23), so only the goo item's own cell counts for them. So for light
+            // bridges: the game flagged 5 of 6, but 130 Workshop levels have them in goo.
+            ItemKind::CubeDropper
+            | ItemKind::LightBridge
+            | ItemKind::PaintDropper
             | ItemKind::AngledPanel
             | ItemKind::GlassPanel
             | ItemKind::FlipPanel
-            | ItemKind::Stairs
             | ItemKind::Piston
                 if goo_items.contains(&it.cell) =>
             {
                 flags.add(it, "in-goo")
             }
             _ => {}
+        }
+        // A piston is sunk two voxels into its surface (EmbeddedVoxels 0 0 0 and 0 0 -1): the
+        // game flagged all 64 pistons whose second voxel was open, and no piston with it
+        // solid (2026-10-20).
+        if let (ItemKind::Piston, Some(n)) = (&it.kind, it.normal) {
+            let back = n.opposite();
+            if !level.solid(step(step(it.cell, back), back)) {
+                flags.add(it, "piston-not-embedded");
+            }
         }
     }
 
@@ -372,6 +410,22 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
             let Some(panel) = level.item(b.item) else { continue };
             if b.faces.iter().any(|(c, _)| cells.contains(c)) {
                 flags.pair(st, panel, "panel-in-stairs");
+            }
+        }
+    }
+    // Likewise in the cell of a piston or a surface panel: the game flagged pistons 66 of 66,
+    // angled panels 24/24, glass panels 17/17 and flip panels 15/15 (2026-10-20). Not laser
+    // relays (11 of 16).
+    for it in level.items.iter().filter(|i| {
+        matches!(
+            i.kind,
+            ItemKind::Piston | ItemKind::AngledPanel | ItemKind::GlassPanel | ItemKind::FlipPanel
+        )
+    }) {
+        for b in &level.barriers {
+            let Some(panel) = level.item(b.item) else { continue };
+            if b.faces.iter().any(|(c, _)| *c == it.cell) {
+                flags.pair(it, panel, "panel-in-item");
             }
         }
     }

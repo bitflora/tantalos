@@ -89,7 +89,8 @@ fn generated_levels_round_trip() {
         round_trip(&format!("genome {i}: {g:?}"), &p);
         encoded += 1;
     }
-    assert!(encoded > 60, "only {encoded} built");
+    // About a third build: the rest break editor rules (items in goo, since 2026-10-20).
+    assert!(encoded > 45, "only {encoded} built");
 }
 
 #[test]
@@ -264,7 +265,7 @@ fn goo_items_sit_on_the_floor_of_their_run() {
         let level = Level::from_puzzle(&decode(line).unwrap());
         level.mount_problems().into_iter().filter(|p| p.contains("goo")).collect()
     };
-    let line = "size 3 1 4 s1 o3 | s1 g1 o2 | g2 o2 | / entry 0 0 1 +x exit 0 0 2 +x";
+    let line = "size 3 1 4 s2 o2 | s1 g1 o2 | g2 o2 | / entry 0 0 2 +x exit 0 0 3 +x";
     assert_eq!(goo_problems(line), Vec::<String>::new());
     let level = Level::from_puzzle(&decode(line).unwrap());
     assert!(level.goo([2, 0, 0]) && level.goo([2, 0, 1]) && level.goo([1, 0, 1]));
