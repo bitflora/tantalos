@@ -388,7 +388,21 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                 }
                 let rule = match it.kind {
                     ItemKind::EntryDoor | ItemKind::ExitDoor if d == n.opposite() => "door-on-panel",
-                    ItemKind::CubeDropper => "dropper-in-panel",
+                    // Paint droppers too: 43 of 43 flagged (2026-10-20).
+                    ItemKind::CubeDropper | ItemKind::PaintDropper => "dropper-in-panel",
+                    // On the face a wall item is mounted on (24 of 24 flagged, 2026-10-20).
+                    // Elsewhere in their cells mostly fine (lasers 0 of 20 flagged, funnels 2 of
+                    // 22). Light bridges' other faces: 12 of 12 flagged, but 18 Workshop levels
+                    // have glass there.
+                    ItemKind::LaserEmitter
+                    | ItemKind::LaserCatcher
+                    | ItemKind::LaserRelay
+                    | ItemKind::LightBridge
+                    | ItemKind::Funnel
+                        if d == n.opposite() =>
+                    {
+                        "panel-on-mount"
+                    }
                     ItemKind::PedestalButton if Some(d) == pedestal_side(it) => "pedestal-against-panel",
                     // Not seen in the checked levels; follows CanAnchorOnBarriers.
                     ItemKind::FloorButton | ItemKind::PedestalButton if d == n.opposite() => {
@@ -473,6 +487,13 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                 flags.pair(it, field, "in-field");
             }
         }
+        // Stairs take two cells: the game flagged 48 of 48 with only the second in a field.
+        for s in &level.stairs {
+            let Some(st) = level.item(s.item) else { continue };
+            if swept.contains(&step(s.cell, s.dir)) {
+                flags.pair(st, field, "in-field");
+            }
+        }
         // Glass across the field's path (grating mostly lets it through; not modelled).
         for b in level.barriers.iter().filter(|b| b.kind == BarrierKind::Glass) {
             let Some(panel) = level.item(b.item) else { continue };
@@ -512,6 +533,53 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
             };
             if collide {
                 flags.pair(field, other, "fields-overlap");
+            }
+        }
+    }
+
+    // Voxels the later items are sunk into (EmbeddedVoxels in editoritems.txt: the one behind
+    // the surface; a piston's two; under each step of stairs). Two can't share one: the game
+    // flagged 75 of 75 such pairs (a laser in the wall a faith plate stands on, say), 2026-10-20.
+    let mut sunk: HashMap<Cell, usize> = HashMap::new();
+    for (i, it) in level.items.iter().enumerate() {
+        let Some(n) = it.normal else { continue };
+        let wall = step(it.cell, n.opposite());
+        let cells = match it.kind {
+            ItemKind::Funnel
+            | ItemKind::FaithPlate
+            | ItemKind::LaserEmitter
+            | ItemKind::LaserCatcher
+            | ItemKind::LaserRelay
+            | ItemKind::AngledPanel
+            | ItemKind::GlassPanel
+            | ItemKind::FlipPanel
+            | ItemKind::CubeDropper => vec![wall],
+            ItemKind::Piston => vec![wall, step(wall, n.opposite())],
+            ItemKind::Stairs => match level.stairs.iter().find(|s| s.item == it.index) {
+                Some(s) => vec![step(s.cell, Dir::NegZ), step(step(s.cell, s.dir), Dir::NegZ)],
+                None => vec![wall],
+            },
+            _ => continue,
+        };
+        for c in cells {
+            match sunk.get(&c) {
+                Some(&j) if j != i => flags.pair(&level.items[j], it, "embedded-overlap"),
+                Some(_) => {}
+                None => {
+                    sunk.insert(c, i);
+                }
+            }
+        }
+    }
+
+    // Two buttons in one cell (13 of 13 flagged), or a cube and a paint dropper (16 of 16),
+    // 2026-10-20. Not a door and a button: the game flagged 28 of 108.
+    for (i, a) in level.items.iter().enumerate() {
+        for b in &level.items[i + 1..] {
+            let button = |x: &PlacedItem| matches!(x.kind, ItemKind::FloorButton | ItemKind::PedestalButton);
+            let dropper = |x: &PlacedItem| matches!(x.kind, ItemKind::CubeDropper | ItemKind::PaintDropper);
+            if a.cell == b.cell && ((button(a) && button(b)) || (dropper(a) && dropper(b))) {
+                flags.pair(a, b, "shared-cell");
             }
         }
     }
