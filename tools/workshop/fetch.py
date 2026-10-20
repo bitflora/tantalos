@@ -3,6 +3,13 @@
     python tools/workshop/fetch.py list --pages 100       # find puzzles: out/workshop/items.jsonl
     python tools/workshop/fetch.py download               # fetch them:   out/workshop/bsp/<id>.bsp
     python tools/workshop/fetch.py build                  # convert+solve: out/workshop/levels.jsonl
+    python tools/workshop/fetch.py pipeline               # download while converting+scoring
+
+`pipeline` runs `download` (and optionally a `--retry-errors` pass) as a child process and,
+every `--interval` seconds, builds only the maps that download has finished (`build
+--incremental` appends to report.jsonl/levels.jsonl, using fetched.jsonl as the readiness
+signal). It finalizes levels.jsonl at the end. This overlaps the network-bound download with
+the CPU-bound converter and solver instead of doing the two phases one after the other.
 
 `list` reads the Workshop's public browse pages (top rated by default), singleplayer only and
 without the tags of co-op and custom maps, then keeps the items published from the Puzzle
@@ -237,6 +244,43 @@ def cmd_download(a):
 
 # ---- build ----
 
+def read_ids(path, status=None, key="id"):
+    """Ids in a JSONL file, skipping a partial last line and unparsable records."""
+    ids = set()
+    if not path.exists():
+        return ids
+    for line in open(path, encoding="utf-8"):
+        try:
+            r = json.loads(line)
+            if status is None or r.get("status") == status:
+                ids.add(str(r[key]))
+        except (ValueError, KeyError, TypeError):
+            pass
+    return ids
+
+
+def score_levels(a, ids, lines, meta, out, mode):
+    """Score converted token lines in one `glados score` pass and write their records."""
+    if not lines:
+        return {}
+    # Published puzzles already passed the game's own editor; our model of its rules would only
+    # add false positives (e.g. fizzlers centred in a doorway, fields the game let cross).
+    cmd = [a.glados, "score", "--budget", str(a.budget), "--editor-rules", "off"]
+    if a.p2c:
+        cmd += ["--p2c", a.p2c]
+    res = subprocess.run(cmd, input="\n".join(lines) + "\n", capture_output=True, text=True, check=True)
+    verdicts = {}
+    with open(out / "levels.jsonl", mode, encoding="utf-8") as f:
+        for wid, line in zip(ids, res.stdout.splitlines()):
+            r = json.loads(line)
+            r.pop("line", None)
+            r.pop("canonical", None)
+            r = {**r, "workshop_id": wid, **meta.get(wid, {"title": ""})}
+            verdicts[r["verdict"]] = verdicts.get(r["verdict"], 0) + 1
+            f.write(json.dumps(r) + "\n")
+    return verdicts
+
+
 def cmd_build(a):
     out = Path(a.out)
     meta = {}
@@ -244,9 +288,32 @@ def cmd_build(a):
         r = json.loads(l)
         meta[r["id"]] = {"title": r["title"], "subscribers": r.get("lifetime_subscriptions"),
                          "favorited": r.get("favorited")}
-    ids, lines, problems = [], [], {}
-    with open(out / "report.jsonl", "w", encoding="utf-8") as report:
+    incremental = getattr(a, "incremental", False)
+    if incremental:
+        # Only what a completed download has produced and no build has seen yet. fetched.jsonl
+        # is flushed after each map's .bsp is written, so it is the readiness signal; old bsp
+        # files with no fetched record (previous runs, fixtures) are taken once they are a
+        # minute old, which also keeps us away from a file being written right now.
+        done = read_ids(out / "report.jsonl")
+        ok = read_ids(out / "fetched.jsonl", status="ok")
+        now = time.time()
+        paths = []
         for path in sorted((out / "bsp").glob("*.bsp")):
+            if path.stem in done:
+                continue
+            try:
+                old = now - path.stat().st_mtime > 60
+            except OSError:
+                continue
+            if path.stem in ok or old:
+                paths.append(path)
+        if not paths:
+            return 0
+    else:
+        paths = sorted((out / "bsp").glob("*.bsp"))
+    ids, lines, problems = [], [], {}
+    with open(out / "report.jsonl", "a" if incremental else "w", encoding="utf-8") as report:
+        for path in paths:
             rec = {"id": path.stem}
             try:
                 rec["tokens"] = convert(Bsp.open(path))
@@ -256,24 +323,67 @@ def cmd_build(a):
                 rec["error"] = str(e)
                 problems[path.stem] = str(e)
             report.write(json.dumps(rec) + "\n")
-    print(f"converted {len(lines)}; {len(problems)} unsupported after download (see report.jsonl)",
-          file=sys.stderr)
-    # Published puzzles already passed the game's own editor; our model of its rules would only
-    # add false positives (e.g. fizzlers centred in a doorway, fields the game let cross).
-    cmd = [a.glados, "score", "--budget", str(a.budget), "--editor-rules", "off"]
-    if a.p2c:
-        cmd += ["--p2c", a.p2c]
-    res = subprocess.run(cmd, input="\n".join(lines) + "\n", capture_output=True, text=True, check=True)
-    verdicts = {}
-    with open(out / "levels.jsonl", "w", encoding="utf-8") as f:
-        for wid, line in zip(ids, res.stdout.splitlines()):
-            r = json.loads(line)
-            r.pop("line", None)
-            r.pop("canonical", None)
-            r = {**r, "workshop_id": wid, **meta.get(wid, {"title": ""})}
-            verdicts[r["verdict"]] = verdicts.get(r["verdict"], 0) + 1
-            f.write(json.dumps(r) + "\n")
+    print(f"converted {len(lines)} of {len(paths)}; {len(problems)} unsupported "
+          f"(see report.jsonl)", file=sys.stderr)
+    verdicts = score_levels(a, ids, lines, meta, out, "a" if incremental else "w")
     print(f"{verdicts}; {out / 'levels.jsonl'}")
+    return len(paths)
+
+
+def cmd_finalize(a):
+    """Merge an incrementally built levels.jsonl, keeping the last record for each id."""
+    out = Path(a.out)
+    path = out / "levels.jsonl"
+    records, order = {}, []
+    if path.exists():
+        for line in open(path, encoding="utf-8"):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            wid = r.get("workshop_id")
+            if wid not in records:
+                order.append(wid)
+            records[wid] = r
+    tmp = path.with_suffix(".jsonl.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        for wid in sorted(order, key=str):
+            f.write(json.dumps(records[wid]) + "\n")
+    tmp.replace(path)
+    print(f"finalized {len(records)} levels; {path}")
+
+
+def cmd_pipeline(a):
+    """Download while converting and scoring completed maps, then finalize levels.jsonl."""
+    out = Path(a.out)
+    ns = argparse.Namespace(out=a.out, glados=a.glados, budget=a.budget, p2c=a.p2c,
+                            incremental=True)
+    passes = [["download", "--workers", str(a.workers)]]
+    if a.max:
+        passes[0] += ["--max", str(a.max)]
+    if a.retry_errors:
+        passes.append(["download", "--retry-errors", "--workers", str(a.workers)])
+        if a.max:
+            passes[-1] += ["--max", str(a.max)]
+    for args in passes:
+        print(f"[{time.strftime('%H:%M:%S')}] {' '.join(args)}", file=sys.stderr)
+        proc = subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()), *args],
+                                cwd=ROOT)
+        while proc.poll() is None:
+            try:
+                n = cmd_build(ns)
+            except Exception as e:  # a bad batch must not stop the download
+                print(f"build failed: {e}", file=sys.stderr)
+                n = 0
+            print(f"[{time.strftime('%H:%M:%S')}] built {n} new maps", file=sys.stderr)
+            time.sleep(a.interval)
+        try:
+            cmd_build(ns)  # catch up on whatever finished while the last build ran
+        except Exception as e:
+            print(f"final build failed: {e}", file=sys.stderr)
+        if proc.returncode:
+            print(f"download exited {proc.returncode}", file=sys.stderr)
+    cmd_finalize(argparse.Namespace(out=a.out))
 
 
 def main():
@@ -295,8 +405,21 @@ def main():
     p.add_argument("--glados", default=str(ROOT / "target" / "release" / ("glados.exe" if sys.platform == "win32" else "glados")))
     p.add_argument("--budget", type=int, default=50_000)
     p.add_argument("--p2c", help="also write the solvable levels as .p2c files here")
+    p.add_argument("--incremental", action="store_true",
+                   help="only maps downloaded since the last build; append to report/levels")
+    p = sub.add_parser("finalize", help="merge an incrementally built levels.jsonl")
+    p = sub.add_parser("pipeline", help="download while converting and scoring completed maps")
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--max", type=int, default=0, help="stop each download pass after this many")
+    p.add_argument("--interval", type=float, default=120.0,
+                   help="seconds between incremental builds while download runs")
+    p.add_argument("--retry-errors", action="store_true", help="run a retry pass after the first")
+    p.add_argument("--glados", default=str(ROOT / "target" / "release" / ("glados.exe" if sys.platform == "win32" else "glados")))
+    p.add_argument("--budget", type=int, default=50_000)
+    p.add_argument("--p2c", help="also write the solvable levels as .p2c files here")
     a = ap.parse_args()
-    {"list": cmd_list, "download": cmd_download, "build": cmd_build}[a.cmd](a)
+    {"list": cmd_list, "download": cmd_download, "build": cmd_build, "finalize": cmd_finalize,
+     "pipeline": cmd_pipeline}[a.cmd](a)
 
 
 if __name__ == "__main__":

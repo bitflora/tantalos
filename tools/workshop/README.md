@@ -12,6 +12,17 @@ python tools/workshop/fetch.py build              # out/workshop/levels.jsonl, r
 python tools/workshop/check.py                    # converter vs. known puzzles (needs release glados)
 ```
 
+`build` converts every slim map first and scores them at the end. To overlap that CPU work
+with the network, use `pipeline`: it starts `download` (plus a `--retry-errors` pass with
+`--retry-errors`) as a child process and, every `--interval` seconds (default 120), converts and
+scores only the maps whose `fetched.jsonl` record says `ok` (`build --incremental`). It appends
+to `report.jsonl` / `levels.jsonl` and dedupes `levels.jsonl` at the end. A build interrupted
+mid-download resumes where it left off, because `report.jsonl` is the set of maps already seen.
+
+```bash
+python tools/workshop/fetch.py pipeline --workers 8 --retry-errors
+```
+
 `levels.jsonl` has the fields `glados dataset` writes (`tokens`, `verdict`, `min_len`, `metrics`),
 plus `workshop_id`, `title`, `subscribers` (lifetime unique) and `favorited`. Training reads the
 id as `<src:ws>` and the subscribers as `<tier:top>` (≥ 100) or `<tier:mid>` (train/data.py).
