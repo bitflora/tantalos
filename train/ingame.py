@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import portal2  # noqa: E402
+from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PASSED = ("solvable", "uncertain", "unsolvable")
@@ -92,7 +93,8 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="at most this many levels")
     ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados.exe"))
     ap.add_argument("--store", default=str(ROOT / "data" / "ingame"))
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--resume", action="store_true",
                     help="keep the levels already checked in <out>/game.jsonl (same samples and options)")
     ap.add_argument("--max-crashes", type=int, default=None,
@@ -102,6 +104,7 @@ def main():
     ap.add_argument("--port", type=int, help="with --no-launch: its -netconport")
     ap.add_argument("--password", default="", help="with --no-launch: its -netconpassword")
     a = ap.parse_args()
+    a.seed = resolve(a.seed)
     if not a.dir and not a.samples:
         ap.error("give an evaluation directory or --samples")
     samples = Path(a.samples or Path(a.dir) / "samples.jsonl")

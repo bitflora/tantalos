@@ -35,6 +35,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 import sample  # noqa: E402
 from evaluate import nearest  # noqa: E402
+from seeding import resolve  # noqa: E402
 
 SOLVABLE = "<verdict:solvable>"
 # Fields of a `glados score` line that make up a dataset record.
@@ -107,8 +108,10 @@ def main():
     ap.add_argument("--chunk", type=int, default=1024, help="levels sampled and scored at a time")
     ap.add_argument("--budget", type=int, default=50_000)
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     args = ap.parse_args()
+    args.seed = resolve(args.seed)
 
     run = Path(args.checkpoint).parent
     out = Path(args.out) if args.out else Path("data/harvest") / f"{run.name}.jsonl"

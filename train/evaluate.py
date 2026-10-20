@@ -32,6 +32,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 import sample  # noqa: E402
 from data import GROUPS, PROVENANCE, conditions, groups_in  # noqa: E402
+from seeding import resolve  # noqa: E402
 
 SOLVABLE = "<verdict:solvable>"
 SHINGLE = 4
@@ -184,7 +185,7 @@ def report(ev):
         f"# Evaluation of `{ev['checkpoint']}`",
         "",
         f"Step {ev['step']}, val loss {ev['val_loss']:.4f}. Temperature {ev['temperature']}, "
-        f"top-k {ev['top_k']}, solver budget {ev['budget']}.",
+        f"top-k {ev['top_k']}, solver budget {ev['budget']}, seed {ev['seed']}.",
         "",
         f"## Validity ({v['n']} levels asked for `{SOLVABLE}`)",
         "",
@@ -297,9 +298,11 @@ def main():
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
     ap.add_argument("--out", default=None, help="directory (default <checkpoint dir>/eval)")
     ap.add_argument("--p2c", action="store_true", help="also write every solvable level as .p2c")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--cpu", action="store_true", help="sample on the CPU (e.g. while training)")
     args = ap.parse_args()
+    args.seed = resolve(args.seed)
 
     device = "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
     torch.manual_seed(args.seed)
@@ -415,6 +418,7 @@ def main():
 
     ev = {
         "checkpoint": str(args.checkpoint),
+        "seed": args.seed,
         "step": ck.get("step"),
         "val_loss": ck.get("val_loss", float("nan")),
         "temperature": args.temperature,

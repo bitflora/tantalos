@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import portal2  # noqa: E402
+from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # Asking for 12+ move plans doubled the levels passing `choose`'s filter (23% of samples vs 12%)
@@ -55,13 +56,15 @@ def main():
     ap.add_argument("run", help="run directory, e.g. runs/v4-fresh-2h")
     ap.add_argument("--n", type=int, default=5)
     ap.add_argument("--samples", type=int, default=80)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument(
         "--cond", default=COND,
         help="condition tokens for sampling, besides <verdict:solvable> (default %(default)s)")
     ap.add_argument("--no-game", action="store_true", help="don't check the picks in Portal 2")
     ap.add_argument("--checkpoint", help="the model to sample (default <run>/best.pt)")
     args = ap.parse_args()
+    args.seed = resolve(args.seed)
 
     run = Path(args.run)
     out = run / "playtest"

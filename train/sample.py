@@ -19,6 +19,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 from data import ANY, BOS, EOS, SEP, GROUPS, Vocab, groups_in, slots  # noqa: E402
 from model import GPT, Config  # noqa: E402
+from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_GLADOS = ROOT / "target" / "release" / ("glados.exe" if sys.platform == "win32" else "glados")
@@ -92,8 +93,10 @@ def main():
     ap.add_argument("--p2c", action="store_true", help="also write solvable levels as .p2c")
     ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
     ap.add_argument("--budget", type=int, default=50_000)
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     args = ap.parse_args()
+    args.seed = resolve(args.seed)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(args.seed)

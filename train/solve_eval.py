@@ -31,6 +31,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 from data import BOS, EOS, LEN_BUCKETS, MECHANICS, SEP, len_bucket  # noqa: E402
 from sample import DEFAULT_GLADOS, load_checkpoint  # noqa: E402
+from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HEADLINE = "test-gen"
@@ -246,9 +247,11 @@ def main():
     ap.add_argument("--rows", type=int, default=64, help="plans generated at once")
     ap.add_argument("--out", default=None, help="default: <checkpoint dir>/eval")
     ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
+    args.seed = resolve(args.seed)
 
     t0 = time.time()
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
