@@ -182,7 +182,7 @@ def main():
     number_of = torch.full((len(vocab),), -1, dtype=torch.long)
     number_of[numbers] = torch.arange(len(numbers))
 
-    cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout)
+    cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout, qk_norm=True)
     init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
     if init:
         # The model's shape comes from the checkpoint; --layers/--heads/--embd are ignored. Its

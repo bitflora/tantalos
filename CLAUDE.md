@@ -41,7 +41,9 @@ A training run is exactly these steps:
 - **Warm-start by default:** unless the user says otherwise (or names a different `--from`),
   continue the most recently trained net of the same task: pass the final model of the newest
   completed run as `--from` (find it with `list`). Start a run from scratch only when the user
-  asks for a fresh model. Note the known risk: recent warm starts have diverged under the warm
+  asks for a fresh model. **Next fresh run (user's request, 2026-10-20):** add `-- --layers 10`
+  (10 layers instead of 6, same width) and say so in `--note`, then remove this sentence; it is
+  also the first fresh run with QK-norm, so compare it with v5-fresh-10h-c. Note the known risk: recent warm starts have diverged under the warm
   rates (lr 2e-4) and finished well below their init, so report that if it happens again.
 - The Portal 2 steps launch the game themselves (in the background, no focus needed) and never
   touch a game that is already running.

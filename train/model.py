@@ -21,6 +21,9 @@ class Config:
     n_head: int = 6
     n_embd: int = 384
     dropout: float = 0.1
+    # LayerNorm on each head's queries and keys before attention, against the late loss spikes
+    # of long runs (2026-10-20). Off for checkpoints made before it, so they load unchanged.
+    qk_norm: bool = False
 
 
 class Block(nn.Module):
@@ -37,6 +40,9 @@ class Block(nn.Module):
             nn.Dropout(cfg.dropout),
         )
         self.n_head = cfg.n_head
+        if cfg.qk_norm:
+            self.q_norm = nn.LayerNorm(cfg.n_embd // cfg.n_head)
+            self.k_norm = nn.LayerNorm(cfg.n_embd // cfg.n_head)
         self.dropout = cfg.dropout
         self.resid_drop = nn.Dropout(cfg.dropout)
 
@@ -48,6 +54,8 @@ class Block(nn.Module):
         b, t, c = x.shape
         q, k, v = self.qkv(self.ln1(x)).split(c, dim=2)
         q, k, v = (z.view(b, t, self.n_head, c // self.n_head).transpose(1, 2) for z in (q, k, v))
+        if hasattr(self, "q_norm"):
+            q, k = self.q_norm(q), self.k_norm(k)
         if cache is not None:
             n = cache.get("n", 0)
             if n == 0:
