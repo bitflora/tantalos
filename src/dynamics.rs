@@ -546,23 +546,23 @@ pub fn funnel_moves(geo: Geo, cells: &[Cell], cond: Cond) -> Vec<DynMove> {
             }
         })
         .collect();
-    let mut seen: HashSet<Cell> = HashSet::new();
+    let mut seen: HashSet<(Cell, u64)> = HashSet::new();
     let mut out = Vec::new();
     for (i, &f) in cells.iter().enumerate() {
-        let mut from: Vec<Cell> = Vec::new();
+        // Where they step in from, with the fields crossed stepping in.
+        let mut from: Vec<(Cell, u64)> = Vec::new();
         if geo.stand(f).is_some() {
-            from.push(f);
+            from.push((f, 0));
         }
         for d in Dir::HORIZONTAL {
             let m = step(f, d);
-            if geo.stand(m).is_some()
-                && level.face(f, d).barrier.is_none()
-                && geo.block(f, d).is_none()
-            {
-                from.push(m);
+            let face = level.face(f, d);
+            if geo.stand(m).is_some() && face.barrier.is_none() && geo.block(f, d).is_none() {
+                from.push((m, face.hazards));
             }
         }
-        from.retain(|c| seen.insert(*c));
+        // A cell that steps in earlier the same way gets nothing new here.
+        from.retain(|&(c, h)| seen.insert((c, h)));
         if from.is_empty() {
             continue;
         }
@@ -576,13 +576,19 @@ pub fn funnel_moves(geo: Geo, cells: &[Cell], cond: Cond) -> Vec<DynMove> {
                 to.push((c, cell, h | hz));
             }
         }
-        if !to.is_empty() {
+        if to.is_empty() {
+            continue;
+        }
+        let mut entries: Vec<u64> = from.iter().map(|&(_, h)| h).collect();
+        entries.sort();
+        entries.dedup();
+        for h in entries {
             out.push(DynMove {
-                from,
-                to,
+                from: from.iter().filter(|e| e.1 == h).map(|e| e.0).collect(),
+                to: to.clone(),
                 kind: Move::Funnel,
                 cond,
-                hazards: 0,
+                hazards: h,
             });
         }
     }

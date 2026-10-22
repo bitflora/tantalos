@@ -37,8 +37,11 @@ id as `<src:ws>` and the subscribers as `<tier:top>` (≥ 100) or `<tier:mid>` (
 - **Downloading** uses HTTP ranges: header, then the entity lump (~0.2 MB). If instance names rule
   the map out, stop; else fetch the 11 other lumps `convert.py` reads (~0.6 MB of a 5–40 MB map)
   and save a slim BSP. Steam's CDN sometimes returns wrong bytes with a 206 (zeros or junk, even
-  consistently while an edge is filling its cache), so each range must come back identical twice,
-  the slim map must pass `Bsp.check()`, and failing maps are retried after a pause.
+  consistently while an edge is filling its cache), so each range must come back identical twice
+  and the slim map must pass `Bsp.check()`. Empty 206s are retried immediately, and a map that
+  still fails is logged rather than retried for minutes; the next `download --retry-errors` pass
+  picks it up. The CDN throttles custom user agents with empty 206s, so requests use the Steam
+  client's user agent (`fetch.py` `UA`) while still keeping the request rate low.
 - **Converting** (`convert.py`), from what the Puzzle Maker compiler leaves in the map:
   - cell v spans world [128v, 128v+128); open cells are flooded from the doors and items through
     empty BSP leaves, never out through the door corridors;

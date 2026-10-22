@@ -47,7 +47,7 @@ pub fn target_name(kind: &ItemKind) -> Option<&'static str> {
         ItemKind::CubeDropper => "cubedropper",
         ItemKind::FloorButton | ItemKind::PedestalButton => "button",
         ItemKind::Goo => "goo",
-        ItemKind::Glass | ItemKind::Grating => "target",
+        ItemKind::Glass | ItemKind::Grating | ItemKind::PlateTarget => "target",
         ItemKind::Fizzler | ItemKind::LaserField => "barrierhazard",
         ItemKind::Turret => "turret",
         ItemKind::PaintSplat => "paintsplat",
@@ -181,6 +181,15 @@ fn share_ok(a: &PlacedItem, b: &PlacedItem) -> bool {
     ok(a, b) || ok(b, a)
 }
 
+/// A face, named the same way from both cells it separates.
+fn face_key((c, d): (Cell, Dir)) -> (Cell, Dir) {
+    if d.is_positive() {
+        (c, d)
+    } else {
+        (step(c, d), d.opposite())
+    }
+}
+
 /// Whether `it` is glass or grating lying on top of goo: every face on a goo cell's +z side,
 /// with no goo above.
 fn on_goo_surface(level: &Level, it: &PlacedItem) -> bool {
@@ -228,6 +237,7 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                     | ItemKind::Grating
                     | ItemKind::Fizzler
                     | ItemKind::LaserField
+                    | ItemKind::PlateTarget
             ) {
                 continue;
             }
@@ -292,6 +302,15 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                 flags.add(it, "in-goo")
             }
             _ => {}
+        }
+        // A faith plate's target lies on a surface: the game flagged all 43 targets with open
+        // space behind them, and none with a solid voxel there (in-game checks of
+        // v5-fresh-10h-e and v5-cont-10h-d, 2026-10-22). Workshop levels have many in the air,
+        // but their targets are placed by the map converter, not the editor.
+        if let (ItemKind::PlateTarget, Some(n)) = (&it.kind, it.normal) {
+            if !level.solid(step(it.cell, n.opposite())) {
+                flags.add(it, "target-not-on-surface");
+            }
         }
         // A piston is sunk two voxels into its surface (EmbeddedVoxels 0 0 0 and 0 0 -1): the
         // game flagged all 64 pistons whose second voxel was open, and no piston with it
@@ -403,6 +422,9 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                     {
                         "panel-on-mount"
                     }
+                    // An off-centre relay against the panel beside it: 19 of 19 flagged
+                    // (2026-10-22). On its cell's other faces 0 of 14.
+                    ItemKind::LaserRelay if it.laser_offset() == Some(d) => "panel-beside-offset",
                     ItemKind::PedestalButton if Some(d) == pedestal_side(it) => "pedestal-against-panel",
                     // Not seen in the checked levels; follows CanAnchorOnBarriers.
                     ItemKind::FloorButton | ItemKind::PedestalButton if d == n.opposite() => {
@@ -411,6 +433,19 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                     _ => continue,
                 };
                 flags.pair(it, panel, rule);
+            }
+        }
+    }
+
+    // Glass and grating on the same face: the game flagged 20 of 20 such panels (2026-10-22).
+    // Two panels of one kind there are fine (44 passed).
+    for (i, a) in level.barriers.iter().enumerate() {
+        let faces: HashSet<(Cell, Dir)> = a.faces.iter().map(|&f| face_key(f)).collect();
+        for b in level.barriers[i + 1..].iter().filter(|b| b.kind != a.kind) {
+            if b.faces.iter().any(|&f| faces.contains(&face_key(f))) {
+                if let (Some(pa), Some(pb)) = (level.item(a.item), level.item(b.item)) {
+                    flags.pair(pa, pb, "panels-overlap");
+                }
             }
         }
     }
@@ -482,23 +517,38 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
         let Some(field) = level.item(h.item) else { continue };
         let (Some(&(_, f)), Some(n)) = (h.faces.first(), field.normal) else { continue };
         let swept: HashSet<Cell> = h.faces.iter().map(|&(c, _)| c).collect();
+        // Where the mounting wall has a gap, the editor's field also runs back through it, to
+        // the next wall. In-game checks of 2026-10-22 flagged the items there as in a field:
+        // stairs 24 of 24, faith plates 12/12, floor buttons 11/11, panels, pistons, funnels
+        // and doors 22/26; not turrets, cubes, plate targets or pedestals beside it (0 of 71).
+        let mut reach = swept.clone();
+        for &c in swept.iter().filter(|&&c| !swept.contains(&step(c, n.opposite()))) {
+            let mut b = step(c, n.opposite());
+            while level.in_interior(b) && !level.solid(b) {
+                reach.insert(b);
+                b = step(b, n.opposite());
+            }
+        }
         for it in &level.items {
-            if swept.contains(&it.cell) && hit_by_field(it, f) {
+            if reach.contains(&it.cell) && hit_by_field(it, f) {
                 flags.pair(it, field, "in-field");
             }
         }
         // Stairs take two cells: the game flagged 48 of 48 with only the second in a field.
         for s in &level.stairs {
             let Some(st) = level.item(s.item) else { continue };
-            if swept.contains(&step(s.cell, s.dir)) {
+            if reach.contains(&step(s.cell, s.dir)) {
                 flags.pair(st, field, "in-field");
             }
         }
-        // Glass across the field's path (grating mostly lets it through; not modelled).
+        // Glass across the field's path, also behind a gap in its wall (7 of 7 flagged,
+        // 2026-10-22), or between two of its cells whichever way it lies (2 of 2). Grating
+        // mostly lets it through; not modelled.
         for b in level.barriers.iter().filter(|b| b.kind == BarrierKind::Glass) {
             let Some(panel) = level.item(b.item) else { continue };
             let blocks = b.faces.iter().any(|&(c, d)| {
-                (d == n || d == n.opposite()) && (swept.contains(&c) || swept.contains(&step(c, d)))
+                let (here, there) = (reach.contains(&c), reach.contains(&step(c, d)));
+                ((d == n || d == n.opposite()) && (here || there)) || (here && there)
             });
             if blocks {
                 flags.pair(panel, field, "glass-across-field");
@@ -517,15 +567,8 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
             // fizzler and a laser field stacked in one plane are a common Workshop trick
             // (120 levels; the game passed the pair it saw), and fields in different
             // planes of the same cells don't touch.
-            let plane = |&(c, d): &(Cell, Dir)| {
-                if d.is_positive() {
-                    (c, d)
-                } else {
-                    (step(c, d), d.opposite())
-                }
-            };
-            let planes: HashSet<(Cell, Dir)> = h.faces.iter().map(plane).collect();
-            let same_plane = h2.faces.iter().any(|x| planes.contains(&plane(x)));
+            let planes: HashSet<(Cell, Dir)> = h.faces.iter().map(|&f| face_key(f)).collect();
+            let same_plane = h2.faces.iter().any(|&f| planes.contains(&face_key(f)));
             let collide = if parallel {
                 h.kind == h2.kind && same_plane
             } else {
@@ -572,13 +615,45 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
         }
     }
 
+    // A field mounted on the voxel a faith plate is sunk into: 16 of 18 flagged (2026-10-22).
+    // Only the field's first cell counts (its others: 3 of 7).
+    for f in level
+        .items
+        .iter()
+        .filter(|i| matches!(i.kind, ItemKind::Fizzler | ItemKind::LaserField))
+    {
+        let Some(n) = f.normal else { continue };
+        let mount = step(f.cell, n.opposite());
+        for p in level.of_kind(&ItemKind::FaithPlate) {
+            if p.normal.is_some_and(|m| step(p.cell, m.opposite()) == mount) {
+                flags.pair(f, p, "embedded-overlap");
+            }
+        }
+    }
+
     // Two buttons in one cell (13 of 13 flagged), or a cube and a paint dropper (16 of 16),
-    // 2026-10-20. Not a door and a button: the game flagged 28 of 108.
+    // 2026-10-20. Not a door and a button: the game flagged 28 of 108. In-game checks of
+    // 2026-10-22 add: a turret on a floor button (27 of 27; pedestals 0 of 32) or on a laser
+    // relay on the same surface (6 of 6), a pedestal button whose column stands against an
+    // exit door (9 of 9; across the door 1 of 15), a loose cube on a floor button (8 of 8; a
+    // dropper's cube there is fine).
     for (i, a) in level.items.iter().enumerate() {
         for b in &level.items[i + 1..] {
+            if a.cell != b.cell {
+                continue;
+            }
             let button = |x: &PlacedItem| matches!(x.kind, ItemKind::FloorButton | ItemKind::PedestalButton);
             let dropper = |x: &PlacedItem| matches!(x.kind, ItemKind::CubeDropper | ItemKind::PaintDropper);
-            if a.cell == b.cell && ((button(a) && button(b)) || (dropper(a) && dropper(b))) {
+            let collide = |a: &PlacedItem, b: &PlacedItem| match (&a.kind, &b.kind) {
+                (ItemKind::Turret, ItemKind::FloorButton) => true,
+                (ItemKind::Turret, ItemKind::LaserRelay) => a.normal == b.normal,
+                (ItemKind::PedestalButton, ItemKind::ExitDoor) => {
+                    b.normal.is_some_and(|n| pedestal_side(a) == Some(n.opposite()))
+                }
+                (ItemKind::Cube, ItemKind::FloorButton) => level.loose_cube(a.index),
+                _ => false,
+            };
+            if (button(a) && button(b)) || (dropper(a) && dropper(b)) || collide(a, b) || collide(b, a) {
                 flags.pair(a, b, "shared-cell");
             }
         }

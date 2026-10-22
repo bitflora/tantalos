@@ -50,7 +50,10 @@ DETAILS = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDeta
 # Workshop tags of non-Puzzle-Maker maps (every Puzzle Maker item has tokens now).
 EXCLUDED_TAGS = ["Cooperative", "Custom Visuals", "Custom Story"]
 PUZZLE_MAKER_FILE = re.compile(r"mymaps/\d+\.bsp")
-UA = {"User-Agent": "glados-workshop-fetch/1 (research; low rate)"}
+# Steam's CDN throttles custom/script user agents by answering a range request with 206 and an
+# empty body (IncompleteRead), which used to leave thousands of maps as "bytes 0+1036" errors.
+# The Steam client UA gets the same public bytes reliably; keep the request rate low instead.
+UA = {"User-Agent": "Valve/Steam HTTP Client 1.0", "Accept-Encoding": "identity", "Connection": "close"}
 
 
 def fetch_url(url, data=None, headers=None, timeout=60):
@@ -74,7 +77,9 @@ def retrying(fn, tries=4, what="request"):
 def get_range(url, start, length):
     """Bytes [start, start + length) of url. Steam's CDN sometimes answers a range request with
     the right status and length but the wrong bytes (zeros, or another part of the file), so a
-    range only counts once two responses agree."""
+    range only counts once two responses agree. Empty 206s are common and cheap to retry, so
+    retry them immediately; a range that keeps failing is left for the next `download` pass
+    rather than spending minutes in backoff on the whole map."""
     def once():
         status, body = fetch_url(url, headers={"Range": f"bytes={start}-{start + length - 1}"})
         if status == 200:  # range ignored: the whole file
@@ -83,12 +88,19 @@ def get_range(url, start, length):
             raise ValueError(f"got {len(body)} of {length} bytes")
         return body
     seen = []
-    for _ in range(6):
-        body = retrying(once, what=f"bytes {start}+{length}")
+    for attempt in range(12):
+        try:
+            body = once()
+        except (ValueError, http.client.HTTPException):
+            time.sleep(0.05)  # empty/short body: transient, try again straight away
+            continue
+        except (urllib.error.URLError, OSError):
+            time.sleep(min(0.25 * (attempt + 1), 2.0))
+            continue
         if body in seen:
             return body
         seen.append(body)
-    raise IOError(f"bytes {start}+{length}: the CDN keeps returning different data")
+    raise IOError(f"bytes {start}+{length}: the CDN kept returning bad data")
 
 
 # ---- list ----
@@ -159,17 +171,18 @@ def cmd_list(a):
 
 # ---- download ----
 
-def fetch_one(item, bsp_dir, tries=4):
+def fetch_one(item, bsp_dir, tries=2):
     """Fetch, retrying the whole map when its data doesn't check out. While a CDN edge is still
     pulling a big file from Steam's origin it can serve the same wrong bytes (often zeros) to
-    every request, so agreement between responses isn't enough; waiting usually fixes it."""
+    every request, so agreement between responses isn't enough; waiting usually fixes it. Keep
+    this short: a map that still fails is logged and picked up by a later --retry-errors pass."""
     for attempt in range(tries):
         try:
             return fetch_once(item, bsp_dir)
         except BspError:
             if attempt == tries - 1:
                 raise
-            time.sleep(15 * (attempt + 1))
+            time.sleep(5)
 
 
 def fetch_once(item, bsp_dir):

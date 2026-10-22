@@ -18,16 +18,18 @@ order, with nothing to remember:
      launches the game itself, unless the game is already running (someone playing): then it
      is skipped, and `status` says INCOMPLETE until `run.py ingame NAME` redoes it.
   4. train best.pt away from every level Portal 2 has rejected (data/ingame/invalid.jsonl, x5,
-     labelled invalid) for 15 minutes into runs/NAME/away, evaluate that and check it in Portal
-     2 too. It is the final model unless its EVAL solvable share is over 3 points lower (then
-     away/WORSE is written and best.pt stays final).
+     labelled invalid) and every level a play-tester found unsolvable though our solver passed
+     it (data/ingame/human-unsolvable.jsonl, x5, labelled unsolvable) for 15 minutes into
+     runs/NAME/away, evaluate that and check it in Portal 2 too. It is the final model unless
+     its EVAL solvable share is over 3 points lower (then away/WORSE is written and best.pt
+     stays final).
   5. pick 5 levels from the final model for play-testing (pick.py), checked in Portal 2 too,
      and copy them into the Puzzle Maker folder as glados-NAME-NNNNN
   6. record the run (and NAME/away) in train/runs.csv
 Everything lands in runs/NAME: status.json (what it's doing now), run.log (each phase),
 train.log, evaluate.log, ingame.log, pick.log, eval/report.md.
 
-Settings: data/v5 (all levels-*.jsonl: generated, Workshop, mutants) unless --data; block 1024, batch 16. A fresh run uses
+Settings: data/v5b (all levels-*.jsonl: generated, Workshop, mutants; data/v5 cleaned with the 2026-10-20 editor rules) unless --data; block 1024, batch 16. A fresh run uses
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
 in runs.csv did. Anything after `--` goes to train.py as is.
 
@@ -187,7 +189,7 @@ def start(a):
         sys.exit(f"{PLANS.relative_to(ROOT).as_posix()} is missing: a solve run needs plan data. Make it with "
                  "train/plans.py first (CPU-heavy, hours; not while a run is going). No run started")
     data = []
-    for pattern in a.data or ([str(PLANS)] if solve else ["data/v5/levels-*.jsonl"]):
+    for pattern in a.data or ([str(PLANS)] if solve else ["data/v5b/levels-*.jsonl"]):
         hits = sorted(glob.glob(str(ROOT / pattern))) or sorted(glob.glob(pattern))
         if not hits:
             sys.exit(f"--data {pattern}: no such file")
@@ -270,6 +272,7 @@ STEPS = ("training", "evaluating", "ingame", "away", "away-ingame", "picking")
 SOLVE_STEPS = ("training", "evaluating")  # a solver-net run's
 PLANS = ROOT / "data" / "plans" / "train.jsonl"  # its training data (train/plans.py)
 INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
+HUMAN = ROOT / "data" / "ingame" / "human-unsolvable.jsonl"  # passed our solver, unsolvable in play
 AWAY_MINUTES, AWAY_REPEAT, AWAY_WORSE = 15, 5, 0.03  # as runs/v5-away-invalid
 QUICK_LR = ("1e-4", "1e-5", "100")  # --quick: 30-minute warm starts at 1e-4 matched; 2e-4 diverged
 QUICK_WORSE = {"levels": 0.03, "solve": 0.05}  # --quick's guard against its parent
@@ -316,10 +319,11 @@ def away_train(d, s):
     """train.py arguments for training d's best.pt away from the game-rejected levels."""
     name = name_of(d)
     return [
-        "train/train.py", "--data", *s["data"], *[str(INVALID)] * AWAY_REPEAT, "--vocab", s["vocab"],
+        "train/train.py", "--data", *s["data"], *[str(f) for f in (INVALID, HUMAN) if f.exists()] * AWAY_REPEAT,
+        "--vocab", s["vocab"],
         "--out", str(d / "away"), "--init", str(d / "best.pt"), "--block", "1024", "--batch", "16",
         "--eval-every", "1000", "--score-n", "64", "--lr", "2e-4", "--min-lr", "2e-5", "--warmup", "200",
-        "--note", f"{name} trained away from the levels Portal 2 rejected ({AWAY_MINUTES} min, x{AWAY_REPEAT})",
+        "--note", f"{name} trained away from the levels Portal 2 rejected or play-testers couldn't solve ({AWAY_MINUTES} min, x{AWAY_REPEAT})",
         *s.get("extra", []),
     ]
 
@@ -697,7 +701,7 @@ def main():
     p.add_argument("--task", choices=("levels", "solve"), default="levels",
                    help="levels: the level-writing net; solve: the solver net (needs data/plans)")
     p.add_argument("--data", nargs="+", default=None,
-                   help="default: data/v5/levels-*.jsonl, or data/plans/train.jsonl for --task solve")
+                   help="default: data/v5b/levels-*.jsonl, or data/plans/train.jsonl for --task solve")
     p.add_argument("--vocab", default=None, help="default: vocab.txt beside the first data file")
     p.add_argument("--no-ingame", action="store_true",
                    help="skip the Portal 2 checks. ONLY if the user says the game mustn't be launched")

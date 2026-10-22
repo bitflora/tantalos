@@ -9,7 +9,7 @@ Use `train/run.py` for every training run. Don't call train.py, evaluate.py, ing
 pick.py, retrain.sh or loop.sh yourself, and don't change their settings, unless the user asks
 you to. `run.py start` already does every step of a run, in order: build `glados.exe`, train,
 evaluate, check the levels in Portal 2's own editor, train 15 minutes away from every level
-the game has rejected (into `runs/NAME/away`; evaluated and game-checked too, and the final
+the game has rejected or a play-tester found unsolvable (`data/ingame/human-unsolvable.jsonl`) (into `runs/NAME/away`; evaluated and game-checked too, and the final
 model unless it scores over 3 points lower), pick 5 game-checked levels from the final model
 for play-testing (copied into the Puzzle Maker folder as `glados-NAME-NNNNN`), record in
 `train/runs.csv`. You don't run any of those steps yourself. `--from NAME` continues that
@@ -35,16 +35,17 @@ A training run is exactly these steps:
 .venv/Scripts/python train/run.py note NAME "WHAT IT SHOWED"
 ```
 
-- Defaults (data/v5, learning rates, sizes) are already right: add no other options unless
+- Defaults (data/v5b, learning rates, sizes) are already right: add no other options unless
   the user names them. Anything after `--` goes to train.py. `--no-ingame` skips the Portal 2
   steps: use it only if the user says not to launch the game.
 - **Warm-start by default:** unless the user says otherwise (or names a different `--from`),
   continue the most recently trained net of the same task: pass the final model of the newest
   completed run as `--from` (find it with `list`). Start a run from scratch only when the user
-  asks for a fresh model. **Next fresh run (user's request, 2026-10-20):** add `-- --layers 10`
-  (10 layers instead of 6, same width) and say so in `--note`, then remove this sentence; it is
-  also the first fresh run with QK-norm, so compare it with v5-fresh-10h-c. Note the known risk: recent warm starts have diverged under the warm
+  asks for a fresh model. Note the known risk: recent warm starts have diverged under the warm
   rates (lr 2e-4) and finished well below their init, so report that if it happens again.
+- A 10-layer model doesn't fit at batch 16 on the 4 GB card: add `--batch 8 --accum 2` (the same
+  effective batch) to any `--layers 10` run. Measured 2026-10-20, when v5-fresh-10h-d ran out of
+  memory on its first step.
 - The Portal 2 steps launch the game themselves (in the background, no focus needed) and never
   touch a game that is already running.
 - Name runs short and dated by topic, e.g. `v5-fresh-2h`, `v5-cont-1h`. The name can't exist yet.

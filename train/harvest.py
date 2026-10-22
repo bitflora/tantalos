@@ -17,7 +17,7 @@ and a new source token would change the vocabulary and break warm starts.
 To train on them, pass them with the usual data:
 
     .venv/Scripts/python train/run.py start NAME --hours H --from RUN \\
-        --data "data/v5/levels-*.jsonl" data/harvest/RUN.jsonl --note "..."
+        --data "data/v5b/levels-*.jsonl" data/harvest/RUN.jsonl --note "..."
 
 Put earlier harvests in `--data` here so later rounds only keep levels new to all of them.
 """
@@ -97,7 +97,7 @@ def main():
     ap.add_argument("checkpoint")
     ap.add_argument("--n", type=int, default=1024, help="levels to sample")
     ap.add_argument("--cond", default=SOLVABLE, help="condition tokens, space separated")
-    ap.add_argument("--data", nargs="+", default=["data/v5/levels-*.jsonl"],
+    ap.add_argument("--data", nargs="+", default=["data/v5b/levels-*.jsonl"],
                     help="levels the harvest must be new to (globs allowed)")
     ap.add_argument("--max-similarity", type=float, default=0.9,
                     help="drop levels this close (Jaccard) to a same-size --data level")
