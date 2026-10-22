@@ -438,3 +438,40 @@ fn workshop_tricks_the_editor_allows() {
     let p = rules("turret 3 2 1 0 stairs 3 2 1 +y off");
     assert!(p.iter().any(|m| m.contains("shared-cell")), "{p:?}");
 }
+
+#[test]
+fn a_reflection_cube_can_aim_at_an_angle() {
+    // Workshop 3660480385 "EZ": one cube in front of the emitter, turned so the beam crosses
+    // both floor relays on its way to the catcher on the far wall; only an angled aim does it.
+    let tokens = "size 9 8 4 open 1 0 0 1 7 0 0 2 0 6 7 3 7 2 0 8 3 0 7 4 0 7 4 0 7 4 3 7 5 3 \
+        white -x 0 7 0 6 7 0 white +y 1 7 0 1 7 0 entry 1 0 0 +y exit 6 7 0 -y \
+        glass 1 7 0 1 7 0 -x +z dropper 2 5 3 reflection laser 8 3 0 -x center on \
+        catcher 0 7 0 -y center > exit relay 3 6 0 +z center > exit relay 6 4 0 +z center > exit";
+    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    let plain = Model::new(&level, Mode::Conservative).unwrap();
+    assert!(!matches!(plain.solve(DEFAULT_MAX_STATES).verdict, glados::solver::Verdict::Solved(_)));
+    let judged = judge(&level, DEFAULT_MAX_STATES).unwrap();
+    assert!(matches!(judged.judgement, Judgement::Solvable(_)));
+    assert!(judged.conservative.beams.angled);
+}
+
+#[test]
+fn an_emitter_on_a_white_wall_still_fires_into_portals() {
+    // Workshop 68540796 "laser field jumping": the emitter's wall is white, so a portal there
+    // would send out the same beam. The emitter's own beam must still count as going into the
+    // portal at its far end (it once didn't), up to the catcher that opens the exit.
+    let tokens = "size 6 10 6 open 0 0 0 4 3 3 0 4 0 1 6 5 3 4 0 4 6 5 2 5 0 4 6 5 5 2 2 5 3 2 2 4 2 4 6 5 0 1 4 4 8 4 1 9 4 3 9 5 0 3 5 4 9 5 white +x 4 0 0 4 4 5 1 4 0 5 4 5 4 6 0 5 9 0 4 5 2 5 9 5 white -x 0 3 0 0 9 5 3 4 0 5 4 5 0 0 3 5 8 5 white +y 2 3 0 5 5 1 1 9 4 5 9 5 black -y 0 7 0 5 9 5 5 2 2 5 9 5 1 1 4 5 9 4 white +z 0 2 4 5 8 4 white -z 0 0 0 4 4 3 entry 2 0 0 +y exit 2 9 4 -y laserfield 1 9 4 +x -z 1 on laser 0 6 0 +x center on catcher 0 8 4 -y center > exit > field 0 plate 2 1 0 +z 2 4 2 +z plate 2 4 2 +z 2 9 4 +z";
+    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    let judged = judge(&level, DEFAULT_MAX_STATES).unwrap();
+    assert!(matches!(judged.judgement, Judgement::Solvable(_)));
+}
+
+#[test]
+fn a_reflection_cube_can_sit_on_a_floor_emitter() {
+    // Workshop 68601881 "Easy test": the laser fires up out of the floor; a cube set on it turns
+    // the beam along a diagonal through the relays.
+    let tokens = "size 13 21 25 open 0 9 1 12 12 20 0 0 21 1 19 24 2 0 21 4 0 24 6 0 21 6 2 24 8 0 21 12 0 24 11 1 21 12 19 24 3 2 21 3 19 24 4 2 21 9 2 24 9 3 21 9 4 24 5 4 21 7 19 24 8 6 21 12 19 24 2 13 21 12 19 24 10 20 24 11 20 24 goo 0 9 0 12 12 0 white +x 12 13 21 12 14 21 white +y 9 19 21 10 20 21 entry 6 0 21 +y exit 11 19 21 -y laserfield 0 9 1 +x -z 1 on laserfield 0 10 1 +x -z 1 on laserfield 0 11 1 +x -z 1 on laserfield 0 12 1 +x +z 1 on dropper 1 19 24 reflection pedestal 0 19 21 inf > dropper 0 turret 9 4 21 2 laser 4 14 21 +z center on relay 10 16 21 +z center > exit relay 6 16 21 +z center > exit relay 8 18 21 +z center > exit plate 3 8 21 +z 3 13 21 +z";
+    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    let judged = judge(&level, DEFAULT_MAX_STATES).unwrap();
+    assert!(matches!(judged.judgement, Judgement::Solvable(_)));
+}

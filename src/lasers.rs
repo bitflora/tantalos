@@ -14,6 +14,15 @@
 //!   player looks). Such places are "spots" (cell and direction); a cube anywhere else in a
 //!   region is out of every beam. Only spots that can lead somewhere useful (a catcher, relay,
 //!   turret or portal, perhaps through more spots) are kept.
+//! - Angled beams: a cube can also be set down anywhere along a beam crossing its cell, turned
+//!   to aim at a receiver, turret or portal surface on the same level (`aim_targets`, from
+//!   three points along the beam). The beam out of it runs at that angle through the grid
+//!   (`Tracer::trace_line`): it powers a floor relay or hits a turret passing within
+//!   `NEAR_RELAY` / `NEAR_TURRET` of the cell's centre, a wall catcher landing on its face
+//!   within `NEAR_CATCHER` of the centre and `CATCHER_CONE` of head on, and crosses a spot cell
+//!   anywhere. Such a spot belongs to the beam it sits on (`Spot::on`); another beam reaching
+//!   the cube stops there. Angled spots are a sample of the angles a player can set, so
+//!   dropping some (`MAX_ANGLED`) doesn't make the model incomplete.
 //! - A beam that ends at a face with a portal comes out of the other portal, along its
 //!   normal. A beam coming out of a portal and ending at the other one just loops.
 //! - Beams don't stop the player or cubes. (In-game a beam burns and pushes back a player who
@@ -27,6 +36,18 @@ use crate::portals::Face;
 
 /// Most spots kept: each is a place a cube can be, so they multiply states.
 pub const MAX_SPOTS: usize = 48;
+/// Most angled spots kept, besides those.
+pub const MAX_ANGLED: usize = 32;
+/// How close (voxels) an angled beam must pass a floor relay's centre to power it.
+const NEAR_RELAY: f64 = 0.3;
+/// How close it must pass a turret's centre to hit it.
+const NEAR_TURRET: f64 = 0.35;
+/// How close to the centre of a catcher's face it must land.
+const NEAR_CATCHER: f64 = 0.4;
+/// Most degrees off head on a catcher takes a beam.
+const CATCHER_CONE: f64 = 70.0;
+/// Shortest stretch (voxels) of a beam in a cell that a cube there can be set down on.
+const MIN_SEG: f64 = 0.2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Event {
@@ -51,10 +72,20 @@ pub struct Ray {
 pub struct Spot {
     /// Index into `Beams::spot_cells`.
     pub cell: usize,
+    /// The way it faces (an angled spot: the nearest axis, for setting it down).
     pub dir: Dir,
     /// The beam out of a cube here.
     pub ray: usize,
+    /// An angled spot: the beam (index into `Beams::rays`) the cube sits on, which is the
+    /// only one it redirects.
+    pub on: Option<usize>,
+    /// An angled spot: where the cube sits (x, y in voxels) and its yaw in degrees (0 = +x).
+    pub aim: Option<([f64; 2], f64)>,
 }
+
+/// A beam's stretch through a spot cell: (spot cell, entry point, exit point), x and y in
+/// voxels.
+type Seg = (usize, [f64; 2], [f64; 2]);
 
 #[derive(Clone, Debug, Default)]
 pub struct Beams {
@@ -72,6 +103,10 @@ pub struct Beams {
     pub ends: HashSet<Face>,
     /// Spots had to be dropped (`MAX_SPOTS`).
     pub incomplete: bool,
+    /// Built with angled spots.
+    pub angled: bool,
+    /// The level has a reflection cube and an emitter, so angled spots could help.
+    pub could_angle: bool,
 }
 
 impl Beams {
@@ -79,9 +114,11 @@ impl Beams {
         self.emitters.is_empty()
     }
 
-    /// The beams of `level`. `reflectors`: how many reflection cubes it has.
-    pub fn build(level: &Level, reflectors: usize) -> Beams {
+    /// The beams of `level`. `reflectors`: how many reflection cubes it has; `angled`: also
+    /// angled spots.
+    pub fn build(level: &Level, reflectors: usize, angled_spots: bool) -> Beams {
         let mut b = Beams {
+            angled: angled_spots,
             receivers: level
                 .lasers
                 .iter()
@@ -98,6 +135,7 @@ impl Beams {
         if emitters.is_empty() {
             return b;
         }
+        b.could_angle = reflectors > 0;
         // Spot cells: floors items don't take.
         let taken: HashSet<Cell> = level
             .items
@@ -110,43 +148,119 @@ impl Beams {
                         | ItemKind::EntryDoor
                         | ItemKind::ExitDoor
                         | ItemKind::Turret
-                        | ItemKind::LaserCatcher
-                        | ItemKind::LaserRelay
-                        | ItemKind::LaserEmitter
                         | ItemKind::FaithPlate
                         | ItemKind::Stairs
                         | ItemKind::Piston
                 )
             })
             .map(|i| i.cell)
+            // With angled spots, laser items take the floor only when they stand on it: one on
+            // a wall leaves room for a cube in front of it (aimed from beside the emitter), and
+            // a cube can sit on an emitter in the floor, turning its beam sideways.
+            .chain(
+                level
+                    .lasers
+                    .iter()
+                    .filter(|l| {
+                        !angled_spots || (l.normal == Dir::PosZ && l.kind != LaserKind::Emitter)
+                    })
+                    .map(|l| l.cell),
+            )
             .collect();
         let mut tracer = Tracer {
             level,
             taken,
             spot_id: HashMap::new(),
             spot_cells: Vec::new(),
+            on_emitters: angled_spots,
         };
         // Every ray we might need, breadth first by how many cubes redirect into it.
         let mut rays: Vec<Ray> = Vec::new();
+        let mut segs: Vec<Vec<Seg>> = Vec::new();
         let mut ray_id: HashMap<(Cell, Dir, bool), usize> = HashMap::new();
         let mut depth: Vec<usize> = Vec::new();
-        let mut get = |tracer: &mut Tracer, rays: &mut Vec<Ray>, depth: &mut Vec<usize>, c, d, own, dp| {
+        let mut get = |tracer: &mut Tracer,
+                       rays: &mut Vec<Ray>,
+                       segs: &mut Vec<Vec<Seg>>,
+                       depth: &mut Vec<usize>,
+                       c: Cell,
+                       d: Dir,
+                       own,
+                       dp| {
             *ray_id.entry((c, d, own)).or_insert_with(|| {
-                rays.push(tracer.trace(c, d, own));
+                let ray = tracer.trace(c, d, own);
+                // Straight beams run through cell centres.
+                let v = d.vector();
+                let h = [0.5 * v[0] as f64, 0.5 * v[1] as f64];
+                segs.push(
+                    ray.events
+                        .iter()
+                        .filter_map(|e| match *e {
+                            Event::Cube(sc) => {
+                                let x = tracer.spot_cells[sc];
+                                let m = [x[0] as f64 + 0.5, x[1] as f64 + 0.5];
+                                Some((sc, [m[0] - h[0], m[1] - h[1]], [m[0] + h[0], m[1] + h[1]]))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                );
+                rays.push(ray);
                 depth.push(dp);
                 rays.len() - 1
             })
         };
         for e in &emitters {
-            let r = get(&mut tracer, &mut rays, &mut depth, e.cell, e.normal, true, 0);
+            let r = get(&mut tracer, &mut rays, &mut segs, &mut depth, e.cell, e.normal, true, 0);
             b.emitters.push((e.item, r));
         }
         // Candidate spots: (cell, dir) -> ray, found from rays at depth below `reflectors`.
         let mut candidates: Vec<(usize, Dir, usize)> = Vec::new();
+        // Angled ones: (spot cell, nearest facing, ray, ray it sits on, where, yaw).
+        let mut angled: Vec<(usize, Dir, usize, usize, [f64; 2], f64)> = Vec::new();
+        let mut angled_id: HashSet<(usize, usize, Ray)> = HashSet::new();
+        let targets = aim_targets(level);
         let mut seen_cells: HashSet<usize> = HashSet::new();
         let mut i = 0;
         while i < rays.len() {
             if depth[i] < reflectors && rays.len() < 4096 {
+                let on_beam = if angled_spots { segs[i].clone() } else { Vec::new() };
+                for (sc, p0, p1) in on_beam {
+                    let cell = tracer.spot_cells[sc];
+                    for f in [0.25, 0.5, 0.75] {
+                        let o = [p0[0] + f * (p1[0] - p0[0]), p0[1] + f * (p1[1] - p0[1])];
+                        for &(tz, t, want) in &targets {
+                            let v = [t[0] - o[0], t[1] - o[1]];
+                            let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                            if tz != cell[2] || n < 0.5 || rays.len() >= 4096 {
+                                continue;
+                            }
+                            let v = [v[0] / n, v[1] / n];
+                            // Straight aims are the plain spots.
+                            if v[0].abs() > 0.999 || v[1].abs() > 0.999 {
+                                continue;
+                            }
+                            let (ray, ray_segs) = tracer.trace_line(o, cell, v);
+                            // Only aims that get where they were aimed.
+                            let got = match want {
+                                Want::Receiver(k) => ray.events.contains(&Event::Receiver(k)),
+                                Want::Turret(t) => ray.events.contains(&Event::Turret(t)),
+                                Want::Face(f) => ray.end == Some(f),
+                            };
+                            if !got {
+                                continue;
+                            }
+                            if !angled_id.insert((i, sc, ray.clone())) {
+                                continue;
+                            }
+                            rays.push(ray);
+                            segs.push(ray_segs);
+                            depth.push(depth[i] + 1);
+                            let yaw = v[1].atan2(v[0]).to_degrees();
+                            angled.push((sc, nearest_dir(v), rays.len() - 1, i, o, yaw));
+                        }
+                    }
+                }
                 for ev in rays[i].events.clone() {
                     let Event::Cube(sc) = ev else { continue };
                     if !seen_cells.insert(sc) {
@@ -164,7 +278,8 @@ impl Beams {
                         if !open || !reach {
                             continue;
                         }
-                        let r = get(&mut tracer, &mut rays, &mut depth, cell, d, false, next);
+                        let r =
+                            get(&mut tracer, &mut rays, &mut segs, &mut depth, cell, d, false, next);
                         candidates.push((sc, d, r));
                     }
                 }
@@ -176,7 +291,8 @@ impl Beams {
         let mut exits: HashMap<Face, usize> = HashMap::new();
         if !ends.is_empty() {
             for f in level.portal_surfaces() {
-                let r = get(&mut tracer, &mut rays, &mut depth, f.0, f.1.opposite(), true, 1);
+                let r =
+                    get(&mut tracer, &mut rays, &mut segs, &mut depth, f.0, f.1.opposite(), true, 1);
                 exits.insert(f, r);
             }
         }
@@ -200,7 +316,8 @@ impl Beams {
                     changed = true;
                 }
             }
-            for &(sc, _, r) in &candidates {
+            let all = candidates.iter().map(|c| (c.0, c.2));
+            for (sc, r) in all.chain(angled.iter().map(|a| (a.0, a.2))) {
                 if useful_ray[r] && !useful_cell[sc] {
                     useful_cell[sc] = true;
                     changed = true;
@@ -219,7 +336,11 @@ impl Beams {
             keep.truncate(MAX_SPOTS);
             b.incomplete = true;
         }
-        let kept_cells: HashSet<usize> = keep.iter().map(|k| k.0).collect();
+        let mut keep_angled: Vec<_> = angled.into_iter().filter(|a| useful_ray[a.2]).collect();
+        keep_angled.sort_by_key(|a| (depth[a.2], a.2));
+        keep_angled.truncate(MAX_ANGLED);
+        let kept_cells: HashSet<usize> =
+            keep.iter().map(|k| k.0).chain(keep_angled.iter().map(|a| a.0)).collect();
         // Spot cells with no spot left don't stop beams.
         for ray in &mut rays {
             ray.events
@@ -228,13 +349,30 @@ impl Beams {
         b.spot_cells = tracer.spot_cells;
         b.spots = keep
             .into_iter()
-            .map(|(cell, dir, ray)| Spot { cell, dir, ray })
+            .map(|(cell, dir, ray)| Spot {
+                cell,
+                dir,
+                ray,
+                on: None,
+                aim: None,
+            })
+            .chain(keep_angled.into_iter().map(|(cell, dir, ray, on, o, yaw)| Spot {
+                cell,
+                dir,
+                ray,
+                on: Some(on),
+                aim: Some((o, yaw)),
+            }))
             .collect();
-        b.ends = rays
+        // Where beams from emitters and cubes end (a beam out of a portal ending at a white
+        // face just loops). Not "every ray but the portal ones": an emitter on a white wall
+        // fires the same ray a portal behind it would, and its end counts.
+        b.ends = b
+            .emitters
             .iter()
-            .enumerate()
-            .filter(|&(r, _)| !exits.values().any(|&x| x == r))
-            .filter_map(|(_, ray)| ray.end)
+            .map(|&(_, r)| r)
+            .chain(b.spots.iter().map(|s| s.ray))
+            .filter_map(|r| rays[r].end)
             .collect();
         b.exits = exits
             .into_iter()
@@ -245,11 +383,84 @@ impl Beams {
     }
 }
 
+/// What an angled cube aims at.
+#[derive(Clone, Copy)]
+enum Want {
+    Receiver(usize),
+    Turret(usize),
+    Face(Face),
+}
+
+/// Points an angled cube can aim at, with their level and what they are: floor relays'
+/// centres, wall catchers' face centres, turrets, and the centres of white wall faces.
+fn aim_targets(level: &Level) -> Vec<(i32, [f64; 2], Want)> {
+    let centre = |c: Cell| [c[0] as f64 + 0.5, c[1] as f64 + 0.5];
+    let mut out = Vec::new();
+    let receivers = level.lasers.iter().filter(|l| l.kind != LaserKind::Emitter);
+    for (k, l) in receivers.enumerate() {
+        let horizontal = l.normal.axis() != 2;
+        match l.kind {
+            LaserKind::Relay if !horizontal => {
+                out.push((l.cell[2], centre(l.cell), Want::Receiver(k)))
+            }
+            LaserKind::Catcher if horizontal => {
+                let v = l.normal.vector();
+                let m = centre(l.cell);
+                let f = [m[0] - 0.5 * v[0] as f64, m[1] - 0.5 * v[1] as f64];
+                out.push((l.cell[2], f, Want::Receiver(k)));
+            }
+            _ => {}
+        }
+    }
+    for (t, tur) in level.turrets.iter().enumerate() {
+        out.push((tur.cell[2], centre(tur.cell), Want::Turret(t)));
+    }
+    for (c, d) in level.portal_surfaces() {
+        if d.axis() != 2 {
+            let v = d.vector();
+            let m = centre(c);
+            let f = [m[0] + 0.5 * v[0] as f64, m[1] + 0.5 * v[1] as f64];
+            out.push((c[2], f, Want::Face((c, d))));
+        }
+    }
+    out
+}
+
+/// The horizontal direction nearest to `v`.
+fn nearest_dir(v: [f64; 2]) -> Dir {
+    if v[0].abs() >= v[1].abs() {
+        if v[0] > 0.0 {
+            Dir::PosX
+        } else {
+            Dir::NegX
+        }
+    } else if v[1] > 0.0 {
+        Dir::PosY
+    } else {
+        Dir::NegY
+    }
+}
+
+/// Distance from `c` to the segment `a`-`b`.
+fn seg_dist(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let l2 = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if l2 == 0.0 {
+        0.0
+    } else {
+        (((c[0] - a[0]) * ab[0] + (c[1] - a[1]) * ab[1]) / l2).clamp(0.0, 1.0)
+    };
+    let p = [a[0] + t * ab[0], a[1] + t * ab[1]];
+    ((c[0] - p[0]).powi(2) + (c[1] - p[1]).powi(2)).sqrt()
+}
+
 struct Tracer<'a> {
     level: &'a Level,
     taken: HashSet<Cell>,
     spot_id: HashMap<Cell, usize>,
     spot_cells: Vec<Cell>,
+    /// A cube can sit on a floor emitter (its beam going up into the cube).
+    on_emitters: bool,
 }
 
 impl Tracer<'_> {
@@ -291,7 +502,8 @@ impl Tracer<'_> {
                 if let Some(t) = level.turrets.iter().position(|t| t.cell == cur) {
                     events.push(Event::Turret(t));
                 }
-                let restable = d != Dir::PosZ
+                let up_from_floor = own && cur == c && self.on_emitters;
+                let restable = (d != Dir::PosZ || up_from_floor)
                     && level.standable(cur)
                     && !self.taken.contains(&cur);
                 if restable {
@@ -311,5 +523,92 @@ impl Tracer<'_> {
             cur = n;
         }
         Ray { events, end: None }
+    }
+
+    /// The beam from point `o` (x, y in voxels) in cell `start` along the horizontal unit
+    /// vector `v`, at `start`'s level, and its stretches through spot cells. Things in `start`
+    /// itself don't count (it leaves a cube there).
+    fn trace_line(&mut self, o: [f64; 2], start: Cell, v: [f64; 2]) -> (Ray, Vec<Seg>) {
+        let level = self.level;
+        let (mut events, mut segs) = (Vec::new(), Vec::new());
+        let (mut cur, mut p) = (start, o);
+        let step_x = if v[0] > 0.0 { Dir::PosX } else { Dir::NegX };
+        let step_y = if v[1] > 0.0 { Dir::PosY } else { Dir::NegY };
+        let centre = |c: Cell| [c[0] as f64 + 0.5, c[1] as f64 + 0.5];
+        // Distance along the beam to the next cell edge across axis `a`.
+        let to_edge = |cur: Cell, p: [f64; 2], a: usize| {
+            if v[a] == 0.0 {
+                f64::INFINITY
+            } else {
+                let edge = cur[a] as f64 + if v[a] > 0.0 { 1.0 } else { 0.0 };
+                (edge - p[a]) / v[a]
+            }
+        };
+        for _ in 0..128 {
+            let (tx, ty) = (to_edge(cur, p, 0), to_edge(cur, p, 1));
+            let t = tx.min(ty).max(0.0);
+            let q = [p[0] + t * v[0], p[1] + t * v[1]];
+            let side = if tx <= ty { step_x } else { step_y };
+            if cur != start {
+                let near = seg_dist(p, q, centre(cur));
+                let receivers = level.lasers.iter().filter(|l| l.kind != LaserKind::Emitter);
+                for (k, l) in receivers.enumerate() {
+                    if l.cell != cur {
+                        continue;
+                    }
+                    let hit = match l.kind {
+                        LaserKind::Relay => l.normal.axis() == 2 && near < NEAR_RELAY,
+                        LaserKind::Catcher => {
+                            // It lands on the face behind the catcher.
+                            let n = l.normal.vector();
+                            let head_on = -(v[0] * n[0] as f64 + v[1] * n[1] as f64);
+                            let m = centre(cur);
+                            let f = [m[0] - 0.5 * n[0] as f64, m[1] - 0.5 * n[1] as f64];
+                            let off = ((q[0] - f[0]).powi(2) + (q[1] - f[1]).powi(2)).sqrt();
+                            l.normal.axis() != 2
+                                && side == l.normal.opposite()
+                                && head_on >= CATCHER_CONE.to_radians().cos()
+                                && off < NEAR_CATCHER
+                        }
+                        LaserKind::Emitter => false,
+                    };
+                    if hit {
+                        events.push(Event::Receiver(k));
+                        if l.kind == LaserKind::Catcher {
+                            return (Ray { events, end: None }, segs);
+                        }
+                    }
+                }
+                if near < NEAR_TURRET {
+                    if let Some(t) = level.turrets.iter().position(|t| t.cell == cur) {
+                        events.push(Event::Turret(t));
+                    }
+                }
+                let len = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+                if len >= MIN_SEG && level.standable(cur) && !self.taken.contains(&cur) {
+                    let id = *self.spot_id.entry(cur).or_insert_with(|| {
+                        self.spot_cells.push(cur);
+                        self.spot_cells.len() - 1
+                    });
+                    events.push(Event::Cube(id));
+                    segs.push((id, p, q));
+                }
+            }
+            // Through a corner the beam needs both cells beside it open.
+            let corner = (tx - ty).abs() < 1e-9;
+            let other = if side == step_x { step_y } else { step_x };
+            let n = step(cur, side);
+            if level.solid(n) || (corner && level.solid(step(cur, other))) {
+                let face = if level.solid(n) { side } else { other };
+                let end = level.portal_surface(cur, face).then_some((cur, face));
+                return (Ray { events, end }, segs);
+            }
+            cur = if corner { step(n, other) } else { n };
+            if level.solid(cur) {
+                return (Ray { events, end: None }, segs);
+            }
+            p = q;
+        }
+        (Ray { events, end: None }, segs)
     }
 }

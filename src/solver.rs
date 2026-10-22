@@ -664,11 +664,21 @@ pub struct Judged {
     pub liberal: Model,
 }
 
-/// Solves `level` in both modes.
+/// Solves `level` in both modes, with angled laser spots if the plain model doesn't solve it
+/// (as `dataset::label` does).
 pub fn judge(level: &Level, budget: usize) -> Result<Judged, Vec<Problem>> {
-    let conservative = Model::new(level, Mode::Conservative)?;
-    let liberal = Model::new(level, Mode::Liberal)?;
-    let judgement = match conservative.solve(budget).verdict {
+    let mut conservative = Model::new(level, Mode::Conservative)?;
+    let mut verdict = conservative.solve(budget).verdict;
+    if !matches!(verdict, Verdict::Solved(_)) && conservative.could_angle() {
+        conservative = Model::new_angled(level, Mode::Conservative)?;
+        verdict = conservative.solve(budget).verdict;
+    }
+    let liberal = if conservative.beams.angled {
+        Model::new_angled(level, Mode::Liberal)?
+    } else {
+        Model::new(level, Mode::Liberal)?
+    };
+    let judgement = match verdict {
         Verdict::Solved(plan) => Judgement::Solvable(plan),
         strict => match liberal.solve(budget).verdict {
             Verdict::Unsolvable if strict == Verdict::Unsolvable => Judgement::Unsolvable,
@@ -685,6 +695,22 @@ pub fn judge(level: &Level, budget: usize) -> Result<Judged, Vec<Problem>> {
 
 impl Model {
     pub fn new(level: &Level, mode: Mode) -> Result<Model, Vec<Problem>> {
+        Model::build(level, mode, false)
+    }
+
+    /// `new`, with angled spots for reflection cubes (`lasers`): a bigger search, for levels
+    /// the plain model doesn't solve.
+    pub fn new_angled(level: &Level, mode: Mode) -> Result<Model, Vec<Problem>> {
+        Model::build(level, mode, true)
+    }
+
+    /// Whether `new_angled` would differ: the level has a reflection cube and an emitter, and
+    /// this model has no angled spots.
+    pub fn could_angle(&self) -> bool {
+        self.beams.could_angle && !self.beams.angled
+    }
+
+    fn build(level: &Level, mode: Mode, angled: bool) -> Result<Model, Vec<Problem>> {
         let mut problems: Vec<Problem> = level
             .decode_problems
             .iter()
@@ -808,7 +834,7 @@ impl Model {
             .of_kind(&ItemKind::Cube)
             .filter(|c| c.cube_kind() == CubeKind::Reflection)
             .count();
-        let beams = Beams::build(level, reflectors);
+        let beams = Beams::build(level, reflectors, angled);
 
         // Switches: one per device bit that follows a wire, and per laser emitter.
         let mut switches: Vec<Switch> = Vec::new();
@@ -2001,13 +2027,20 @@ impl Model {
             for _ in 0..=8 {
                 let Some(ray) = next.take() else { break };
                 let r = &self.beams.rays[ray];
+                // A cube set down on another beam's line stops this one.
+                let mut stopped = false;
                 for ev in &r.events {
                     match *ev {
                         Event::Receiver(k) => lit |= 1 << k,
                         Event::Turret(t) => hit |= 1 << t,
                         Event::Cube(sc) => {
                             if let Some(k) = cube_at(sc) {
-                                next = Some(self.beams.spots[k].ray);
+                                let spot = &self.beams.spots[k];
+                                if spot.on.is_none_or(|on| on == ray) {
+                                    next = Some(spot.ray);
+                                } else {
+                                    stopped = true;
+                                }
                                 break;
                             }
                         }
@@ -2015,6 +2048,9 @@ impl Model {
                 }
                 if next.is_some() {
                     continue;
+                }
+                if stopped {
+                    break;
                 }
                 let Some(end) = r.end else { break };
                 let Some(&class) = self.beam_end_class.get(&end) else {

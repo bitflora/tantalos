@@ -148,10 +148,15 @@ pub fn label_with_plan(
     seed: u64,
     editor_rules: bool,
 ) -> (Label, Option<Result<String, String>>) {
-    let (label, plan) = label_full(puzzle, budget, seed, editor_rules, None);
+    let (label, plan, angled) = label_full(puzzle, budget, seed, editor_rules, None);
     let plan = plan.map(|plan| {
         let level = Level::from_puzzle(puzzle);
-        let model = Model::new(&level, Mode::Conservative).map_err(|p| format!("{p:?}"))?;
+        let model = if angled {
+            Model::new_angled(&level, Mode::Conservative)
+        } else {
+            Model::new(&level, Mode::Conservative)
+        }
+        .map_err(|p| format!("{p:?}"))?;
         crate::route::route_plan(&level, &model, &plan).map(|r| crate::plan::encode(&r))
     });
     (label, plan)
@@ -171,7 +176,7 @@ pub fn plan_only(
     if !problems.is_empty() {
         return Err(Label::Invalid(problems.join("; ")));
     }
-    let model = Model::new(&level, Mode::Conservative).map_err(|problems| {
+    let mut model = Model::new(&level, Mode::Conservative).map_err(|problems| {
         let (invalid, unsupported): (Vec<_>, Vec<_>) =
             problems.iter().partition(|p| matches!(p, Problem::Invalid(_)));
         let text = |ps: Vec<&Problem>| {
@@ -188,7 +193,12 @@ pub fn plan_only(
             Label::Invalid(text(invalid))
         }
     })?;
-    match model.solve(budget).verdict {
+    let mut verdict = model.solve(budget).verdict;
+    if !matches!(verdict, Verdict::Solved(_)) && model.could_angle() {
+        model = Model::new_angled(&level, Mode::Conservative).expect("same problems");
+        verdict = model.solve(budget).verdict;
+    }
+    match verdict {
         Verdict::Solved(plan) => Ok((
             plan.len(),
             crate::route::route_plan(&level, &model, &plan).map(|r| crate::plan::encode(&r)),
@@ -198,18 +208,19 @@ pub fn plan_only(
     }
 }
 
-/// `label_known`, with the conservative plan when the search found one.
+/// `label_known`, with the conservative plan when the search found one, and whether it took
+/// angled laser spots (`Model::new_angled`: tried only when the plain model doesn't solve it).
 fn label_full(
     puzzle: &Puzzle,
     budget: usize,
     seed: u64,
     editor_rules: bool,
     known: Option<usize>,
-) -> (Label, Option<Vec<Action>>) {
+) -> (Label, Option<Vec<Action>>, bool) {
     let level = Level::from_puzzle(puzzle);
     let problems = level.mount_problems_with(editor_rules);
     if !problems.is_empty() {
-        return (Label::Invalid(problems.join("; ")), None);
+        return (Label::Invalid(problems.join("; ")), None, false);
     }
     // `judge`, with the conservative search shared with the metrics, and the liberal model
     // built only when needed (both models have the same problems).
@@ -235,10 +246,15 @@ fn label_full(
             } else {
                 Label::Invalid(invalid.join("; "))
             };
-            return (label, None);
+            return (label, None, false);
         }
     };
-    let space = model.explore(budget);
+    let mut space = model.explore(budget);
+    if !matches!(space.verdict(), Verdict::Solved(_)) && model.could_angle() {
+        model = Model::new_angled(&level, Mode::Conservative).expect("same problems");
+        space = model.explore(budget);
+    }
+    let angled = model.beams.angled;
     let strict = match space.verdict() {
         Verdict::Solved(plan) => {
             let metrics = match measure(&mut model, &space, budget, seed) {
@@ -250,7 +266,7 @@ fn label_full(
                 needs_portals: !space.solvable_without_portals(),
                 metrics,
             };
-            return (label, Some(plan));
+            return (label, Some(plan), angled);
         }
         strict => strict,
     };
@@ -262,16 +278,21 @@ fn label_full(
             needs_portals: true,
             metrics: None,
         };
-        return (label, None);
+        return (label, None, angled);
     }
     drop(space);
-    let liberal = Model::new(&level, Mode::Liberal).expect("same problems as conservative");
+    let liberal = if angled {
+        Model::new_angled(&level, Mode::Liberal)
+    } else {
+        Model::new(&level, Mode::Liberal)
+    }
+    .expect("same problems as conservative");
     let label = match liberal.solve(budget).verdict {
         Verdict::Unsolvable if strict == Verdict::Unsolvable => Label::Unsolvable,
         Verdict::Solved(plan) => Label::Uncertain(Some(plan.len())),
         _ => Label::Uncertain(None),
     };
-    (label, None)
+    (label, None, angled)
 }
 
 pub fn json_str(s: &str) -> String {
