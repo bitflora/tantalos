@@ -151,9 +151,9 @@ pub struct FaceClass {
     pub turret: Option<usize>,
     /// Where this gel stream (index in `Level::gels`) lands: a portal here takes the gel.
     pub stream: Option<usize>,
-    /// Ceiling faces whose fall lands in this cell: gel coming out of a portal here paints
-    /// around it. Only set when a stream can be sent through a portal.
-    pub gel_cell: Option<Cell>,
+    /// Ceiling and (liberal) wall faces whose fall lands in these cells: gel coming out of a
+    /// portal here paints around them. Only set when a stream can be sent through a portal.
+    pub gel_cells: Vec<Cell>,
     /// Not white: only usable while this face (the solver's id, from `Extras::paintable`)
     /// has conversion gel on it.
     pub needs_paint: Option<usize>,
@@ -216,8 +216,11 @@ pub struct PanelFace {
 pub struct Extras {
     /// The floor face each gel stream lands on (index in `Level::gels`).
     pub streams: Vec<(Face, usize)>,
-    /// Split ceiling classes by where their fall lands, for gel coming out of them.
-    pub split_ceilings: bool,
+    /// Split classes by where gel coming out of them lands (one entry per face).
+    pub split_gel_exits: bool,
+    /// Per face, the floor cells gel coming out of a portal there can land on: below a ceiling
+    /// portal, or (liberal) in front of a wall portal.
+    pub gel_cells: HashMap<Face, Vec<Cell>>,
     /// Faces that aren't white but conversion gel may paint, with the id the solver knows
     /// each by.
     pub paintable: Vec<(Face, usize)>,
@@ -246,7 +249,7 @@ struct ClassKey {
     deployed: Option<(usize, Behavior)>,
     turret: Option<usize>,
     stream: Option<usize>,
-    gel_cell: Option<Cell>,
+    gel_cells: Vec<Cell>,
     needs_paint: Option<usize>,
     needs: Cond,
     ends: Vec<usize>,
@@ -347,15 +350,17 @@ impl Portals {
                 .then(|| level.turrets.iter().position(|t| t.cell == c))
                 .flatten();
             let stream = streams.get(&(c, d)).copied();
-            let gel_cell = (extras.split_ceilings && d == Dir::PosZ)
-                .then(|| level.fall(c))
-                .flatten();
+            let gel_cells = if extras.split_gel_exits {
+                extras.gel_cells.get(&(c, d)).cloned().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let key = ClassKey {
                 flat,
                 deployed,
                 turret,
                 stream,
-                gel_cell,
+                gel_cells,
                 needs_paint,
                 needs,
                 ends: extras.ends.get(&(c, d)).cloned().unwrap_or_default(),
@@ -421,7 +426,7 @@ impl Portals {
                     deployed_visible,
                     turret: key.turret,
                     stream: key.stream,
-                    gel_cell: key.gel_cell,
+                    gel_cells: key.gel_cells,
                     needs_paint: key.needs_paint,
                     needs: key.needs,
                     ends: key.ends,

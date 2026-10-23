@@ -176,7 +176,9 @@ identical results (checked state by state against the old code).
   the floor under it while the other is open (it falls through).
 - **Gel**: a pouring dropper paints where its stream lands after every action. With a portal
   on the floor under the stream and the other on a ceiling, the gel lands under the ceiling
-  portal instead. Splats without a dropper are painted from the start; water washes paint off.
+  portal instead. Liberal rules also spray gel out of a wall portal into the room; that is
+  modelled only where the spray lands on a turret's floor, so a portal there can drop it.
+  Splats without a dropper are painted from the start; water washes paint off.
   Droppers can be wired to buttons (they pour while the buttons are down). Conversion gel makes
   faces portalable; repulsion floors give bounces; a run of propulsion floor gives a leap.
 
@@ -265,9 +267,11 @@ risk; next steps are a style prior from real levels and in-game checks of the wi
   dropping a cube on it or opening a portal under it puts it out for good. A player in its
   sight is assumed dead (conservative) or able to run past (liberal).
 - Gel: how far paint spreads, bounce heights and reach, leap run-up and distance; gel through
-  a portal only lands from a ceiling portal. Generated gel copies the style map's one gel
-  (splat on the floor, dropper on the ceiling above, `CONNECTION_PAINT_DROPPER`); the export
-  type is a guess (set to the paint type), and splats without a dropper are unchecked.
+  a portal lands from a ceiling portal, and (liberal only) out of a wall portal up to two cells
+  into the room (one turret-floor case confirmed in the game, 2026-10-22). Generated gel copies
+  the style map's one gel (splat on the floor, dropper on the ceiling above,
+  `CONNECTION_PAINT_DROPPER`); the export type is a guess (set to the paint type), and splats
+  without a dropper are unchecked.
 - Goo floods every open cell reachable sideways or downward from a goo item. (The editor itself
   only takes a goo item on a floor; whether the game floods beyond the items is unchecked.)
 - A 1-voxel ledge needs a cube to climb; 2+ voxels can't be climbed; any drop is survivable.

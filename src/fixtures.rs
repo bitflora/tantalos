@@ -294,6 +294,20 @@ pub fn redirect_gel() -> Puzzle {
     b.build()
 }
 
+/// A turret on bare floor stands between the player and the exit. Conversion gel poured
+/// onto the floor can be sent out of a white wall portal; the spray paints the floor under
+/// the turret, so a second portal there drops it.
+pub fn wall_gel_turret() -> Puzzle {
+    let mut b = Builder::new("Wall gel turret", [8, 4, 5]);
+    b.carve([0, 0, 1], [7, 3, 4]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([7, 1, 1], Dir::NegX);
+    b.turret([5, 1, 1], 0); // looks -x, at the player
+    b.paint([5, 0, 1], [5, 0, 4], Dir::NegY, true);
+    b.gel_dropper([2, 2, 1], 2, true);
+    b.build()
+}
+
 /// `bounce_gel` with the repulsion gel already on the floor, and water pouring on it.
 pub fn washed_gel(water: bool) -> Puzzle {
     let mut b = Builder::new("Washed gel", [6, 3, 6]);
@@ -506,6 +520,7 @@ pub fn all() -> Vec<(&'static str, Puzzle)> {
         ("speed_gel", speed_gel()),
         ("conversion_gel", conversion_gel()),
         ("redirect_gel", redirect_gel()),
+        ("wall_gel_turret", wall_gel_turret()),
         ("washed_gel", washed_gel(true)),
         ("timed_field", timed_field(6)),
         ("sphere_button", sphere_button()),

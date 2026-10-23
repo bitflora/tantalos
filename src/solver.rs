@@ -1176,27 +1176,68 @@ impl Model {
                 })
             })
             .collect();
-        let mut cell_spots: HashMap<Cell, Vec<usize>> = HashMap::new();
-        if !redirectable.is_empty() {
-            for (c, d) in level.portal_surfaces() {
-                if d != Dir::PosZ {
-                    continue;
+        let portal_redirectable = redirectable
+            .iter()
+            .any(|&g| gels[g].kind == PaintKind::Portal);
+        // Where gel sprayed out of a wall portal can land on a turret: it leaves the face
+        // into the room and falls, so liberal rules let it reach a couple of cells in.
+        const WALL_GEL_REACH: i32 = 2;
+        fn turret_wall_exits(level: &Level, (c, d): Face) -> Vec<Cell> {
+            let mut out = Vec::new();
+            let mut at = c;
+            for _ in 0..=WALL_GEL_REACH {
+                if level.solid(at) {
+                    break;
                 }
-                if let Some(land) = level.fall(c) {
-                    if !cell_spots.contains_key(&land) {
-                        let spot = intern(floor_spot(land), &mut paint_faces, &mut face_id);
-                        cell_spots.insert(land, spot);
+                if let Some(land) = level.fall(at) {
+                    if level.turret_at(land).is_some() && !out.contains(&land) {
+                        out.push(land);
                     }
                 }
+                at = step(at, d.opposite());
+            }
+            out
+        }
+        let mut cell_spots: HashMap<Cell, Vec<usize>> = HashMap::new();
+        let mut exit_cells: HashMap<Face, Vec<Cell>> = HashMap::new();
+        if !redirectable.is_empty() {
+            // Ceilings first: a cell a ceiling portal's gel falls on gets its whole spot, even
+            // if a wall exit reaches it too.
+            let mut surfaces: Vec<Face> = level.portal_surfaces().into_iter().collect();
+            surfaces.sort_by_key(|f| f.1 != Dir::PosZ);
+            for f in surfaces {
+                let cells = match f.1 {
+                    Dir::PosZ => level.fall(f.0).into_iter().collect(),
+                    d if d.axis() != 2 && mode == Mode::Liberal && portal_redirectable => {
+                        turret_wall_exits(level, f)
+                    }
+                    _ => Vec::new(),
+                };
+                if cells.is_empty() {
+                    continue;
+                }
+                for &land in &cells {
+                    if let std::collections::hash_map::Entry::Vacant(slot) =
+                        cell_spots.entry(land)
+                    {
+                        let faces = if f.1 == Dir::PosZ {
+                            floor_spot(land)
+                        } else {
+                            // Liberal wall exits: model only the floor under a turret (so a
+                            // portal there can drop it). Painting other floors would add paint
+                            // state without knocking anything.
+                            vec![(land, Dir::NegZ)]
+                        };
+                        slot.insert(intern(faces, &mut paint_faces, &mut face_id));
+                    }
+                }
+                exit_cells.insert(f, cells);
             }
         }
         // Faces conversion gel can paint: where portal gel lands, and anywhere a stream of it
         // can be sent.
         let mut whitenable: HashSet<usize> = portal_gel;
-        if redirectable
-            .iter()
-            .any(|&g| gels[g].kind == PaintKind::Portal)
-        {
+        if portal_redirectable {
             whitenable.extend(cell_spots.values().flatten().copied());
         }
         let mut paintable: Vec<(Face, usize)> = whitenable
@@ -1239,7 +1280,8 @@ impl Model {
                 .iter()
                 .map(|&g| (stream_faces[g].unwrap(), g))
                 .collect(),
-            split_ceilings: !redirectable.is_empty(),
+            split_gel_exits: !redirectable.is_empty(),
+            gel_cells: exit_cells,
             paintable,
             flips,
             panels: panel_faces,
@@ -1411,9 +1453,19 @@ impl Model {
             .classes
             .iter()
             .map(|c| {
-                c.gel_cell
-                    .and_then(|cell| cell_spots.get(&cell))
-                    .map(|spot| spot_masks(spot))
+                if c.gel_cells.is_empty() {
+                    return None;
+                }
+                let mut spot: Vec<usize> = c
+                    .gel_cells
+                    .iter()
+                    .filter_map(|cell| cell_spots.get(cell))
+                    .flatten()
+                    .copied()
+                    .collect();
+                spot.sort_unstable();
+                spot.dedup();
+                (!spot.is_empty()).then(|| spot_masks(&spot))
             })
             .collect();
         let regions = graph.regions.len();
@@ -1481,7 +1533,7 @@ impl Model {
             special: portals
                 .classes
                 .iter()
-                .map(|c| c.turret.is_some() || c.stream.is_some())
+                .map(|c| c.turret.is_some() || c.stream.is_some() || !c.gel_cells.is_empty())
                 .collect(),
             inert: portals
                 .classes
@@ -1492,7 +1544,7 @@ impl Model {
                         && c.deployed.is_none()
                         && c.turret.is_none()
                         && c.stream.is_none()
-                        && c.gel_cell.is_none()
+                        && c.gel_cells.is_empty()
                         && c.ends.is_empty()
                         && c.routes.is_empty()
                         && !c.beam_end

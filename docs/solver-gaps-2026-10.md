@@ -243,6 +243,27 @@ budget gives: 250k solved 4 of 100, 1M about 1 in 10 of the search-limited level
 the uncertain). Take it by re-scoring at 250k. Search work after that pays only for turning
 uncertain into unsolvable (cleaner labels, cheaper mutation), not for the hit rate.
 
+## Re-score at 250k (2026-10-22)
+
+All 15,368 unsolved Workshop levels in data/ws5 (13,597 train, 1,771 test) were scored with
+the current solver (angled lasers included), at 50k and at 250k. Raw results are in
+`out/rescore-250k/` (`verdicts.jsonl`: old label, 50k, 250k per level). The data files are
+unchanged.
+
+| | solvable | uncertain | unsolvable |
+|---|---|---|---|
+| stored labels | 0 | 8,137 | 7,231 |
+| current solver, 50k | 304 | 8,618 | 6,446 |
+| current solver, 250k | **679** | 7,738 | 6,951 |
+
+- At 50k, the current solver solves **304** more: 225 stored as unsolvable and 79 as
+  uncertain. That is the angled-laser pass and the `ends` fix.
+- 250k adds **375** more, all from 50k-uncertain, and turns 505 uncertain into unsolvable. No
+  verdict at 50k gets worse.
+- Total: **679 newly solvable** (4.4% of the unsolved; 599 train, 80 test). Solvable Workshop
+  training levels go from 2,617 to 3,216 (+23%).
+- Time: 24 min at 50k and 101 min at 250k on 12 threads, about 4× the cost.
+
 ## Recommended order
 
 1. ~~**Angled laser beams**~~: done (above), ~5% of unsolvable levels rather than the 9% the

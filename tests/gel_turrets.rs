@@ -3,11 +3,12 @@
 use glados::builder::Builder;
 use glados::fixtures;
 use glados::geom::Dir;
-use glados::level::Level;
+use glados::level::{Level, PaintKind};
 use glados::p2c::Puzzle;
 use glados::portals::Landing;
 use glados::regions::{Move, RegionGraph};
 use glados::solver::{judge, Action, Color, Judgement, Mode, Model, Verdict, DEFAULT_MAX_STATES};
+use std::collections::{HashSet, VecDeque};
 
 fn model(p: &Puzzle, mode: Mode) -> Model {
     Model::new(&Level::from_puzzle(p), mode).unwrap()
@@ -128,6 +129,79 @@ fn gel_goes_through_portals() {
     let plan = plan(&p, Mode::Conservative).unwrap();
     assert_eq!(plan.len(), 3, "{plan:?}");
     assert!(matches!(plan[2], Action::Move { kind: Move::Bounce, .. }));
+}
+
+#[test]
+fn wall_exit_gel_paints_the_floor_under_a_turret() {
+    let p = fixtures::wall_gel_turret();
+
+    // Conservative rules don't model gel out of a wall portal, so the turret's bare floor
+    // never becomes a portalable class.
+    let strict = model(&p, Mode::Conservative);
+    assert!(
+        !strict.portals.classes.iter().any(|c| c.turret == Some(0)),
+        "conservative rules should not paint the turret's floor"
+    );
+
+    // Liberal rules spray conversion gel into the room from a white wall portal.
+    let loose = model(&p, Mode::Liberal);
+    let under = loose
+        .portals
+        .classes
+        .iter()
+        .find(|c| c.turret == Some(0))
+        .expect("the floor under the turret is paintable from the wall");
+    let face = under
+        .needs_paint
+        .expect("the turret's floor is only portalable once painted");
+    assert!(
+        loose
+            .portals
+            .classes
+            .iter()
+            .any(|c| c.gel_cells == [[5, 1, 1]]),
+        "a wall portal's spray lands on the turret's cell"
+    );
+
+    // Find a reachable state where the wall-exit stream has painted the turret's floor.
+    let mut seen = HashSet::new();
+    let mut queue = VecDeque::new();
+    let start = loose.initial();
+    seen.insert(start.clone());
+    queue.push_back(start);
+    let mut painted = None;
+    while let Some(s) = queue.pop_front() {
+        if loose.painted(&s, face, PaintKind::Portal) {
+            painted = Some(s);
+            break;
+        }
+        for (_, next) in loose.successors(&s) {
+            if seen.insert(next.clone()) {
+                queue.push_back(next);
+            }
+        }
+    }
+    let mut s = painted.expect(
+        "conversion gel out of the wall portal should paint the turret's cell",
+    );
+    assert_eq!(s.down & 1, 0, "the turret is still standing");
+
+    // The stream and wall portals are open; opening a portal on the painted floor drops it.
+    let other = s
+        .portals
+        .iter()
+        .flatten()
+        .copied()
+        .find(|&c| c != under.id)
+        .expect("both the stream and the wall portal are open");
+    s.portals = [Some(under.id), Some(other)];
+    assert!(
+        loose
+            .successors(&s)
+            .iter()
+            .any(|(_, next)| next.down & 1 != 0),
+        "a portal on the painted floor should knock the turret over"
+    );
 }
 
 #[test]
