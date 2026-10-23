@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::dataset::{json_str, label_with, Label};
+use crate::dataset::{json_str, label_portal_solvable, Label};
 use crate::geom::{step, Cell, Dir};
 use crate::level::Level;
 use crate::p2c::Puzzle;
@@ -34,6 +34,10 @@ pub struct Config {
     pub max_tokens: usize,
     /// State budget per solve.
     pub budget: usize,
+    /// Tries after which an input level that has given no mutant yet is dropped (0: never).
+    /// Most published Workshop levels our solver can't solve give none in all their tries,
+    /// and each of those tries runs the search to its budget.
+    pub give_up: usize,
 }
 
 impl Default for Config {
@@ -44,6 +48,7 @@ impl Default for Config {
             tries: 25,
             max_tokens: 1024,
             budget: 50_000,
+            give_up: 0,
         }
     }
 }
@@ -93,8 +98,12 @@ pub fn mutants(parent: &str, cfg: &Config, seed: u64, stats: &mut BTreeMap<Strin
     let mut rng = Rng::new(seed);
     let mut seen: HashSet<Vec<String>> = HashSet::from([parent_tokens]);
     let mut out = Vec::new();
-    for _ in 0..cfg.tries {
+    for t in 0..cfg.tries {
         if out.len() == cfg.per_level {
+            break;
+        }
+        if out.is_empty() && cfg.give_up > 0 && t == cfg.give_up {
+            count("gave up");
             break;
         }
         count("tries");
@@ -115,7 +124,7 @@ pub fn mutants(parent: &str, cfg: &Config, seed: u64, stats: &mut BTreeMap<Strin
             count("same as parent or sibling");
             continue;
         }
-        let label = label_with(&child, cfg.budget, rng.next_u64(), false);
+        let label = label_portal_solvable(&child, cfg.budget, rng.next_u64(), false);
         match &label {
             Label::Solvable {
                 needs_portals: true,

@@ -137,7 +137,15 @@ pub fn label_known(
     editor_rules: bool,
     known: Option<usize>,
 ) -> Label {
-    label_full(puzzle, budget, seed, editor_rules, known).0
+    label_full(puzzle, budget, seed, editor_rules, known, false).0
+}
+
+/// `label_with` for a caller that keeps only levels solvable with portals (`mutate`), at less
+/// cost: a level solvable without portals isn't measured (`metrics: None`), and one the
+/// conservative search doesn't solve isn't tried in the liberal model, so `Unsolvable` and
+/// `Uncertain(None)` here are the conservative search's verdict alone.
+pub fn label_portal_solvable(puzzle: &Puzzle, budget: usize, seed: u64, editor_rules: bool) -> Label {
+    label_full(puzzle, budget, seed, editor_rules, None, true).0
 }
 
 /// `label_with`, plus the conservative plan of a solvable level, as plan tokens (`plan`), or
@@ -148,7 +156,7 @@ pub fn label_with_plan(
     seed: u64,
     editor_rules: bool,
 ) -> (Label, Option<Result<String, String>>) {
-    let (label, plan, angled) = label_full(puzzle, budget, seed, editor_rules, None);
+    let (label, plan, angled) = label_full(puzzle, budget, seed, editor_rules, None, false);
     let plan = plan.map(|plan| {
         let level = Level::from_puzzle(puzzle);
         let model = if angled {
@@ -216,6 +224,7 @@ fn label_full(
     seed: u64,
     editor_rules: bool,
     known: Option<usize>,
+    portals_only: bool,
 ) -> (Label, Option<Vec<Action>>, bool) {
     let level = Level::from_puzzle(puzzle);
     let problems = level.mount_problems_with(editor_rules);
@@ -257,6 +266,14 @@ fn label_full(
     let angled = model.beams.angled;
     let strict = match space.verdict() {
         Verdict::Solved(plan) => {
+            if portals_only && space.solvable_without_portals() {
+                let label = Label::Solvable {
+                    min_len: plan.len(),
+                    needs_portals: false,
+                    metrics: None,
+                };
+                return (label, Some(plan), angled);
+            }
             let metrics = match measure(&mut model, &space, budget, seed) {
                 Assessment::Solved(m) => Some(m),
                 _ => None,
@@ -277,6 +294,13 @@ fn label_full(
             min_len: n,
             needs_portals: true,
             metrics: None,
+        };
+        return (label, None, angled);
+    }
+    if portals_only {
+        let label = match strict {
+            Verdict::Unsolvable => Label::Unsolvable,
+            _ => Label::Uncertain(None),
         };
         return (label, None, angled);
     }

@@ -44,12 +44,13 @@ const USAGE: &str = "usage:
                                 unsupported). --route DIR: NNNNN.p2c and NNNNN.route.jsonl (as
                                 glados route writes) for the first solved plan of a line
   glados mutate [--seed N] [--per-level N] [--tries N] [--max-tokens N] [--budget N]
-                [--threads N] [--out FILE] [FILE]
+                [--give-up N] [--threads N] [--out FILE] [FILE]
                                 1-3 random edits to each level of FILE (JSONL with \"tokens\",
                                 or stdin), scored with editor rules off; writes the mutants
                                 that need portals to solve, fit --max-tokens (default 1024)
                                 and differ from their parent, as JSONL with \"mutated_from\"
-                                (the parent's workshop_id, or its line) and \"edits\"
+                                (the parent's workshop_id, or its line) and \"edits\".
+                                --give-up N: drop a level with no mutant after N tries
   glados editor <file.p2c|dir>...
                                 items the Puzzle Maker would mark invalid, one JSON line per file
   glados route [--plan TOKENS] <file.p2c>
@@ -1007,6 +1008,7 @@ fn run_mutate(args: &[String]) -> Result<()> {
             "--tries" => cfg.tries = parse(flag, value)?,
             "--max-tokens" => cfg.max_tokens = parse(flag, value)?,
             "--budget" => cfg.budget = parse(flag, value)?,
+            "--give-up" => cfg.give_up = parse(flag, value)?,
             "--out" => out_path = Some(PathBuf::from(value)),
             _ => return Err(format!("unknown flag {flag}
 {USAGE}").into()),
