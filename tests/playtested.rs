@@ -34,6 +34,10 @@ const LASER_MANAGEMENT: &str = "size 8 6 3 open 1 0 0 7 5 1 0 2 1 7 3 1 1 0 2 3 
 /// player's column; moving that portal up a panel at a time lifts them to the exit ledge.
 const GRATE_ESCAPE: &str = "size 3 3 9 open 1 0 0 2 2 6 1 0 7 1 2 8 2 0 7 2 0 8 2 2 7 2 2 8 0 0 8 2 1 8 white -y 1 0 0 2 0 8 white +z 2 1 6 2 2 6 entry 1 1 0 +x exit 2 1 8 -x grating 1 0 0 2 0 6 +y +z grating 1 0 7 1 0 8 +y -z grating 1 2 0 2 2 6 -y +z grating 1 2 7 1 2 8 -y -z grating 2 0 8 2 0 8 +y -z grating 2 1 0 2 1 6 -x +z grating 2 2 8 2 2 8 -y -z funnel 2 1 0 +z on";
 
+/// 68651531 "Mari0 - Test chamber 04 (Update 1)": gel dropped through ceiling portals covers the
+/// floor; bounces off it, fed back in through the portals, carry the player up to the exit ledge.
+const MARI0: &str = "size 2 19 13 open 1 1 0 1 12 7 0 4 2 1 5 2 1 6 8 1 13 12 1 14 8 1 18 9 1 0 9 1 3 10 1 4 10 1 13 12 1 14 10 1 14 10 1 17 10 1 18 10 1 3 11 1 13 12 white +z 1 5 12 1 9 12 white -z 1 2 0 1 3 7 entry 1 0 9 +y exit 1 18 8 -y gel 1 2 0 +z bounce stream on stairs 1 2 9 +y on";
+
 fn level(tokens: &str) -> Level {
     Level::from_puzzle(&glados::tokens::decode(tokens).unwrap())
 }
@@ -125,4 +129,14 @@ fn funnel_beam_lifts_the_player_as_its_portal_moves_up() {
         panic!("not solved");
     };
     assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: glados::regions::Move::Funnel, .. })), "{plan:?}");
+}
+
+#[test]
+fn bounce_gel_under_ceiling_portals_carries_the_player_up() {
+    // Liberal rules only: the conservative ones don't trust the rebound height.
+    let model = Model::new(&level(MARI0), Mode::Liberal).unwrap();
+    let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+        panic!("not solved");
+    };
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: glados::regions::Move::Bounce, .. })), "{plan:?}");
 }

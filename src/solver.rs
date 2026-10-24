@@ -1471,13 +1471,23 @@ impl Model {
 
         // Moves off painted floors.
         let has = |k: PaintKind| gels.iter().any(|g| g.kind == k);
+        let ceiling_portals = level.portal_surfaces().iter().filter(|f| f.1 == Dir::PosZ).count();
         let mut gel_moves: HashSet<GelMove> = HashSet::new();
         for (f, &(c, d)) in paint_faces.iter().enumerate() {
             let Some(from) = graph.region_of(c).filter(|_| d == Dir::NegZ) else {
                 continue;
             };
             if has(PaintKind::Bounce) {
-                for (t, hazards) in gel::bounces(level, c, gel_rules) {
+                // Liberal: a pair of ceiling portals over bounce gel feeds a bounce back in from
+                // above, again and again, until the player has the height (and so the reach) to
+                // go where they like (play-tested on "Mari0 - Test chamber 04").
+                let ratchet = mode == Mode::Liberal && ceiling_portals >= 2;
+                let bounce_rules = if ratchet {
+                    GelRules { bounce_height: level.size[2] - 1, bounce_reach: 4, ..gel_rules }
+                } else {
+                    gel_rules
+                };
+                for (t, hazards) in gel::bounces(level, c, bounce_rules) {
                     if let Some(to) = graph.region_of(t) {
                         gel_moves.insert(GelMove {
                             from,
