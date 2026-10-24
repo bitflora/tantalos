@@ -150,7 +150,8 @@ pub enum Feature {
         top: i32,
         start_up: bool,
     },
-    /// A rail platform at this column's floor cell, travelling `len` cells along `dir`.
+    /// A rail platform carrying the player from this column's floor cell (slid to a wall)
+    /// `len` cells along `dir`; it moves through the voxels under them, dug out if solid.
     Rail {
         at: [i32; 2],
         dir: Dir,
@@ -848,37 +849,45 @@ impl Genome {
                     oscillate,
                 } => {
                     // The platform runs along the wall on its left (Builder::rail), which the
-                    // editor wants solid the whole way: start from that wall.
+                    // editor wants solid the whole way: start from that wall. It is the top of
+                    // its voxel (`Rail::stops`), so it moves through the voxels under the cells
+                    // it carries the player through: a pit's, or a trench dug for it.
                     let track_of = |d: Dir| -> Option<Vec<Cell>> {
                         let c = to_wall(at, turn_by(d, 1), 0)?;
                         let v = d.vector();
                         let t: Vec<Cell> = (0..=len.clamp(1, 5))
-                            .map(|k| [c[0] + v[0] * k, c[1] + v[1] * k, c[2]])
+                            .map(|k| [c[0] + v[0] * k, c[1] + v[1] * k, c[2] - 1])
                             .collect();
-                        let walled = t.iter().all(|&x| open(x) && !open(step(x, turn_by(d, 1))));
+                        let walled = t.iter().all(|&x| {
+                            x[2] >= 0 && open(step(x, Dir::PosZ)) && !open(step(x, turn_by(d, 1)))
+                        });
                         // Nor beside or over a door, whose frame takes the wall around it.
                         let near_door = |x: &Cell| {
                             doors.iter().any(|e| (0..3).all(|a| (x[a] - e[a]).abs() <= 1))
                         };
                         (walled && !t.iter().any(near_door)).then_some(t)
                     };
-                    let crosses = |t: &Vec<Cell>| t.iter().any(|&x| open(step(x, Dir::NegZ)));
                     let tracks: Vec<Vec<Cell>> = [dir, turn_by(dir, 1), turn_by(dir, 2), turn_by(dir, 3)]
                         .into_iter()
                         .filter_map(track_of)
                         .collect();
-                    let Some(track) = tracks.iter().find(|t| crosses(t)).or(tracks.first()).cloned()
+                    let over_pit = |t: &Vec<Cell>| t.iter().all(|&x| open(x));
+                    let Some(track) = tracks.iter().find(|t| over_pit(t)).or(tracks.first()).cloned()
                     else {
                         continue;
                     };
                     let c = track[0];
-                    let clear = track.iter().all(|&t| open(step(t, Dir::PosZ)));
-                    // It takes its whole track: nothing else may stand there.
-                    if !clear
-                        || track.iter().any(|t| swept.contains(t))
-                        || !track.iter().fold(true, |free, &t| claim(t) && free)
+                    // It takes its whole track and the cells it carries the player through:
+                    // nothing else may stand there.
+                    let cells: Vec<Cell> =
+                        track.iter().flat_map(|&t| [t, step(t, Dir::PosZ)]).collect();
+                    if cells.iter().any(|t| swept.contains(t))
+                        || !cells.iter().fold(true, |free, &t| claim(t) && free)
                     {
                         continue;
+                    }
+                    for &t in track.iter().filter(|&&t| !open(t)) {
+                        b.carve(t, t);
                     }
                     let r = b.rail(c, *track.last().unwrap(), oscillate, true);
                     rails_built += 1;

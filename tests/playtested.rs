@@ -38,6 +38,13 @@ const GRATE_ESCAPE: &str = "size 3 3 9 open 1 0 0 2 2 6 1 0 7 1 2 8 2 0 7 2 0 8 
 /// floor; bounces off it, fed back in through the portals, carry the player up to the exit ledge.
 const MARI0: &str = "size 2 19 13 open 1 1 0 1 12 7 0 4 2 1 5 2 1 6 8 1 13 12 1 14 8 1 18 9 1 0 9 1 3 10 1 4 10 1 13 12 1 14 10 1 14 10 1 17 10 1 18 10 1 3 11 1 13 12 white +z 1 5 12 1 9 12 white -z 1 2 0 1 3 7 entry 1 0 9 +y exit 1 18 8 -y gel 1 2 0 +z bounce stream on stairs 1 2 9 +y on";
 
+/// 3718840820 "Flying a Timing": portal the laser to its catcher (the laser field goes off),
+/// fetch the cube, put it on the button that raises the stairs; up them onto the first of four
+/// faith plates, which throw the player across the goo. There, press the 15 s pedestal that
+/// swings a walkway out under the respawning cube dropper, ride the lift up, take the cube off
+/// the walkway and come back down with it to the exit's button.
+const FLYING_A_TIMING: &str = "size 27 8 7 s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s7 | / s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s7 | / s4 o1 s2 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | s2 o3 s1 o1 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s1 o1 | s1 o4 s2 | s4 o1 s2 | / s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s4 o1 s2 | / s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s7 | / s7 | s7 | s1 o1 s5 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | / s7 | s7 | s1 o1 s5 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | / s7 | s7 | s1 o1 s5 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | / white +z 1 4 4 1 4 4 white -z 3 4 1 3 4 1 entry 1 2 1 +x exit 25 2 1 -x laserfield 2 5 1 -x +z 1 on dropper 19 0 6 companion button 1 0 1 weighted > stairs 0 button 25 4 1 weighted > exit pedestal 25 0 1 15 > panel 0 > panel 1 > panel 2 > panel 3 pedestal 24 0 1 inf > dropper 0 cube 2 7 1 companion laser 1 4 1 +z +y on catcher 3 4 4 -z +y > field 0 plate 14 4 2 -y 17 2 1 +z plate 17 2 1 +z 24 2 1 +z plate 4 2 2 +z 10 2 1 +z plate 10 2 1 +z 14 4 2 -y panel 19 0 3 +y -z 6 off panel 20 0 3 +y -z 6 off panel 21 0 3 +y -z 6 off panel 22 0 3 +y -z 6 off panel 24 4 1 +z -x 6 on panel 25 4 2 -x +z 6 on stairs 2 2 1 +x off rail 23 0 0 23 0 3 osc";
+
 fn level(tokens: &str) -> Level {
     Level::from_puzzle(&glados::tokens::decode(tokens).unwrap())
 }
@@ -139,4 +146,27 @@ fn bounce_gel_under_ceiling_portals_carries_the_player_up() {
         panic!("not solved");
     };
     assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: glados::regions::Move::Bounce, .. })), "{plan:?}");
+}
+
+#[test]
+fn stairs_onto_a_plate_and_a_timed_lift_to_a_respawning_cube() {
+    use glados::regions::Move;
+    let level = level(FLYING_A_TIMING);
+    // The lift's platform is the top of its voxels: it carries the player from the floor of the
+    // exit side, a voxel over its track's bottom, up to the walkway.
+    assert_eq!(level.rails[0].stops().first(), Some(&[23, 0, 1]));
+    assert_eq!(level.rails[0].stops().last(), Some(&[23, 0, 4]));
+    // Liberal rules only: the dash rides the lift as soon as it's there, and the cube is on the
+    // walkway once the walkway is out.
+    let model = Model::new(&level, Mode::Liberal).unwrap();
+    let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+        panic!("not solved");
+    };
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: Move::Plate, .. })), "{plan:?}");
+    assert!(plan.iter().any(|a| matches!(a, Action::Fetch { .. })), "{plan:?}");
+    // With the exit's button unwired, the stairs and plates alone get there: conservative
+    // rules solve it, and the route climbs the stairs onto the plate.
+    let open_exit = FLYING_A_TIMING.replace("button 25 4 1 weighted > exit", "button 25 4 1 weighted");
+    let plan = solved(&open_exit);
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: Move::Plate, .. })), "{plan:?}");
 }

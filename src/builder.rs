@@ -726,7 +726,8 @@ impl Builder {
         p
     }
 
-    /// A rail platform: a floor in open `cell` travelling along a straight track to `end`.
+    /// A rail platform: the top of open voxel `cell` (a floor for the cell above), travelling
+    /// along a straight track to `end`.
     /// Angles and extents copy the style map's rail (track toward -y), turned about z; a
     /// vertical one keeps those and travels up or down (ASSUMPTION: `TRAVEL_DIRECTION` pitch).
     /// It runs along the wall on its left (a vertical one: its up is -x).

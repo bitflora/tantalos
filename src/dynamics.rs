@@ -18,8 +18,9 @@
 //!   they push into when up are solid then, and on a wall the cells over them are floors. A
 //!   wall piston coming out pushes whatever stands in those cells out past its end, where it
 //!   falls.
-//! - Rail platforms that stop (not oscillating) are a floor at their first cell, or at their
-//!   last while active; whoever is on one rides it. Oscillating ones are a walkway along their
+//! - Rail platforms are the top of their voxel, so a floor for the cell above (`Rail::stops`).
+//!   Ones that stop (not oscillating) are that floor over their first cell, or over their last
+//!   while active; whoever is on one rides it. Oscillating ones are a walkway along their
 //!   track, with rides between stops at different heights: wait for the platform.
 //! - Light bridges and funnels project from their cell along their normal until a solid voxel
 //!   or a glass/grating panel. A bridge sits 0.375 voxel from the middle of its cells against
@@ -175,13 +176,24 @@ impl Devices {
                     }
                 }
             }
-            moves.push(DynMove {
-                from: vec![s.cell, step(s.cell, s.dir)],
-                to: s.exits(level).into_iter().map(|(t, h)| (Cond::ALWAYS, t, h)).collect(),
-                kind: Move::Stairs,
-                cond: Cond::on(b),
-                hazards: 0,
-            });
+            // An exit onto a faith plate launches whoever climbs there (Workshop 3718840820
+            // "Flying a Timing": stairs up to the first of four plates).
+            let (onto_plate, exits): (Vec<_>, Vec<_>) =
+                s.exits(level).into_iter().partition(|&(t, _)| level.plate_at(t).is_some());
+            let walked = exits.into_iter().map(|(t, h)| (Cond::ALWAYS, t, h)).collect();
+            let launched = onto_plate
+                .into_iter()
+                .filter_map(|(t, h)| level.fall_route(t).map(|(f, fh, _)| (Cond::ALWAYS, f, h | fh)))
+                .collect();
+            for (to, kind) in [(walked, Move::Stairs), (launched, Move::Plate)] {
+                moves.push(DynMove {
+                    from: vec![s.cell, step(s.cell, s.dir)],
+                    to,
+                    kind,
+                    cond: Cond::on(b),
+                    hazards: 0,
+                });
+            }
         }
         for (p, &b) in level.panels.iter().zip(&d.panel_bit) {
             if p.kind == PanelKind::Flip {
@@ -242,7 +254,7 @@ impl Devices {
             }
         }
         for (r, bit) in level.rails.iter().zip(&d.rail_bit) {
-            let track = r.track();
+            let track = r.stops();
             match *bit {
                 Some(b) => {
                     let (first, last) = (track[0], *track.last().unwrap());
@@ -250,7 +262,7 @@ impl Devices {
                         continue;
                     }
                     for (c, cond) in [(first, Cond::off(b)), (last, Cond::on(b))] {
-                        if !level.standable(c) {
+                        if !level.solid(c) && !level.standable(c) {
                             claim(&mut stand, &mut incomplete, c, cond);
                         }
                     }
@@ -259,7 +271,7 @@ impl Devices {
                 }
                 None => {
                     for &c in &track {
-                        if !level.standable(c) && !level.goo(c) {
+                        if !level.solid(c) && !level.standable(c) && !level.goo(c) {
                             claim(&mut stand, &mut incomplete, c, Cond::ALWAYS);
                         }
                     }

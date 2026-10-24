@@ -436,6 +436,38 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     with lasers, 5 + 2 → solvable; 1,200 with bounce gel, 1 → solvable, 8 unsolvable →
     uncertain; 1,500 random, 10 unsolvable → solvable. No verdict got worse.
 
+- **3718840820 "Flying a Timing"** (`glados-ws5-unsolv-00001`, 2026-10-24). Play-tester: portal
+  the laser (floor emitter) from a ceiling portal to a floor portal under the catcher, which
+  turns off the laser field; take the cube behind it to the button that raises the stairs;
+  walk up them onto the first of four faith plates (the third on a wall), which throw you
+  across the goo. There, with the lift near the bottom, press the 15 s pedestal that swings a
+  walkway out under a cube dropper, ride the lift up, take the cube off the walkway and get
+  back before the timer runs out; the cube on the exit's button. Three gaps, **fixed
+  (2026-10-24), liberal rules only** (`tests/playtested.rs`):
+  - Stairs whose top step is a faith plate went nowhere (the plate's cell isn't standable).
+    Now a `Move::Plate` to where the plate chain lands; `glados route` writes it as `plate`
+    (up the stairs onto the plate). Conservative-solvable and routed with the exit unwired.
+  - **Rail platforms stood a voxel too low.** The platform is the top face of its item's
+    voxel, so whoever rides it stands in the cell above (`Rail::stops`): in all 9,264 rails
+    of the compiled Workshop maps (any orientation) the platform's top is the top of its
+    movelinear's voxel, the editor places every item's instance at its voxel's middle
+    (editoritems `Offset 64 64 64`), and this level's lift only meets the walkway that way
+    (the play-tester rode it in the staged file). The generator now builds rails in the
+    voxels under the cells they carry the player through (a pit's, or a one-voxel trench it
+    digs along the wall); `rail_ferry` moved down into its trench.
+  - A timed dash couldn't ride, and the dropper's cube (lost in goo but for the walkway) didn't
+    exist. Now an auto-respawning dropper's cube lies on a device floor under it whenever that
+    floor is there (`AutoDrop`); liberal dashes ride oscillating rails at their speed with no
+    wait and may fetch such a cube. Conservative rules don't (unknown platform phase and
+    respawn delay), so the level is uncertain. The dash isn't routed.
+  - Old vs. new binary (`score --budget 50000 --editor-rules off`): 1,491 Workshop levels
+    with rails: 82 unsolvable and 52 uncertain → solvable, 69 unsolvable → uncertain, 7 worse
+    (3 solvable → uncertain, 4 uncertain → unsolvable); 4,000 unsolved Workshop levels: 34 →
+    solvable, 28 → uncertain, 1 worse; 3,000 generated v5b levels with rails: 2 better, 62
+    worse (55 of them solvable before). Every worse one has a rail: solutions that needed the
+    platform a voxel lower than the game puts it. **data/v5b's rail levels (~120k) are not
+    re-scored.**
+
 ## Recommended order
 
 1. ~~**Angled laser beams**~~: done (above), ~5% of unsolvable levels rather than the 9% the

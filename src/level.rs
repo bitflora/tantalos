@@ -47,8 +47,13 @@
 //!   `START_UP`). On a floor, that makes the cell L above the item's a floor. Wired to a
 //!   button, a piston starts the other way round from `START_UP` (measured in-game; the
 //!   solver flips it).
-//! - Rail platforms (`ITEM_RAIL_PLATFORM`) are a floor in the item's cell that travels to the
-//!   cell of the extent farthest from it (their angles don't follow the up = normal rule).
+//! - Rail platforms (`ITEM_RAIL_PLATFORM`) travel from the item's cell to the cell of the extent
+//!   farthest from it (their angles don't follow the up = normal rule). The platform is the top
+//!   face of the voxel it is in: whoever rides it stands in the cell above (in all 9,264 rails of
+//!   the compiled Workshop maps, any way up, the platform's top is the top of its voxel, and
+//!   the editor puts every item's instance at the middle of its voxel; Workshop 3718840820
+//!   "Flying a Timing", play-tested, has a lift from a goo voxel up to a walkway a voxel over
+//!   its track).
 
 use std::collections::HashMap;
 
@@ -524,7 +529,7 @@ impl Piston {
     }
 }
 
-/// A rail platform: a floor in `cell` that travels to `end` (along one axis).
+/// A rail platform: the top of voxel `cell`, travelling to `end` (along one axis).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rail {
     pub item: i32,
@@ -533,10 +538,12 @@ pub struct Rail {
     /// Back and forth for as long as it's active.
     pub oscillate: bool,
     pub start_active: bool,
+    /// Units per second (`ITEM_PROPERTY_RAIL_SPEED`, the editor's 100 by default).
+    pub speed: f64,
 }
 
 impl Rail {
-    /// The cells it stops in, from `cell` to `end`.
+    /// The voxels it moves through, from `cell` to `end`.
     pub fn track(&self) -> Vec<Cell> {
         let a = (0..3).find(|&a| self.cell[a] != self.end[a]).unwrap_or(0);
         let d = (self.end[a] - self.cell[a]).signum();
@@ -548,6 +555,11 @@ impl Rail {
                 c
             })
             .collect()
+    }
+
+    /// Where whoever rides it stands at each cell of `track`: the cell above.
+    pub fn stops(&self) -> Vec<Cell> {
+        self.track().into_iter().map(|c| step(c, Dir::PosZ)).collect()
     }
 }
 
@@ -952,6 +964,11 @@ impl Level {
                         end,
                         oscillate: it.flag("ITEM_PROPERTY_RAIL_OSCILLATE").unwrap_or(true),
                         start_active: it.flag("ITEM_PROPERTY_RAIL_START_ACTIVE").unwrap_or(true),
+                        speed: it
+                            .props
+                            .get_f64s::<1>("ITEM_PROPERTY_RAIL_SPEED")
+                            .map_or(100.0, |[v]| v)
+                            .max(1.0),
                     };
                     if rail.track().iter().any(|&c| self.solid(c)) {
                         self.decode_problems.push(problem("rail track isn't open"));

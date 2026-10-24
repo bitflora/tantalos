@@ -25,7 +25,10 @@
 //!   it, so a fetch starts empty-handed). Walking speed: conservative 140 u/s, liberal 190
 //!   u/s, a voxel per step and 1.4 across a corner; falls take sqrt(2h/600) s. A cell is
 //!   reached on entering it, half a voxel before its middle; a carried cube, held ahead,
-//!   enters one half a voxel sooner still; picking one up takes 0.25 s (`DashTimes`).
+//!   enters one half a voxel sooner still; picking one up takes 0.25 s (`DashTimes`). Liberal
+//!   rules also ride oscillating rail platforms in a dash, as fast as they move (the press
+//!   timed for the platform to be there), and fetch an auto-drop's cube (below) from the
+//!   device floor the timer puts under its dropper.
 //! - Fizzlers: walking or falling through an active one clears both portals and destroys a
 //!   held cube, which respawns where it started. A cube falling through one respawns too.
 //!   Active fizzlers stop portal shots. Laser fields: the player can't pass an active one;
@@ -62,7 +65,9 @@
 //!   the other portal comes out onto. The player stays where they are (and rides a platform
 //!   the button released).
 //! - A dropper's cube that would fall into goo can be caught by a player on a floor beside its
-//!   fall (it lies in that floor's region).
+//!   fall (it lies in that floor's region). Otherwise, if a device floor is on the way, an
+//!   auto-respawning dropper (the editor's default) keeps dropping it, so it lies there
+//!   whenever that floor is there (`AutoDrop`), and is gone again when it goes.
 //! - Cubes placed without a dropper are gone for good when fizzled; a dropper that only drops
 //!   when told to (`Auto Drop` off, wired) holds its cube until its inputs are first on.
 //!   Whenever a wired dropper's inputs come on (all of them, after not all were), it drops a
@@ -439,6 +444,15 @@ struct Held {
     turret: Option<usize>,
 }
 
+/// The cube of an auto-respawning dropper whose fall ends in goo but for a device floor on the
+/// way: it lands at `home` whenever `cond` holds.
+#[derive(Clone, Debug)]
+struct AutoDrop {
+    kind: CubeKind,
+    home: CubeLoc,
+    cond: Cond,
+}
+
 #[derive(Clone, Debug)]
 pub struct HazardInfo {
     pub index: i32,
@@ -487,7 +501,7 @@ struct WalkGraph {
     cells: Vec<Cell>,
     region: Vec<usize>,
     /// (to, fall height in voxels, hazards crossed, devices needed, voxels walked first: one,
-    /// or the square root of two across a corner).
+    /// the square root of two across a corner, or a ride's time in voxels walked).
     moves: Vec<Vec<(usize, i32, u64, Cond, f64)>>,
 }
 
@@ -602,6 +616,8 @@ pub struct Model {
     held_back: Vec<Held>,
     /// Cubes of wired droppers, which drop a new one each time their inputs come on.
     redrops: Vec<Held>,
+    /// Droppers' cubes that only come to rest on a device floor.
+    auto_drops: Vec<AutoDrop>,
     /// Devices, lasers or waiting cubes: `settle` has work after any action.
     dynamic: bool,
     /// Where the portals are can switch devices (a bridge or funnel through them) or carry a
@@ -1144,6 +1160,7 @@ impl Model {
         let mut cubes = Vec::new();
         let mut held_back = Vec::new();
         let mut redrops = Vec::new();
+        let mut auto_drops = Vec::new();
         // Turrets a cube dropped at the start lands on, knocked over from the start.
         let mut start_down = 0u32;
         for cube in level.of_kind(&ItemKind::Cube) {
@@ -1209,6 +1226,25 @@ impl Model {
                     home,
                     loc,
                 });
+            } else if let Some(dropper) = level
+                .dropper_of
+                .get(&cube.index)
+                .and_then(|&d| level.item(d))
+                .filter(|d| d.props.get_i32("ITEM_PROPERTY_AUTO_RESPAWN_CUBE") != Some(0))
+                .filter(|d| !waiting.contains_key(&d.index))
+            {
+                // Lost in the goo, it drops again (auto-respawn), so it lands on the first device
+                // floor on the way whenever that is there (Workshop 3718840820 "Flying a Timing":
+                // a walkway a timed pedestal swings out under the dropper).
+                if let Some(&(cond, l)) = Landing::falls(geo, &graph, dropper.cell).first() {
+                    let (kind, home) = (cube.cube_kind(), landing_loc(l, cube.cube_kind()));
+                    auto_drops.push(AutoDrop { kind, home, cond });
+                    cubes.push(Cube {
+                        kind,
+                        home,
+                        loc: CubeLoc::Gone,
+                    });
+                }
             }
         }
         cubes.sort();
@@ -1548,7 +1584,8 @@ impl Model {
             })
             .collect();
         let walk = if pedestals.iter().any(|p| p.timer.is_some()) {
-            walk_graph(geo, &graph)
+            let rides = (mode == Mode::Liberal).then_some(rules.walk_speed);
+            walk_graph(geo, &graph, rides)
         } else {
             WalkGraph::default()
         };
@@ -1640,7 +1677,7 @@ impl Model {
         let platform_cells = level
             .rails
             .iter()
-            .flat_map(|r| r.track())
+            .flat_map(|r| r.stops())
             .chain(
                 level
                     .pistons
@@ -1656,7 +1693,8 @@ impl Model {
         let dynamic = !devices.is_empty()
             || !beams.is_empty()
             || !held_back.is_empty()
-            || !redrops.is_empty();
+            || !redrops.is_empty()
+            || !auto_drops.is_empty();
         let mut switch_bits = vec![0u64; switches.len()];
         let mut routed = 0u64;
         let mut class_ends = vec![0u64; portals.classes.len()];
@@ -1866,6 +1904,7 @@ impl Model {
             panel_class,
             held_back,
             redrops,
+            auto_drops,
             dynamic,
             portals_drive,
             complete,
@@ -2800,6 +2839,17 @@ impl Model {
                 }
             }
         }
+        // Auto-respawning droppers' cubes, lost, land again once their floor is there.
+        for a in &self.auto_drops {
+            if a.cond.holds(dev) {
+                let (home, gone) = (self.loc_code(a.home), self.loc_code(CubeLoc::Gone));
+                if let Some(i) = (0..lay.kinds.len()).find(|&i| {
+                    lay.kinds[i] == a.kind && lay.homes[i] == home && s[CUBES + i] == gone
+                }) {
+                    lay.move_cube(s, i, home);
+                }
+            }
+        }
         // Wired droppers whose inputs just came on: a new cube drops, the old one dissolves.
         if let Some(w) = lay.redrop {
             for (r, h) in self.redrops.iter().enumerate() {
@@ -2836,9 +2886,15 @@ impl Model {
             if self.graph.regions[r].cond.holds(dev) {
                 continue;
             }
+            // Back home, or gone if home went too (an auto-drop's device floor).
             let to = match fall(r) {
                 Some(t) => CubeLoc::Loose(t),
-                None => self.code_loc(lay.homes[i]),
+                None => match self.code_loc(lay.homes[i]) {
+                    h if self.loc_region(h).is_some_and(|h| !self.graph.regions[h].cond.holds(dev)) => {
+                        CubeLoc::Gone
+                    }
+                    h => h,
+                },
             };
             lay.move_cube(s, i, self.loc_code(to));
         }
@@ -3397,7 +3453,18 @@ impl Model {
         if !cubes.contains(&HELD) {
             let mut last = None;
             for (i, &code) in cubes.iter().enumerate() {
-                let from = self.code_loc(code);
+                // Liberal rules also fetch an auto-drop's cube from the device floor the timer
+                // puts under its dropper: it lands there within a drop or two.
+                let from = match self.code_loc(code) {
+                    CubeLoc::Gone if self.mode == Mode::Liberal => self
+                        .auto_drops
+                        .iter()
+                        .find(|a| {
+                            a.kind == lay.kinds[i] && self.loc_code(a.home) == lay.homes[i] && a.cond.holds(dev)
+                        })
+                        .map_or(CubeLoc::Gone, |a| a.home),
+                    l => l,
+                };
                 let CubeLoc::Loose(home) = from else { continue };
                 let id = (lay.kinds[i], lay.homes[i], code);
                 if last == Some(id) {
@@ -4173,7 +4240,10 @@ fn cube_name(k: CubeKind) -> &'static str {
     }
 }
 
-fn walk_graph(geo: Geo, graph: &RegionGraph) -> WalkGraph {
+/// The walk graph for timed dashes. With `rides` (the walking speed), also rides between the
+/// stops of oscillating rail platforms, as long as the platform takes: the player is taken to
+/// time their press for the platform to be there.
+fn walk_graph(geo: Geo, graph: &RegionGraph, rides: Option<f64>) -> WalkGraph {
     let level = geo.level;
     let mut w = WalkGraph::default();
     for r in &graph.regions {
@@ -4252,6 +4322,17 @@ fn walk_graph(geo: Geo, graph: &RegionGraph) -> WalkGraph {
             for &(c, t, h) in &m.to {
                 if let (Some(&j), Some(cond)) = (w.node.get(&t), m.cond.and(c)) {
                     w.moves[i].push((j, 0, m.hazards | h, cond, 1.0));
+                }
+            }
+        }
+    }
+    if let Some(walk_speed) = rides {
+        for r in level.rails.iter().filter(|r| r.oscillate) {
+            for p in r.stops().windows(2) {
+                for (a, b) in [(p[0], p[1]), (p[1], p[0])] {
+                    if let (Some(&i), Some(&j)) = (w.node.get(&a), w.node.get(&b)) {
+                        w.moves[i].push((j, 0, 0, Cond::ALWAYS, walk_speed / r.speed));
+                    }
                 }
             }
         }

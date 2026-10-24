@@ -376,18 +376,31 @@ impl<'a> Grounder<'a> {
             .level
             .of_kind(&ItemKind::Cube)
             .filter_map(|c| {
-                let home = self.level.fall(c.cell)?;
+                let dropper = self.level.dropper_of.get(&c.index).and_then(|&d| self.level.item(d));
+                let Some(home) = self.level.fall(c.cell) else {
+                    // An auto-respawning dropper's cube lost in goo but for a device floor on
+                    // the way: gone until that floor is there (the solver's `AutoDrop`).
+                    let d = dropper.filter(|d| {
+                        d.props.get_i32("ITEM_PROPERTY_AUTO_RESPAWN_CUBE") != Some(0)
+                            && d.props.get_i32("ITEM_PROPERTY_AUTO_DROP_CUBE") != Some(0)
+                    })?;
+                    let fall = self.geo.falls(d.cell).into_iter().find(|f| self.region(f.cell).is_some());
+                    let home = fall?.cell;
+                    return Some(Placed {
+                        kind: c.cube_kind(),
+                        home,
+                        loose: false,
+                        at: None,
+                        gone: true,
+                        spot: None,
+                    });
+                };
                 let loose = self.level.loose_cube(c.index);
                 // A dropper that waits for its inputs holds its cube back (`settle` drops it).
-                let waits = self
-                    .level
-                    .dropper_of
-                    .get(&c.index)
-                    .and_then(|&d| self.level.item(d))
-                    .is_some_and(|d| {
-                        d.props.get_i32("ITEM_PROPERTY_AUTO_DROP_CUBE") == Some(0)
-                            && self.level.inputs(d.index).next().is_some()
-                    });
+                let waits = dropper.is_some_and(|d| {
+                    d.props.get_i32("ITEM_PROPERTY_AUTO_DROP_CUBE") == Some(0)
+                        && self.level.inputs(d.index).next().is_some()
+                });
                 Some(Placed {
                     kind: c.cube_kind(),
                     home,
@@ -481,7 +494,7 @@ impl<'a> Grounder<'a> {
                         q.spot = None;
                     }
                     Some(_) => {}
-                    None if q.loose => q.gone = true,
+                    None if q.loose || !self.stands(q.home, dev) => q.gone = true,
                     None => q.at = Some(q.home),
                 }
             }
@@ -834,6 +847,41 @@ impl<'a> Grounder<'a> {
                             walk.push(after.player);
                         }
                         (walk, (act, after))
+                    })
+                    // Up deployed stairs onto a plate at their top.
+                    .or_else(|| {
+                        if kind != Move::Plate {
+                            return None;
+                        }
+                        self.find(h, s, |c| {
+                            level.stairs.iter().enumerate().find_map(|(i, st)| {
+                                let second = step(st.cell, st.dir);
+                                if dev & (1 << model.devices.stairs_bit[i]) == 0
+                                    || (c != st.cell && c != second)
+                                {
+                                    return None;
+                                }
+                                st.exits(level).into_iter().find_map(|(t, th)| {
+                                    let p = level.plate_at(t)?;
+                                    let (f, fallen, _) = level.fall_route(t)?;
+                                    if th | fallen != hazards || self.region(f) != Some(to) {
+                                        return None;
+                                    }
+                                    let mut after = h.clone();
+                                    after.player = f;
+                                    if fizzles(hazards, on) {
+                                        Self::fizzle(&mut after);
+                                    }
+                                    let act = Act::Plate {
+                                        from: c,
+                                        dir: st.dir,
+                                        plate: level.plates[p].cell,
+                                        to: f,
+                                    };
+                                    self.fits(after, next).map(|after| (act, after))
+                                })
+                            })
+                        })
                     }),
                 // From a splat's own cell if one will do: gel reaches less far around it than
                 // the solver's radius (in-game, the middle of a cell beside the splat can be
@@ -962,7 +1010,7 @@ impl<'a> Grounder<'a> {
                         .rails
                         .iter()
                         .flat_map(|r| {
-                            let t = r.track();
+                            let t = r.stops();
                             t.windows(2)
                                 .flat_map(|w| [(w[0], w[1]), (w[1], w[0])])
                                 .collect::<Vec<_>>()
