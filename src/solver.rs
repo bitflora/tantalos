@@ -52,6 +52,13 @@
 //!   cell (on a button there, or set down at a spot there as a stand) lifts it.
 //! - Flings (`flings`): dropping from a ledge into a floor portal (`Action::Dive`) throws the
 //!   player out of the other one at speed. Faith plates launch whatever comes onto them.
+//!   A portal loop (`Action::Loop`): walking into a floor portal whose partner's way out
+//!   falls straight back into it (a wall portal over it) comes back down through it at the
+//!   speed of that fall and flies out of the partner, or out of the partner moved mid-fall to
+//!   another face the player can shoot from where they walked in (as play-testers do: move
+//!   the exit just as you come out).
+//! - A dropper's cube that would fall into goo can be caught by a player on a floor beside its
+//!   fall (it lies in that floor's region).
 //! - Cubes placed without a dropper are gone for good when fizzled; a dropper that only drops
 //!   when told to (`Auto Drop` off, wired) holds its cube until its inputs are first on.
 //!   Whenever a wired dropper's inputs come on (all of them, after not all were), it drops a
@@ -279,6 +286,15 @@ pub enum Action {
         height: i32,
         to: usize,
     },
+    /// Walk into the floor portal of this color, come out of the other one and fall `height`
+    /// voxels straight back into it; with `refire`, move the other portal to that class on the
+    /// way down; fly out of the other one to region `to`.
+    Loop {
+        color: Color,
+        height: i32,
+        refire: Option<usize>,
+        to: usize,
+    },
 }
 
 impl Action {
@@ -304,6 +320,17 @@ impl Action {
             Action::Dive { color, height, to } => Action::Dive {
                 color: color.other(),
                 height,
+                to,
+            },
+            Action::Loop {
+                color,
+                height,
+                refire,
+                to,
+            } => Action::Loop {
+                color: color.other(),
+                height,
+                refire,
                 to,
             },
             a => a,
@@ -507,6 +534,9 @@ pub struct Model {
     edge_range: Vec<(usize, usize)>,
     gel_move_range: Vec<(usize, usize)>,
     fire_from: Vec<Vec<Target>>,
+    /// Per face class: (floor class, height) of portal loops, where walking out of a portal
+    /// on the class falls `height` voxels into a portal on the floor class.
+    loops: Vec<Vec<(usize, i32)>>,
     footholds: Vec<Vec<usize>>,
     buttons_in: Vec<Vec<usize>>,
     pedestals_in: Vec<Vec<usize>>,
@@ -663,7 +693,11 @@ const USES_PEDESTAL: u32 = 2 << 30;
 
 fn uses(a: &Action) -> u32 {
     match *a {
-        Action::Fire { class, .. } => USES_CLASS | class as u32,
+        Action::Fire { class, .. }
+        | Action::Loop {
+            refire: Some(class),
+            ..
+        } => USES_CLASS | class as u32,
         Action::Press { pedestal }
         | Action::Dash { pedestal, .. }
         | Action::Fetch { pedestal, .. } => USES_PEDESTAL | pedestal as u32,
@@ -1072,8 +1106,25 @@ impl Model {
         // Turrets a cube dropped at the start lands on, knocked over from the start.
         let mut start_down = 0u32;
         for cube in level.of_kind(&ItemKind::Cube) {
-            // A cube that would fall into goo is simply gone.
-            if let Some(l) = Landing::from_fall(level, &graph, cube.cell) {
+            // A cube that would fall into goo is simply gone, unless it drops from a dropper
+            // past a floor beside its fall: the player there catches it on the way down.
+            let caught = || {
+                let dropper = level.item(*level.dropper_of.get(&cube.index)?)?;
+                let mut k = dropper.cell;
+                while k[2] >= cube.cell[2] {
+                    for d in Dir::HORIZONTAL {
+                        let n = step(k, d);
+                        if level.standable(n) && level.face(k, d).barrier.is_none() {
+                            if let Some(l) = Landing::at(level, &graph, n, 0) {
+                                return Some(l);
+                            }
+                        }
+                    }
+                    k[2] -= 1;
+                }
+                None
+            };
+            if let Some(l) = Landing::from_fall(level, &graph, cube.cell).or_else(caught) {
                 let loc = landing_loc(l, cube.cube_kind());
                 let home = if level.loose_cube(cube.index) {
                     CubeLoc::Gone
@@ -1328,6 +1379,7 @@ impl Model {
         let reach = if mode == Mode::Liberal { 3 } else { 2 };
         let dives = portals::dives(level, &graph, reach);
         let mut fling_heights: Vec<i32> = dives.values().flatten().map(|&(_, h)| h).collect();
+        fling_heights.extend(level.portal_surfaces().into_iter().flat_map(|w| loop_falls(level, w).into_iter().map(|(_, h)| h)));
         fling_heights.sort();
         fling_heights.dedup();
         let mut flips = Vec::new();
@@ -1450,6 +1502,24 @@ impl Model {
             WalkGraph::default()
         };
         let portals = Portals::build(geo, &graph, rules.sight, &extras);
+        let class_of: HashMap<Face, usize> = portals
+            .classes
+            .iter()
+            .flat_map(|c| c.faces.iter().map(move |&f| (f, c.id)))
+            .collect();
+        let mut loops: Vec<Vec<(usize, i32)>> = vec![Vec::new(); portals.classes.len()];
+        for (&w, &x) in &class_of {
+            for (f, h) in loop_falls(level, w) {
+                if let Some(&fl) = class_of.get(&(f, Dir::NegZ)) {
+                    if !loops[x].contains(&(fl, h)) {
+                        loops[x].push((fl, h));
+                    }
+                }
+            }
+        }
+        for l in &mut loops {
+            l.sort();
+        }
         // (device bit, shot mask bit) of each panel that stops shots while deployed.
         let panel_shots: Vec<(usize, u64)> = (0..level.panels.len())
             .filter_map(|i| {
@@ -1633,6 +1703,7 @@ impl Model {
             edge_range: ranges(&edge_from),
             gel_move_range: ranges(&gel_move_from),
             fire_from,
+            loops,
             special: portals
                 .classes
                 .iter()
@@ -2878,6 +2949,65 @@ impl Model {
         // Whether one of the shots with these masks gets past the fizzlers and panels.
         let stops = self.shot_stops(lay, s, None);
         let clear = |masks: &Masks, stops: u64| masks.iter().any(|&m| m & stops == 0);
+        // Portal loops: into the floor portal, back down through it from the other one.
+        for color in Color::BOTH {
+            let (me, you) = (color as usize, color.other() as usize);
+            let (Some(fl), Some(x)) = (portal(s, me), portal(s, you)) else { continue };
+            if self.portals.classes[fl].behavior(dev).entry != Some(r) {
+                continue;
+            }
+            for &(_, h) in self.loops[x].iter().filter(|&&(f, _)| f == fl) {
+                for &(c, l) in self.portals.classes[x].behavior(dev).flings_at(h) {
+                    if !c.holds(dev) {
+                        continue;
+                    }
+                    if let Some(fizzled) =
+                        self.travel(lay, s, on, alive, l.region, l.hazards, &mut sc.n)
+                    {
+                        let a = Action::Loop {
+                            color,
+                            height: h,
+                            refire: None,
+                            to: l.region,
+                        };
+                        done(&mut sc.n, a, !fizzled);
+                    }
+                }
+                for t in self.fire_from[r].iter().filter(|_| can_fire) {
+                    let c = t.class;
+                    let class = &self.portals.classes[c];
+                    let unpainted = t
+                        .needs_paint
+                        .is_some_and(|f| lay.paint_at(s, f) != PaintKind::Portal as u32 + 1);
+                    if c == fl
+                        || c == x
+                        || !self.class_enabled[c]
+                        || unpainted
+                        || !class.needs.holds(dev)
+                        || !(t.open || clear(&class.visible_from[r], stops))
+                    {
+                        continue;
+                    }
+                    for &(cond, l) in class.behavior(dev).flings_at(h) {
+                        if !cond.holds(dev) {
+                            continue;
+                        }
+                        if let Some(false) =
+                            self.travel(lay, s, on, alive, l.region, l.hazards, &mut sc.n)
+                        {
+                            sc.n[BLUE + you] = c as u32 + 1;
+                            let a = Action::Loop {
+                                color,
+                                height: h,
+                                refire: Some(c),
+                                to: l.region,
+                            };
+                            done(&mut sc.n, a, false);
+                        }
+                    }
+                }
+            }
+        }
         let plain = |p: Option<usize>| p.is_none_or(|c| !self.special[c]);
         for color in Color::BOTH {
             let me = color as usize;
@@ -3448,6 +3578,20 @@ impl Model {
                 color.name(),
                 label(to)
             ),
+            Action::Loop {
+                color,
+                height,
+                refire,
+                to,
+            } => format!(
+                "walk into the {} portal, fall {height} back into it{} and fly out to region {}",
+                color.name(),
+                match refire {
+                    Some(c) => format!(", moving the {} one to class {c} on the way", color.other().name()),
+                    None => String::new(),
+                },
+                label(to)
+            ),
         }
     }
 }
@@ -3708,6 +3852,27 @@ struct Target {
     needs_paint: Option<usize>,
     /// Some shot at it from the region is clear whatever the fizzlers do.
     open: bool,
+}
+
+/// Portal loops' falls: out of a wall portal on `face` at walking speed, the floor cells the
+/// player can fall onto (straight down, or a cell further out) and how far (at least
+/// `MIN_DIVE` voxels), where that floor takes portals.
+fn loop_falls(level: &Level, (c, d): Face) -> Vec<(Cell, i32)> {
+    let mut out = Vec::new();
+    if d.axis() == 2 {
+        return out;
+    }
+    for from in [c, step(c, d.opposite())] {
+        if level.solid(from) || level.face(c, d.opposite()).barrier.is_some() && from != c {
+            continue;
+        }
+        let Some((f, _)) = level.fall_path(from) else { continue };
+        let h = c[2] - f[2];
+        if h >= portals::MIN_DIVE && level.portal_surface(f, Dir::NegZ) && !out.contains(&(f, h)) {
+            out.push((f, h));
+        }
+    }
+    out
 }
 
 /// The 2 bits a face painted with `kind` has in a packed state: 0 for water, which washes it.

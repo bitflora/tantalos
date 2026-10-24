@@ -1080,6 +1080,9 @@ impl<'a> Grounder<'a> {
                 })
             }
 
+            // Not grounded yet: the play harness has no leg for it, so such plans don't route.
+            Action::Loop { .. } => None,
+
             Action::Dive { color, height, to } => {
                 let k = color as usize;
                 let (face, out) = (h.portals[k]?, h.portals[1 - k]?);

@@ -310,6 +310,25 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   - `train/play.py` has `act_fetch` and `act_reach`, not yet tried in game. `glados route`
     can now put a cube down in the player's own cell when its region has no other.
 - 00011..00013 (One Jump, FLAAD TEST, You can't simply jump around it): not recorded here.
+- **3094057883 "Simple Test 01"** (staged as `glados-ws5b-unsolv-00002`, 2026-10-24; the user's
+  favorite, `favorites/ws5-simple-test-01.p2c`): momentum. Exit portal high on a wall, entrance
+  in the floor under it; walk in, and just as you come out, move the exit to the tilted panel:
+  the fall back through the floor portal flings you onto the fence platform. Press the
+  pedestal, put the exit on the panel it tilts, a floor portal where you land coming out of it
+  slowly, and walk in holding the cube: the second fall through lands you by the exit's button.
+  Cube on the button, then dive off the raised platform into a floor portal to the exit. Two
+  gaps, **fixed (2026-10-24)**:
+  - `Action::Loop`: with a floor portal under the way out of the other portal (straight down,
+    or a cell further out, `loop_falls`), walk in and fall back through at the speed of that
+    fall, flying out of the other portal or (`refire`) of a face the player shoots on the way
+    down from where they walked in. Not grounded by `glados route` yet (no plan word, no play
+    harness leg), so such plans are left out of solver-net data.
+  - The dropper's cube falls into goo in an alcove; the player catches it from the floor
+    beside its fall. A dropper's cube that would fall into goo now lies in such a floor's
+    region.
+  - Liberal rules solve it in 11 actions (the play-tester's route, with the cube carried
+    through the first loop); conservative rules don't trust the 4-voxel fling out of the tilted
+    panel (its trials land in different places), so it is uncertain.
 
 ## Recommended order
 

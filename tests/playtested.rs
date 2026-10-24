@@ -16,6 +16,11 @@ const STAIRS_SIDEWAYS: &str = "size 6 8 5 open 0 3 0 2 4 2 0 5 0 0 5 2 0 2 1 2 7
 /// that one's floor button.
 const SMALLEST: &str = "size 3 5 2 open 1 0 0 1 4 0 2 1 0 2 2 0 0 2 0 1 3 0 2 1 1 2 1 1 white +z 1 0 0 2 0 1 white -z 2 2 0 2 4 0 entry 1 0 0 +y exit 1 4 0 -y fizzler 2 1 0 -x +z 1 on fizzler 2 2 0 -y +z 1 on dropper 2 1 1 standard button 1 0 0 weighted > exit button 1 3 0 weighted > field 1 pedestal 1 4 0 3 > field 0";
 
+/// 3094057883 "Simple Test 01": momentum. Walk into a floor portal under a wall portal, and
+/// move the wall one to a tilted panel while falling back; later loops carry you (and the
+/// cube, caught as it falls past into goo) up to the button and the exit.
+const SIMPLE_TEST_01: &str = "size 10 11 11 open 6 0 1 6 6 4 2 1 1 9 6 10 1 3 1 9 3 3 0 3 2 9 4 3 1 5 6 9 6 7 6 7 6 9 9 10 6 10 8 9 10 10 7 0 9 7 10 9 1 3 9 9 4 9 goo 6 0 0 6 0 0 white +x 9 1 1 9 4 5 9 5 2 9 10 5 white -x 2 2 1 9 10 4 2 1 3 9 4 5 white +y 2 6 2 9 10 4 5 6 5 9 10 5 white -y 5 1 1 9 6 5 2 1 3 9 6 5 white -z 5 1 1 9 4 10 2 2 1 9 2 10 3 3 1 9 4 10 2 4 1 9 4 10 entry 3 1 1 +y exit 7 10 8 -y grating 2 5 5 4 6 5 +z +x glass 6 7 6 6 7 10 -y +z grating 6 9 7 9 9 7 +z +x dropper 6 0 4 standard button 6 8 6 weighted > exit > panel 1 > panel 3 > stairs 1 pedestal 1 5 6 inf > panel 0 pedestal 5 1 1 inf > dropper 0 panel 8 1 5 +y -z 3 off panel 9 5 6 -x -z 6 off panel 9 6 3 -x -z 4 on panel 9 6 6 -x -z 6 off stairs 2 3 1 -x on stairs 9 8 6 -y off";
+
 fn level(tokens: &str) -> Level {
     Level::from_puzzle(&glados::tokens::decode(tokens).unwrap())
 }
@@ -67,4 +72,18 @@ fn no_reach_while_the_button_leaves_the_fizzler_on() {
         }
         i += 1;
     }
+}
+
+#[test]
+fn portal_loops_and_a_caught_cube() {
+    let model = Model::new(&level(SIMPLE_TEST_01), Mode::Liberal).unwrap();
+    let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+        panic!("not solved");
+    };
+    assert!(
+        plan.iter().any(|a| matches!(a, Action::Loop { refire: Some(_), .. })),
+        "{plan:?}"
+    );
+    // Conservative rules don't trust the 4-voxel fling out of the tilted panel (its trials
+    // land in different places), so the level is uncertain, not solvable.
 }
