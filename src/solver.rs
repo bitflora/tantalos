@@ -47,7 +47,9 @@
 //!   regions that need a device only exist while it is in that state, and whoever stands in a
 //!   region that goes away rides or falls (`Region::fallback`), or dies.
 //! - Lasers (`lasers`): catchers and relays are senders, powered while a beam reaches them.
-//!   Reflection cubes put down at a spot (cell and facing) redirect beams.
+//!   Reflection cubes put down at a spot (cell and facing) redirect beams. One on the floor
+//!   sends its beam too low for wall receivers (also through portals); another cube in its
+//!   cell (on a button there, or set down at a spot there as a stand) lifts it.
 //! - Flings (`flings`): dropping from a ledge into a floor portal (`Action::Dive`) throws the
 //!   player out of the other one at speed. Faith plates launch whatever comes onto them.
 //! - Cubes placed without a dropper are gone for good when fizzled; a dropper that only drops
@@ -535,6 +537,9 @@ pub struct Model {
     emitter_switch: Vec<usize>,
     /// Per region, the laser spots (`Beams::spots`) in it.
     spots_in: Vec<Vec<usize>>,
+    /// Per spot: a cube other than a reflection cube may be set down here, as a stand for one
+    /// (the first spot of a cell whose spots reach a wall receiver).
+    stand_spot: Vec<bool>,
     /// Per beam end face (a class of its own), its class.
     beam_end_class: HashMap<Face, usize>,
     /// Per panel (`Level::panels`), the class of its face, if it takes portals.
@@ -1467,6 +1472,19 @@ impl Model {
             })
             .collect();
         let regions_n = graph.regions.len();
+        let reaches_wall = |k: usize| {
+            beams.rays[beams.spots[k].ray]
+                .events
+                .iter()
+                .any(|e| matches!(*e, Event::Receiver(r) if beams.on_wall[r]))
+        };
+        let stand_spot: Vec<bool> = (0..beams.spots.len())
+            .map(|k| {
+                let cell = beams.spots[k].cell;
+                let same: Vec<usize> = (0..beams.spots.len()).filter(|&o| beams.spots[o].cell == cell).collect();
+                same[0] == k && same.iter().any(|&o| reaches_wall(o))
+            })
+            .collect();
         let mut spots_in = vec![Vec::new(); regions_n];
         for (k, sp) in beams.spots.iter().enumerate() {
             if let Some(r) = graph.region_of(beams.spot_cells[sp.cell]) {
@@ -1695,6 +1713,7 @@ impl Model {
             beams,
             emitter_switch,
             spots_in,
+            stand_spot,
             beam_end_class,
             panel_class,
             held_back,
@@ -2399,12 +2418,23 @@ impl Model {
             }
             c.beam_out
         };
+        // Whether the reflection cube at spot `k` stands on another cube.
+        let stacked = |k: usize| {
+            let cell = self.beams.spots[k].cell;
+            lay.cubes(s).iter().zip(&lay.kinds).any(|(&code, &kind)| match self.code_loc(code) {
+                CubeLoc::OnButton(b) => self.buttons[b].cell == self.beams.spot_cells[cell],
+                CubeLoc::Spot(o) => kind != CubeKind::Reflection && self.beams.spots[o].cell == cell,
+                _ => false,
+            })
+        };
         // Each beam goes one way, so follow each emitter's to its end.
         for (e, &(_, ray)) in self.beams.emitters.iter().enumerate() {
             if !self.switch_on(lay, s, self.emitter_switch[e], None) {
                 continue;
             }
             let mut next = Some(ray);
+            // Out of a reflection cube on the floor: too low for wall receivers.
+            let mut low = false;
             for _ in 0..=8 {
                 let Some(ray) = next.take() else { break };
                 let r = &self.beams.rays[ray];
@@ -2412,7 +2442,11 @@ impl Model {
                 let mut stopped = false;
                 for ev in &r.events {
                     match *ev {
-                        Event::Receiver(k) => lit |= 1 << k,
+                        Event::Receiver(k) => {
+                            if !(low && self.beams.on_wall[k]) {
+                                lit |= 1 << k;
+                            }
+                        }
                         Event::Turret(t) => hit |= 1 << t,
                         Event::Panel { p, front } => {
                             if dev_of(s) & (1 << self.devices.panel_bit[p]) == 0 {
@@ -2429,6 +2463,7 @@ impl Model {
                                 let spot = &self.beams.spots[k];
                                 if spot.on.is_none_or(|on| on == ray) {
                                     next = Some(spot.ray);
+                                    low = !stacked(k);
                                 } else {
                                     stopped = true;
                                 }
@@ -2929,12 +2964,13 @@ impl Model {
                 .chain(
                     self.spots_in[r]
                         .iter()
-                        .filter(|_| reflects)
+                        .filter(|&&k| reflects || self.stand_spot[k])
                         .filter(|&&k| {
-                            // One cube to a cell.
+                            // One reflection cube to a cell, and one stand under it.
                             let cell = self.beams.spots[k].cell;
-                            !cubes.iter().any(|&c| {
-                                matches!(self.code_loc(c), CubeLoc::Spot(o) if self.beams.spots[o].cell == cell)
+                            !cubes.iter().zip(&lay.kinds).any(|(&c, &other)| {
+                                (other == CubeKind::Reflection) == reflects
+                                    && matches!(self.code_loc(c), CubeLoc::Spot(o) if self.beams.spots[o].cell == cell)
                             })
                         })
                         .map(|&k| CubeLoc::Spot(k)),

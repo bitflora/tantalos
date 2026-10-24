@@ -443,9 +443,11 @@ fn workshop_tricks_the_editor_allows() {
 fn a_reflection_cube_can_aim_at_an_angle() {
     // Workshop 3660480385 "EZ": one cube in front of the emitter, turned so the beam crosses
     // both floor relays on its way to the catcher on the far wall; only an angled aim does it.
+    // A reflection cube on the floor sends its beam too low for a wall catcher (in-game,
+    // 2026-10-24), so here a standard cube is added for it to stand on.
     let tokens = "size 9 8 4 open 1 0 0 1 7 0 0 2 0 6 7 3 7 2 0 8 3 0 7 4 0 7 4 0 7 4 3 7 5 3 \
         white -x 0 7 0 6 7 0 white +y 1 7 0 1 7 0 entry 1 0 0 +y exit 6 7 0 -y \
-        glass 1 7 0 1 7 0 -x +z dropper 2 5 3 reflection laser 8 3 0 -x center on \
+        glass 1 7 0 1 7 0 -x +z dropper 2 5 3 reflection dropper 4 5 3 standard laser 8 3 0 -x center on \
         catcher 0 7 0 -y center > exit relay 3 6 0 +z center > exit relay 6 4 0 +z center > exit";
     let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
     let plain = Model::new(&level, Mode::Conservative).unwrap();

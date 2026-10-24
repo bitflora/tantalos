@@ -18,6 +18,10 @@
 //!   button down (or set down beside one) catches the beam passing over it; it doesn't press
 //!   the button itself. Beams out of portals have spots as well (straight, and angled at a
 //!   receiver), kept only where the beam out of the cube powers a receiver or hits a turret.
+//! - Heights (in-game, 2026-10-24): emitters, wall catchers and wall relays sit at the middle
+//!   of their voxel. A reflection cube on the floor catches a beam at that height but sends it
+//!   on too low for a wall catcher or relay; set on top of another cube (on a button or a
+//!   spot in its cell) it sends it high enough. The solver tracks this (`Beams::on_wall`).
 //! - Angled beams: a cube can also be set down anywhere along a beam crossing its cell, turned
 //!   to aim at a receiver, turret or portal surface on the same level (`aim_targets`, from
 //!   three points along the beam). The beam out of it runs at that angle through the grid
@@ -103,6 +107,9 @@ type Seg = (usize, [f64; 2], [f64; 2]);
 pub struct Beams {
     /// Catchers and relays (item index, kind), the senders `Signal::Laser` names.
     pub receivers: Vec<(i32, LaserKind)>,
+    /// Per receiver: on a wall (at the middle of its voxel), out of reach of a beam from a
+    /// reflection cube standing on the floor.
+    pub on_wall: Vec<bool>,
     /// Emitters: (item index, ray).
     pub emitters: Vec<(i32, usize)>,
     pub rays: Vec<Ray>,
@@ -136,6 +143,12 @@ impl Beams {
                 .iter()
                 .filter(|l| l.kind != LaserKind::Emitter)
                 .map(|l| (l.item, l.kind))
+                .collect(),
+            on_wall: level
+                .lasers
+                .iter()
+                .filter(|l| l.kind != LaserKind::Emitter)
+                .map(|l| l.normal.axis() != 2)
                 .collect(),
             ..Beams::default()
         };

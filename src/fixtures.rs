@@ -323,7 +323,8 @@ pub fn washed_gel(water: bool) -> Puzzle {
 }
 
 /// The exit is wired to a laser catcher on the far wall; the emitter fires across the room.
-/// A reflection cube set down in the beam, facing the catcher, powers it.
+/// A reflection cube set down on the floor in the beam sends it too low for the catcher
+/// (in-game, 2026-10-24), so this is unsolvable; `laser_cube_stand` adds a cube to stand it on.
 pub fn laser_cube(cube: bool) -> Puzzle {
     let title = if cube { "Laser cube" } else { "Laser, no cube" };
     let mut b = Builder::new(title, [6, 6, 4]);
@@ -336,6 +337,21 @@ pub fn laser_cube(cube: bool) -> Puzzle {
     if cube {
         b.cube_dropper_of([2, 4, 3], 2);
     }
+    b.build()
+}
+
+/// `laser_cube` with a second cube: the reflection cube set on top of it, in the beam and
+/// facing the catcher, powers it.
+pub fn laser_cube_stand() -> Puzzle {
+    let mut b = Builder::new("Laser cube on a cube", [6, 6, 4]);
+    b.carve([0, 0, 1], [5, 5, 3]);
+    b.entry([1, 0, 1], Dir::PosY);
+    let exit = b.exit([0, 4, 1], Dir::PosX);
+    b.laser(LaserKind::Emitter, [5, 2, 1], Dir::NegX, Some(Dir::NegZ), true);
+    let catcher = b.laser(LaserKind::Catcher, [3, 5, 1], Dir::NegY, Some(Dir::NegZ), true);
+    b.connect(catcher, exit);
+    b.cube_dropper_of([2, 4, 3], 2);
+    b.cube_dropper([4, 4, 3]);
     b.build()
 }
 
@@ -526,6 +542,7 @@ pub fn all() -> Vec<(&'static str, Puzzle)> {
         ("sphere_button", sphere_button()),
         ("laser_cube", laser_cube(true)),
         ("laser_no_cube", laser_cube(false)),
+        ("laser_cube_stand", laser_cube_stand()),
         ("laser_relay", laser_relay()),
         ("faith_plate", faith_plate()),
         ("light_bridge", light_bridge(false)),
