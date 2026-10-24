@@ -104,3 +104,24 @@ new task, fresh learning rates); `--from` a solve run continues it.
   are noise. Also reported: pass@8, optimal %, test-ws (Workshop levels our solver solves) and
   published-liberal (Workshop levels it can't; a weak signal). Don't compare it with the level
   runs' EVAL solvable %.
+
+## Staging "unsolv" Workshop levels for play-testing
+
+When the user asks for N more "unsolvable" Workshop levels, run one command (no Portal 2 needed,
+don't start or touch the game; needs `target/release/glados.exe`):
+
+```bash
+.venv/Scripts/python train/stage_unsolv.py --n 5
+```
+
+It picks the smallest levels of `data/ws5/train.jsonl` our solver calls unsolvable (not yet in
+`train/unsolv-staged.jsonl`, no `@pre_paint_sprayer` gel, one per item set), re-scores them with the
+release build (50k/250k, editor rules off) and `glados editor`, writes `out/unsolv-DATE/`
+(p2c, tokens, scores, MANIFEST.md), copies them into the Puzzle Maker folder as
+`glados-ws5b-unsolv-NNNNN` (continuing the highest number; Title `unsolv <title>`) and appends them
+to the registry. `--dry-run` shows the picks only. Commit `train/unsolv-staged.jsonl` afterwards.
+Then tell the user the file names, titles and item sets. Add `--n` only if the user names a count.
+If an editor flag shows up, say so; the real-editor check is `train/portal2.py check DIR --out F
+--launch` and only when the game is closed. When the user reports how they solved one, follow
+the unsolv-playtests memory: fix the solver or document it in docs/solver-gaps-2026-10.md and add
+it to tests/playtested.rs.
