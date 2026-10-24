@@ -56,6 +56,9 @@ id as `<src:ws>` and the subscribers as `<tier:top>` (≥ 100) or `<tier:mid>` (
     logic entities keep the instance's angles; an item's cell is floor((anchor + up) / 128);
   - wires are the outputs of each button's `func_instance_io_proxy`;
   - cube type: `counter_cube_type` startvalue; pedestal: `prop_button` `istimer`/`Delay`;
+    two pedestal buttons in one cell (a map can place them inside the editor's 128-unit voxel)
+    can't both be placed, so the later one moves to the nearest free neighbouring cell with a
+    floor under it;
     gel: `info_paint_sprayer` `PaintType` (0 bounce, 2 speed, 3 portal, 4 water) and `start_active`;
     fields: their trigger brushes' extent, `trigger_hurt` = laser field;
   - turrets: the `.p2c` Facing is the npc's yaw + 180 (kept, so imports match generated levels);

@@ -499,7 +499,7 @@ def convert(bsp):
                 timer = str(t)
             else:
                 timer = "inf"
-            toks_pedestals.append((cell, timer, targets(inst)))
+            toks_pedestals.append((cell, timer, targets(inst), p.origin()))
         else:
             raise Unsupported(f"{inst.name}: unknown button")
         item_cells.append(cell)
@@ -549,6 +549,30 @@ def convert(bsp):
     filled = settle_goo(goo, open_cells)
     later_item_cells = [f for _, fields, _ in later["items"] for f in fields
                         if isinstance(f, tuple) and len(f) == 3 and not isinstance(f[0], str)]
+    # Two pedestal buttons in one 128-unit cell: the editor allows only one button per cell
+    # (src/editor.rs, shared-cell), though a map may place two within it. Move the later one to
+    # the nearest free neighbouring cell with a floor under it, toward the cell's middle.
+    occupied = set(item_cells) | set(later_item_cells) | {entry, exit_c}
+    occupied |= {f[1] for f in toks_fields}
+    occupied |= {c for c, _, _ in toks_droppers} | {d for d, _, _ in toks_gels}
+    seen = set()
+    for i, (cell, timer, ts, origin) in enumerate(toks_pedestals):
+        if cell not in seen:
+            seen.add(cell)
+            continue
+        centre = tuple(CELL * v + CELL / 2 for v in cell)
+        off = tuple(origin[a] - centre[a] for a in range(3))
+        dirs = sorted(DIRS[:4], key=lambda d: sum(d[a] * off[a] for a in range(3)))
+        for d in dirs:
+            c = add(cell, d)
+            if c in open_cells and add(c, DOWN) not in open_cells \
+                    and c not in goo and c not in filled and c not in occupied:
+                break
+        else:
+            raise Unsupported(f"pedestal at {cell}: no free neighbouring cell")
+        toks_pedestals[i] = (c, timer, ts, origin)
+        occupied.add(c)
+        seen.add(c)
     for c in [entry, exit_c] + item_cells + later_item_cells:
         if c in filled:
             raise Unsupported(f"item at {c} under a goo surface the editor can't make")
@@ -698,7 +722,7 @@ def convert(bsp):
 
     for c, kind, ts in toks_buttons:
         out += ["button"] + loc(c) + [kind] + wires(ts)
-    for c, timer, ts in toks_pedestals:
+    for c, timer, ts, _ in toks_pedestals:
         out += ["pedestal"] + loc(c) + [timer] + wires(ts)
     for c, f in toks_turrets:
         out += ["turret"] + loc(c) + [str(f)]

@@ -348,8 +348,10 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     still rejects it, so that assumption is wrong.
   - **3722716739 "2026 9"** (ws5b-00005): the editor accepts it, but the play-tester couldn't
     solve it, and the solver calls it unsolvable even under liberal rules. No lead.
-  - The same check flags "Flying a Timing" (ws5-00001, reported earlier): `button (25,0,1)`
-    twice and `target (14,4,2)`. Not looked at yet.
+  - "Flying a Timing" (ws5-00001, reported earlier): `button (25,0,1)` twice and `target
+    (14,4,2)`. Both fixed: the vertical faith plate no longer writes a target in mid-air, and
+    one of the two pedestal buttons that shared a cell moves to the free neighbouring cell.
+    Re-converted and staged again 2026-10-24; the editor accepts it.
   - **In-game tests** (33 test chambers, `train/portal2.py check --keep-vmf` keeps each valid
     level's export):
     - Fields: a fizzler and a laser field on the same side of one voxel are rejected, all of
@@ -378,6 +380,12 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
       plate's height back from `CatapultHeight` (`level::vertical_reach`), so the tokens don't
       change: 9,557 Workshop and v5b levels with one re-encode the same as before. In game,
       21 Workshop levels with one (Replica among them) have no target flagged; 17 pass.
+    - `tools/workshop/convert.py`: two pedestal buttons in one 128-unit cell (a map can place
+      them inside the editor's voxel) no longer collide; the later one moves to the nearest
+      free neighbouring cell with a floor under it. The only staged level that hit it, "Flying
+      a Timing", now passes.
+    - "C2 - Dumb Kinda Duplex" (ws3-00002) is staged again too: the goo surface now has a
+      solid floor under it, and the editor accepts it.
     - "Easy chamber" and "Replica" are staged again under the same names; both pass the
       editor now, and the solver calls both unsolvable.
     - Not done: `out/workshop/levels.jsonl` and data/ws5 still hold the old conversions of
