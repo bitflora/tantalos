@@ -93,7 +93,7 @@ Name them `solve-...`, e.g. `solve-fresh-2h`. `--from` a level run starts from i
 new task, fresh learning rates); `--from` a solve run continues it.
 
 - It needs `data/plans/` (train.jsonl, test-gen.jsonl, test-ws.jsonl), made by `train/plans.py`:
-  CPU-heavy for hours, so only when the user asks, and not while a run is going. `start`
+  CPU-heavy (every thread) for about 30-40 minutes, so only when the user asks, and not while a run is going. `start`
   refuses without it; tell the user.
 - A solve run does: build, train, evaluate with `solve_eval.py` (about 15 minutes), record. It
   has no Portal 2 steps, no training away and no play-test picks, so `wait` never exits 2.

@@ -72,6 +72,29 @@ fn solver_plans_check_as_solved() {
     assert!(ambiguous > 0, "no plan's step fitted more than one distinct action");
 }
 
+/// Several shortest plans: the first is `solve`'s, all differ, all are as short, and each
+/// grounds and checks as solved.
+#[test]
+fn shortest_plans_all_solve() {
+    let mut more = 0;
+    for (name, level, _, len) in plans() {
+        let model = Model::new(&level, Mode::Conservative).unwrap();
+        let Verdict::Solved(own) = model.solve(BUDGET).verdict else { unreachable!() };
+        let (outcome, found) = model.shortest_plans(BUDGET, 6, 3);
+        assert!(matches!(outcome.verdict, Verdict::Solved(ref p) if *p == own), "{name}");
+        assert_eq!(found[0], own, "{name}");
+        for (i, p) in found.iter().enumerate() {
+            assert_eq!(p.len(), len, "{name}: plan {i}");
+            assert!(!found[..i].contains(p), "{name}: plan {i} twice");
+            let tokens = encode(&route_plan(&level, &model, p).unwrap_or_else(|e| panic!("{name}: plan {i}: {e}")));
+            let c = check(&model, &decode(&tokens).unwrap());
+            assert!(c.solved, "{name}: plan {i}: {tokens}: {:?}", c.problem);
+        }
+        more += (found.len() > 1) as usize;
+    }
+    assert!(more > 20, "only {more} levels with more than one shortest plan");
+}
+
 /// A cell no level here reaches.
 const NOWHERE: [i32; 3] = [31, 31, 31];
 

@@ -161,7 +161,8 @@ def main():
         if args.away:
             sys.exit("--away is for --task levels")
         train, val, lengths = load_solve(args.data, vocab, args.block, seed=args.seed)
-        print(f"data: {len(train)} train, {len(val)} val; vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s")
+        print(f"data: {len(train)} train ({len(train.offsets) - 1} plans), {len(val)} val; vocab {len(vocab)}; "
+              f"loaded in {time.time() - t0:.0f}s")
         print(f"  {lengths.report()}; {lengths.unknown} with tokens not in {vocab_file}, dropped")
         # The same validation levels at every eval, so their solved shares compare.
         solve_picks = random.Random(args.seed).sample(range(len(val)), min(args.score_n, len(val)))
@@ -243,7 +244,8 @@ def main():
     # A batch's loss is the mean over its targets. Sorted batches of long levels hold far more
     # targets than batches of short ones, so scale each by its share of the average count:
     # every target then weighs the same, as in random batches (whose counts vary little).
-    per_batch = args.batch * (len(train.level_ids) / max(len(train), 1) + 1)
+    # (Records, not len(train): a solve level can hold several plans.)
+    per_batch = args.batch * (len(train.level_ids) / max(len(train.offsets) - 1, 1) + 1)
 
     @torch.no_grad()
     def evaluate():

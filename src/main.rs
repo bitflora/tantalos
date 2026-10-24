@@ -25,7 +25,7 @@ const USAGE: &str = "usage:
                                 (default data/levels-<seed>.jsonl). --portals-required true:
                                 drop levels solvable without portals; --max-unsolved: most
                                 share of levels that aren't solvable
-  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [--plan-only] [FILE]
+  glados score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [--plan-only] [--plans K] [FILE]
                                 decode and solve one token sequence per line of FILE (or
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
                                 --p2c-all every one that parsed. --editor-rules off: don't
@@ -34,7 +34,9 @@ const USAGE: &str = "usage:
                                 --plan: add each solvable level's plan as plan tokens
                                 (\"plan\", src/plan.rs), or why it has none (\"plan_error\").
                                 --plan-only: just the plan and min_len, for levels already
-                                labelled solvable: no metrics, portal check or liberal model
+                                labelled solvable: no metrics, portal check or liberal model.
+                                --plans K (with --plan-only): also \"plans\", up to K
+                                different shortest plans, \"plan\" first
   glados check [--mode conservative|liberal] [--route DIR] [FILE]
                                 check plans: JSONL with \"tokens\" (a level) and \"plan\" (plan
                                 tokens) or \"plans\" (a list of them, all against one model),
@@ -713,6 +715,7 @@ fn run_score(args: &[String]) -> Result<()> {
     let mut editor_rules = true;
     let mut with_plan = false;
     let mut plan_only = false;
+    let mut k = 1;
     let mut rest = Vec::new();
     // `--plan` and `--plan-only` take no value.
     let args: Vec<String> = args
@@ -729,6 +732,7 @@ fn run_score(args: &[String]) -> Result<()> {
     for (flag, value) in flags(&args, &mut rest)? {
         match flag {
             "--budget" => budget = parse(flag, value)?,
+            "--plans" => k = parse(flag, value)?,
             "--editor-rules" => {
                 editor_rules = match value {
                     "on" => true,
@@ -788,11 +792,18 @@ fn run_score(args: &[String]) -> Result<()> {
                         format!("\"tokens\":{},", dataset::json_str(&t))
                     });
                     if plan_only {
-                        let fields = match dataset::plan_only(&p, budget, editor_rules) {
-                            Ok((len, Ok(t))) => format!(
-                                "\"verdict\":\"solvable\",\"min_len\":{len},\"plan\":{}",
-                                dataset::json_str(&t)
-                            ),
+                        let fields = match dataset::plan_only(&p, budget, editor_rules, k, i as u64) {
+                            Ok((len, Ok(ts))) => {
+                                let mut f = format!(
+                                    "\"verdict\":\"solvable\",\"min_len\":{len},\"plan\":{}",
+                                    dataset::json_str(&ts[0])
+                                );
+                                if k > 1 {
+                                    let all: Vec<String> = ts.iter().map(|t| dataset::json_str(t)).collect();
+                                    f += &format!(",\"plans\":[{}]", all.join(","));
+                                }
+                                f
+                            }
                             Ok((len, Err(e))) => format!(
                                 "\"verdict\":\"solvable\",\"min_len\":{len},\"plan_error\":{}",
                                 dataset::json_str(&e)

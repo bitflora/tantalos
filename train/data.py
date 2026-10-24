@@ -493,29 +493,33 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
 
 class Solves(Levels):
     """Levels with their plans (task `solve`), one split, as flat tensors. The level is the
-    prompt; the plan and <eos> are what is learned."""
+    prompt; a plan and <eos> are what is learned. A level can have several plans (different
+    shortest ones): each time it comes up, one of them is taken at random."""
 
-    def __init__(self, level_ids, level_offsets, plan_ids, plan_offsets, min_lens):
+    def __init__(self, level_ids, level_offsets, plan_ids, plan_offsets, plan_groups, min_lens):
         # As in Levels, `level_ids`/`offsets` hold what is learned: here the plans.
         super().__init__(plan_ids, plan_offsets, None, [])
         self.prompt_ids = level_ids  # int16, all levels end to end
         self.prompt_offsets = level_offsets  # int64, len N + 1
+        self.groups = plan_groups  # int64, len N + 1: level i's plans are groups[i]..groups[i + 1]
         self.min_lens = min_lens  # the solver's plan length per record (-1: unknown)
 
     def __len__(self):
-        return len(self.offsets) - 1
+        return len(self.prompt_offsets) - 1
 
     def lengths(self):
-        """Whole sequence (level and plan) of each record, for batching by length."""
+        """Whole sequence (level and first plan) of each record, for batching by length."""
         levels = self.prompt_offsets[1:] - self.prompt_offsets[:-1]
-        return (levels + self.offsets[1:] - self.offsets[:-1]).tolist()
+        first = self.groups[:-1]
+        return (levels + self.offsets[first + 1] - self.offsets[first]).tolist()
 
     def level(self, i):
         return self.prompt_ids[self.prompt_offsets[i] : self.prompt_offsets[i + 1]].tolist()
 
     def sequence(self, i, drop=0.0):
         level = self.level(i)
-        plan = self.level_ids[self.offsets[i] : self.offsets[i + 1]].tolist()
+        j = random.randrange(int(self.groups[i]), int(self.groups[i + 1]))
+        plan = self.level_ids[self.offsets[j] : self.offsets[j + 1]].tolist()
         ids = [BOS] + level + [SEP] + plan + [EOS]
         learn = [False] * (len(level) + 2) + [True] * (len(plan) + 1)
         return ids, learn
@@ -553,13 +557,15 @@ class LengthStats:
 
 
 def load_solve(paths, vocab, block_size, val_share=0.05, seed=0):
-    """Train and validation `Solves` from data/plans JSONL ({tokens, plan, min_len, ...}),
-    streamed, and the `LengthStats` of every record with a plan. Records too long for
-    `block_size`, or with tokens the vocabulary lacks, are dropped. A record goes to validation
-    by a hash of its level, so a level repeated in the data stays on one side."""
+    """Train and validation `Solves` from data/plans JSONL ({tokens, plan, plans, min_len, ...};
+    `plans`, if there, lists every plan of the level, `plan` first), streamed, and the
+    `LengthStats` of every record's first plan. Records too long for `block_size`, or with
+    tokens the vocabulary lacks, are dropped, and so are other plans too long for it. A record
+    goes to validation by a hash of its level, so a level repeated in the data stays on one
+    side."""
     stats = LengthStats(block_size)
     stats.unknown = 0
-    splits = {name: (array("h"), array("q", [0]), array("h"), array("q", [0]), array("h"))
+    splits = {name: (array("h"), array("q", [0]), array("h"), array("q", [0]), array("q", [0]), array("h"))
               for name in ("train", "val")}
     cut = int(val_share * 2**32)
     for p in paths:
@@ -573,17 +579,22 @@ def load_solve(paths, vocab, block_size, val_share=0.05, seed=0):
                 level, plan = r["tokens"].split(), r["plan"].split()
                 if not stats.add(len(level), len(plan)):
                     continue
+                others = [p.split() for p in r.get("plans", [])[1:]]
+                others = [p for p in others if len(level) + len(p) + 3 <= block_size]
                 try:
-                    level_ids, plan_ids = vocab.encode(level), vocab.encode(plan)
+                    level_ids = vocab.encode(level)
+                    plans_ids = [vocab.encode(p) for p in [plan] + others]
                 except KeyError:
                     stats.unknown += 1
                     continue
                 split = "val" if zlib.crc32(f"{seed} {r['tokens']}".encode()) < cut else "train"
-                lv, lo, pl, po, ml = splits[split]
+                lv, lo, pl, po, pg, ml = splits[split]
                 lv.extend(level_ids)
                 lo.append(len(lv))
-                pl.extend(plan_ids)
-                po.append(len(pl))
+                for plan_ids in plans_ids:
+                    pl.extend(plan_ids)
+                    po.append(len(pl))
+                pg.append(len(po) - 1)
                 ml.append(r["min_len"] if r.get("min_len") is not None else -1)
 
     def tensor(a, dtype):
@@ -591,8 +602,8 @@ def load_solve(paths, vocab, block_size, val_share=0.05, seed=0):
 
     out = {
         name: Solves(tensor(lv, torch.int16), tensor(lo, torch.int64), tensor(pl, torch.int16),
-                     tensor(po, torch.int64), ml.tolist())
-        for name, (lv, lo, pl, po, ml) in splits.items()
+                     tensor(po, torch.int64), tensor(pg, torch.int64), ml.tolist())
+        for name, (lv, lo, pl, po, pg, ml) in splits.items()
     }
     return out["train"], out["val"], stats
 

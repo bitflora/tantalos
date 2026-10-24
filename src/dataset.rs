@@ -173,12 +173,16 @@ pub fn label_with_plan(
 /// Only the conservative plan of a level already labelled solvable: its length and plan tokens
 /// (or why it couldn't be grounded), without the metrics, the portal check or the liberal model
 /// that labelling pays for. A level that no longer solves gets its label instead: `Invalid`,
-/// `Unsupported`, `Unsolvable`, or `Uncertain(None)` if the budget ran out.
+/// `Unsupported`, `Unsolvable`, or `Uncertain(None)` if the budget ran out. With `k` > 1, up to
+/// `k` different shortest plans (`Model::shortest_plans`, `seed`), the solver's own first; one
+/// that doesn't ground is left out, and an `Err` means the first didn't.
 pub fn plan_only(
     puzzle: &Puzzle,
     budget: usize,
     editor_rules: bool,
-) -> Result<(usize, Result<String, String>), Label> {
+    k: usize,
+    seed: u64,
+) -> Result<(usize, Result<Vec<String>, String>), Label> {
     let level = Level::from_puzzle(puzzle);
     let problems = level.mount_problems_with(editor_rules);
     if !problems.is_empty() {
@@ -201,16 +205,30 @@ pub fn plan_only(
             Label::Invalid(text(invalid))
         }
     })?;
-    let mut verdict = model.solve(budget).verdict;
-    if !matches!(verdict, Verdict::Solved(_)) && model.could_angle() {
+    let mut found = model.shortest_plans(budget, k, seed);
+    if !matches!(found.0.verdict, Verdict::Solved(_)) && model.could_angle() {
         model = Model::new_angled(&level, Mode::Conservative).expect("same problems");
-        verdict = model.solve(budget).verdict;
+        found = model.shortest_plans(budget, k, seed);
     }
-    match verdict {
-        Verdict::Solved(plan) => Ok((
-            plan.len(),
-            crate::route::route_plan(&level, &model, &plan).map(|r| crate::plan::encode(&r)),
-        )),
+    match found.0.verdict {
+        Verdict::Solved(plan) => {
+            let ground = |p: &[Action]| {
+                crate::route::route_plan(&level, &model, p).map(|r| crate::plan::encode(&r))
+            };
+            Ok((
+                plan.len(),
+                ground(&plan).map(|first| {
+                    let mut texts = vec![first];
+                    for t in found.1[1..].iter().filter_map(|p| ground(p).ok()) {
+                        // Different actions can come out as the same plan tokens.
+                        if !texts.contains(&t) {
+                            texts.push(t);
+                        }
+                    }
+                    texts
+                }),
+            ))
+        }
         Verdict::Unsolvable => Err(Label::Unsolvable),
         Verdict::Unknown => Err(Label::Uncertain(None)),
     }

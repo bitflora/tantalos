@@ -1890,6 +1890,134 @@ impl Model {
         self.search(max_states, Some(max_len))
     }
 
+    /// `solve`, and up to `k` different shortest plans: the one `solve` returns first, then
+    /// others drawn uniformly from all shortest plans (`seed`), each once. Empty unless solved.
+    /// Searches the same states as `solve`, plus the goals of the last layer.
+    pub fn shortest_plans(&self, max_states: usize, k: usize, seed: u64) -> (Outcome, Vec<Vec<Action>>) {
+        let cx = self.context();
+        let mut table = Table::new(cx.lay.len);
+        let start = self.initial_packed(&cx);
+        table.insert(&start, Table::hash(&start));
+        let mut parent: Vec<(u32, Action)> = Vec::new();
+        let mut depth: Vec<u32> = vec![0];
+        // With k > 1, every edge into a state one deeper than its source, (from | SWAPPED,
+        // next, action), as a list per state: `last_in[j]` is the latest edge into state j and
+        // `next` the one before (NONE: no more). Lists, not one sorted array: sorting the
+        // edges took a third as long as the search.
+        const NONE: u32 = u32::MAX;
+        let many = k > 1;
+        let mut edges: Vec<(u32, u32, Action)> = Vec::new();
+        let mut last_in: Vec<u32> = if many { vec![NONE] } else { Vec::new() };
+        let (mut cur, mut sc) = (Vec::new(), Scratch::default());
+        let mut next = 0;
+        let unknown = |states| (Outcome { verdict: Verdict::Unknown, states }, Vec::new());
+        let first = loop {
+            if next >= table.len() {
+                let verdict = if self.complete { Verdict::Unsolvable } else { Verdict::Unknown };
+                return (Outcome { verdict, states: table.len() }, Vec::new());
+            }
+            cur.clear();
+            cur.extend_from_slice(table.get(next));
+            if self.goal(&cx.lay, &cur) {
+                break next;
+            }
+            let mut full = false;
+            self.expand(&cx, &cur, true, &mut sc, &mut |a, n| {
+                let swapped = canonical(n);
+                let h = Table::hash(n);
+                let from = next as u32 | if swapped { SWAPPED } else { 0 };
+                if full {
+                    return;
+                }
+                if let Some(j) = table.find(n, h) {
+                    if many && depth[j] == depth[next] + 1 {
+                        edges.push((from, last_in[j], a));
+                        last_in[j] = edges.len() as u32 - 1;
+                    }
+                    return;
+                }
+                if table.len() >= max_states {
+                    full = true;
+                    return;
+                }
+                if many {
+                    last_in.push(edges.len() as u32);
+                    edges.push((from, NONE, a));
+                }
+                table.insert(n, h);
+                parent.push((from, a));
+                depth.push(depth[next] + 1);
+            });
+            if full {
+                return unknown(table.len());
+            }
+            next += 1;
+        };
+        let outcome = Outcome { verdict: Verdict::Solved(plan_to(&parent, first)), states: table.len() };
+        let mut plans = vec![plan_to(&parent, first)];
+        if !many {
+            return (outcome, plans);
+        }
+        // Every layer above the goal's is expanded, so its edges are all in `edges`. The goal's
+        // layer runs on from it in BFS order.
+        let d = depth[first];
+        let end = first + (first..table.len()).take_while(|&j| depth[j] == d).count();
+        let goals: Vec<usize> = (first..end)
+            .filter(|&j| {
+                cur.clear();
+                cur.extend_from_slice(table.get(j));
+                self.goal(&cx.lay, &cur)
+            })
+            .collect();
+        let ins = |j: usize| {
+            std::iter::successors(Some(last_in[j]).filter(|&e| e != NONE), |&e| {
+                Some(edges[e as usize].1).filter(|&e| e != NONE)
+            })
+            .map(|e| &edges[e as usize])
+        };
+        // The number of shortest paths to each state up to the goal's layer (BFS order puts
+        // every source before its targets).
+        let mut paths = vec![0f64; end];
+        paths[0] = 1.0;
+        for j in 1..end {
+            paths[j] = ins(j).map(|e| paths[(e.0 & !SWAPPED) as usize]).sum();
+        }
+        let mut rng = crate::rng::Rng::new(seed);
+        let mut pick = |weights: &mut dyn Iterator<Item = f64>, total: f64| {
+            let mut x = (rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * total;
+            let mut last = 0;
+            for (i, w) in weights.enumerate() {
+                last = i;
+                if x < w {
+                    break;
+                }
+                x -= w;
+            }
+            last
+        };
+        let total: f64 = goals.iter().map(|&g| paths[g]).sum();
+        // Draws until k plans or many draws in a row turned up nothing new.
+        let mut misses = 0;
+        while plans.len() < k && misses < 8 * k {
+            let mut j = goals[pick(&mut goals.iter().map(|&g| paths[g]), total)];
+            let mut steps = Vec::new();
+            while j > 0 {
+                let e = ins(j).nth(pick(&mut ins(j).map(|e| paths[(e.0 & !SWAPPED) as usize]), paths[j])).unwrap();
+                steps.push((e.2, e.0 & SWAPPED != 0));
+                j = (e.0 & !SWAPPED) as usize;
+            }
+            steps.reverse();
+            let plan = colored(steps);
+            if plans.contains(&plan) {
+                misses += 1;
+            } else {
+                plans.push(plan);
+                misses = 0;
+            }
+        }
+        (outcome, plans)
+    }
+
     fn search(&self, max_states: usize, max_len: Option<usize>) -> Outcome {
         let cx = self.context();
         let mut table = Table::new(cx.lay.len);
@@ -3313,10 +3441,16 @@ fn plan_to(parent: &[(u32, Action)], goal: usize) -> Vec<Action> {
         steps.push((a, p & SWAPPED != 0));
         i = (p & !SWAPPED) as usize;
     }
+    steps.reverse();
+    colored(steps)
+}
+
+/// The actions of a path from the start, each with whether its source state was stored with
+/// its portals swapped, with each action's color as in the game.
+fn colored(steps: Vec<(Action, bool)>) -> Vec<Action> {
     let mut flip = false;
     steps
         .into_iter()
-        .rev()
         .map(|(a, swapped)| {
             let a = if flip { a.flipped() } else { a };
             flip ^= swapped;
