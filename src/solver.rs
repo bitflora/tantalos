@@ -33,8 +33,8 @@
 //! - Conservative: no cube steps (unmeasured), no firing while carrying, strict line of
 //!   sight. Liberal: the opposite.
 //! - A floor portal doesn't cut its region in two, and walking across it is optional.
-//! - Turrets (`turrets`): conservative rules never enter a region a live turret can shoot;
-//!   liberal rules run through, but do nothing there except move or walk into a portal.
+//! - Turrets (`turrets`): conservative rules never enter a region a live turret can shoot
+//!   (starting in one, they may only walk out of it); liberal rules run through, but do nothing there except move or walk into a portal.
 //!   Knocking one over is an action from a region beside it; a cube landing on it or a portal
 //!   opening under it (with the other portal open) knocks it over too.
 //! - Gel (`gel`): paint is part of the state. A pouring dropper paints where its stream lands
@@ -57,6 +57,10 @@
 //!   speed of that fall and flies out of the partner, or out of the partner moved mid-fall to
 //!   another face the player can shoot from where they walked in (as play-testers do: move
 //!   the exit just as you come out).
+//! - Reaching through a portal (`Action::PortalReach`): standing within reach of a portal
+//!   (on its face's cell or one beside it), the player can take a cube off the floor button
+//!   the other portal comes out onto. The player stays where they are (and rides a platform
+//!   the button released).
 //! - A dropper's cube that would fall into goo can be caught by a player on a floor beside its
 //!   fall (it lies in that floor's region).
 //! - Cubes placed without a dropper are gone for good when fizzled; a dropper that only drops
@@ -286,6 +290,13 @@ pub enum Action {
         height: i32,
         to: usize,
     },
+    /// Reach through the portal of this color and take the cube off the floor button the
+    /// other one comes out onto.
+    PortalReach {
+        color: Color,
+        cube: CubeKind,
+        from: CubeLoc,
+    },
     /// Walk into the floor portal of this color, come out of the other one and fall `height`
     /// voxels straight back into it; with `refire`, move the other portal to that class on the
     /// way down; fly out of the other one to region `to`.
@@ -332,6 +343,11 @@ impl Action {
                 height,
                 refire,
                 to,
+            },
+            Action::PortalReach { color, cube, from } => Action::PortalReach {
+                color: color.other(),
+                cube,
+                from,
             },
             a => a,
         }
@@ -537,6 +553,11 @@ pub struct Model {
     /// Per face class: (floor class, height) of portal loops, where walking out of a portal
     /// on the class falls `height` voxels into a portal on the floor class.
     loops: Vec<Vec<(usize, i32)>>,
+    /// Per face class: the regions within reach of a portal on it (with a cell that is the
+    /// face's own or beside it), which can reach through it.
+    portal_reach: Vec<Vec<usize>>,
+    /// Regions one step from the entry's cell (beside it or across a corner, the same height).
+    start_exits: Vec<usize>,
     footholds: Vec<Vec<usize>>,
     buttons_in: Vec<Vec<usize>>,
     pedestals_in: Vec<Vec<usize>>,
@@ -859,6 +880,23 @@ impl Model {
             }
         };
         let entry = region_of_door(ItemKind::EntryDoor, "entry");
+        let start_exits: Vec<usize> = match &entry {
+            Some((d, _)) => {
+                let mut out: Vec<usize> = Vec::new();
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let c = [d.cell[0] + dx, d.cell[1] + dy, d.cell[2]];
+                        if let Some(r) = graph.region_of(c) {
+                            if !out.contains(&r) {
+                                out.push(r);
+                            }
+                        }
+                    }
+                }
+                out
+            }
+            None => Vec::new(),
+        };
         let exit = region_of_door(ItemKind::ExitDoor, "exit");
 
         let buttons: Vec<Button> = level
@@ -1520,6 +1558,30 @@ impl Model {
         for l in &mut loops {
             l.sort();
         }
+        let portal_reach: Vec<Vec<usize>> = portals
+            .classes
+            .iter()
+            .map(|class| {
+                let mut out: Vec<usize> = Vec::new();
+                for &(c, _) in &class.faces {
+                    let near = std::iter::once(c).chain(
+                        Dir::HORIZONTAL
+                            .into_iter()
+                            .filter(|&d| level.face(c, d).barrier.is_none())
+                            .map(|d| step(c, d)),
+                    );
+                    for n in near {
+                        if let Some(r) = graph.region_of(n) {
+                            if !out.contains(&r) {
+                                out.push(r);
+                            }
+                        }
+                    }
+                }
+                out.sort();
+                out
+            })
+            .collect();
         // (device bit, shot mask bit) of each panel that stops shots while deployed.
         let panel_shots: Vec<(usize, u64)> = (0..level.panels.len())
             .filter_map(|i| {
@@ -1699,6 +1761,8 @@ impl Model {
             gel_move_range: ranges(&gel_move_from),
             fire_from,
             loops,
+            portal_reach,
+            start_exits,
             special: portals
                 .classes
                 .iter()
@@ -2858,12 +2922,11 @@ impl Model {
         let held = cubes.iter().position(|&c| c == HELD);
         let on = self.hazards_on(lay, s, None);
         let alive = cx.turrets & !s[DOWN];
-        // Where a live turret can shoot, the player can only keep moving, and only under
-        // liberal rules: conservative ones never go there, so this is the start, and fatal.
+        // Where a live turret can shoot, the player can only keep moving, under liberal rules.
+        // Conservative ones never go there, so this is the start: they may only step out of
+        // its sight, into a region beside the entry's cell (`start_exits`).
         let act = self.graph.regions[r].danger & alive == 0;
-        if !act && !self.rules.run_past_turrets {
-            return;
-        }
+        let cornered = !act && !self.rules.run_past_turrets;
         // A `quiet` action changes nothing `settle` looks at (cubes on buttons, pedestals,
         // portals on faces under turrets or gel streams), so from a settled state it needs no
         // settling, unless devices could follow it (`unmoved`).
@@ -2883,6 +2946,7 @@ impl Model {
         let (lo, hi) = self.edge_range[r];
         for e in &self.graph.edges[lo..hi] {
             let ok = e.cond.holds(dev)
+                && (!cornered || self.start_exits.contains(&e.to))
                 && match e.kind {
                     Move::Step => self.rules.cube_steps && cubes.contains(&(1 + r as u32)),
                     _ => true,
@@ -2896,6 +2960,9 @@ impl Model {
                 };
                 done(&mut sc.n, a, !fizzled);
             }
+        }
+        if cornered {
+            return;
         }
         let (lo, hi) = self.gel_move_range[r];
         for m in &self.gel_moves[lo..hi] {
@@ -3138,6 +3205,35 @@ impl Model {
                     from,
                 };
                 done(&mut sc.n, a, !matches!(from, CubeLoc::OnButton(_) | CubeLoc::Spot(_)));
+            }
+            // Through a portal within reach: off the button the other portal comes out onto.
+            for color in Color::BOTH {
+                let (x, y) = (portal(s, color as usize), portal(s, color.other() as usize));
+                let (Some(x), Some(y)) = (x, y) else { continue };
+                if !self.portal_reach[x].contains(&r) {
+                    continue;
+                }
+                let mut last = None;
+                for &(cond, l) in &self.portals.classes[y].behavior(dev).landings {
+                    let Some(bi) = l.button.filter(|_| cond.holds(dev)) else { continue };
+                    for (i, &code) in cubes.iter().enumerate() {
+                        let from = self.code_loc(code);
+                        let on_it = matches!(from, CubeLoc::OnButton(b) if self.buttons[b].index == bi);
+                        let id = (lay.kinds[i], lay.homes[i], code);
+                        if !on_it || last == Some(id) {
+                            continue;
+                        }
+                        last = Some(id);
+                        copy(&mut sc.n);
+                        lay.move_cube(&mut sc.n, i, HELD);
+                        let a = Action::PortalReach {
+                            color,
+                            cube: lay.kinds[i],
+                            from,
+                        };
+                        done(&mut sc.n, a, false);
+                    }
+                }
             }
             // Across a fizzler that is on now and off while the player stands on the button.
             for reach in &self.reaches[r] {
@@ -3518,6 +3614,12 @@ impl Model {
             Action::PickUp { cube, from } => {
                 format!("pick up the {} in {}", cube_name(cube), self.loc_name(from))
             }
+            Action::PortalReach { color, cube, from } => format!(
+                "reach through the {} portal and pick up the {} in {}",
+                color.name(),
+                cube_name(cube),
+                self.loc_name(from)
+            ),
             Action::PutDown { at } => format!("put the cube down in {}", self.loc_name(at)),
             Action::Toss { to } => format!("drop the cube off a ledge into {}", self.loc_name(to)),
             Action::Throw { color, to } => format!(

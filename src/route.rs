@@ -1081,7 +1081,7 @@ impl<'a> Grounder<'a> {
             }
 
             // Not grounded yet: the play harness has no leg for it, so such plans don't route.
-            Action::Loop { .. } => None,
+            Action::Loop { .. } | Action::PortalReach { .. } => None,
 
             Action::Dive { color, height, to } => {
                 let k = color as usize;

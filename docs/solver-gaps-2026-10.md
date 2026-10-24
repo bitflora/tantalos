@@ -329,6 +329,21 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   - Liberal rules solve it in 11 actions (the play-tester's route, with the cube carried
     through the first loop); conservative rules don't trust the 4-voxel fling out of the tilted
     panel (its trials land in different places), so it is uncertain.
+- **3543260079 "My First Test Chamber"** (`glados-ws5b-unsolv-00003`, 2026-10-24): a turret in
+  an alcove behind a laser field (with a button) sees the entrance; a piston, up until its
+  button is pressed, stands below a ledge with the second cube. Play-tester: portal behind the
+  laser field and knock the turret over; put a cube on the alcove's button (the piston goes
+  down), portals near the cube and near the piston, stand on the piston and reach through the
+  portal to take the cube off the button: the piston lifts you to the second cube (or get
+  there with momentum). Both cubes on the two exit buttons. **Fixed (2026-10-24):**
+  - Starting where a live turret can shoot was fatal under conservative rules (no action at
+    all); now they may step out of its sight, into a region beside the entry's cell
+    (`start_exits`), and nowhere else it can shoot.
+  - `Action::PortalReach`: within reach of a portal (its face's cell or one beside it), take
+    a cube off the floor button the other portal comes out onto, staying put (and riding the
+    platform the button released). Not grounded by `glados route` yet.
+  - Conservative rules solve it in 18 actions, the play-tester's second route (they never
+    need to knock the turret over); liberal ones also by a portal loop.
 
 ## Recommended order
 

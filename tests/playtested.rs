@@ -21,6 +21,11 @@ const SMALLEST: &str = "size 3 5 2 open 1 0 0 1 4 0 2 1 0 2 2 0 0 2 0 1 3 0 2 1 
 /// cube, caught as it falls past into goo) up to the button and the exit.
 const SIMPLE_TEST_01: &str = "size 10 11 11 open 6 0 1 6 6 4 2 1 1 9 6 10 1 3 1 9 3 3 0 3 2 9 4 3 1 5 6 9 6 7 6 7 6 9 9 10 6 10 8 9 10 10 7 0 9 7 10 9 1 3 9 9 4 9 goo 6 0 0 6 0 0 white +x 9 1 1 9 4 5 9 5 2 9 10 5 white -x 2 2 1 9 10 4 2 1 3 9 4 5 white +y 2 6 2 9 10 4 5 6 5 9 10 5 white -y 5 1 1 9 6 5 2 1 3 9 6 5 white -z 5 1 1 9 4 10 2 2 1 9 2 10 3 3 1 9 4 10 2 4 1 9 4 10 entry 3 1 1 +y exit 7 10 8 -y grating 2 5 5 4 6 5 +z +x glass 6 7 6 6 7 10 -y +z grating 6 9 7 9 9 7 +z +x dropper 6 0 4 standard button 6 8 6 weighted > exit > panel 1 > panel 3 > stairs 1 pedestal 1 5 6 inf > panel 0 pedestal 5 1 1 inf > dropper 0 panel 8 1 5 +y -z 3 off panel 9 5 6 -x -z 6 off panel 9 6 3 -x -z 4 on panel 9 6 6 -x -z 6 off stairs 2 3 1 -x on stairs 9 8 6 -y off";
 
+/// 3543260079 "My First Test Chamber": a turret sees the entrance from behind a laser field;
+/// a piston (up until its button is pressed) lifts the player to the second cube once they
+/// reach through a portal from it and take the cube off that button.
+const MY_FIRST: &str = "size 10 10 4 open 0 0 0 8 6 3 0 7 0 4 7 3 8 7 0 8 9 3 6 7 1 6 8 3 9 3 3 9 4 3 white +x 8 0 0 8 9 3 4 7 0 4 9 3 black -x 6 7 1 7 9 3 white +y 0 7 0 9 7 3 8 9 0 9 9 3 white -y 0 0 0 9 2 3 black -z 6 6 0 6 9 3 9 3 3 9 9 3 entry 1 0 0 +y exit 2 7 0 -y laserfield 8 6 0 +z +x 1 on dropper 1 3 3 standard dropper 6 8 3 companion button 0 7 0 weighted > exit button 4 7 0 weighted > exit button 8 9 0 weighted > piston 0 turret 8 7 0 2 piston 6 6 0 +z 0 1 off";
+
 fn level(tokens: &str) -> Level {
     Level::from_puzzle(&glados::tokens::decode(tokens).unwrap())
 }
@@ -86,4 +91,14 @@ fn portal_loops_and_a_caught_cube() {
     );
     // Conservative rules don't trust the 4-voxel fling out of the tilted panel (its trials
     // land in different places), so the level is uncertain, not solvable.
+}
+
+#[test]
+fn step_out_of_a_turret_and_reach_through_a_portal() {
+    let level = level(MY_FIRST);
+    let model = Model::new(&level, Mode::Conservative).unwrap();
+    let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+        panic!("not solved");
+    };
+    assert!(plan.iter().any(|a| matches!(a, Action::PortalReach { .. })), "{plan:?}");
 }
