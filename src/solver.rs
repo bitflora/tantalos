@@ -24,7 +24,7 @@
 //! - Fizzlers: walking or falling through an active one clears both portals and destroys a
 //!   held cube, which respawns where it started. A cube falling through one respawns too.
 //!   Active fizzlers stop portal shots. Laser fields: the player can't pass an active one;
-//!   cubes can.
+//!   cubes can, so a cube can be put down across one (`Action::Toss`).
 //! - Conservative: no cube steps (unmeasured), no firing while carrying, strict line of
 //!   sight. Liberal: the opposite.
 //! - A floor portal doesn't cut its region in two, and walking across it is optional.
@@ -47,6 +47,8 @@
 //!   player out of the other one at speed. Faith plates launch whatever comes onto them.
 //! - Cubes placed without a dropper are gone for good when fizzled; a dropper that only drops
 //!   when told to (`Auto Drop` off, wired) holds its cube until its inputs are first on.
+//!   Whenever a wired dropper's inputs come on (all of them, after not all were), it drops a
+//!   new cube and the old one dissolves: its cube goes back to the dropper (item_dropper.vmf).
 //! - A model that had to leave things out (`Model::complete`) never calls a level unsolvable.
 //!
 //! The search works on states packed into a few words (`Layout`), each stored once in a hash
@@ -221,7 +223,7 @@ pub enum Action {
     PutDown {
         at: CubeLoc,
     },
-    /// Drop the held cube off a ledge of the current region.
+    /// Drop the held cube off a ledge of the current region, or put it down across a field.
     Toss {
         to: CubeLoc,
     },
@@ -296,6 +298,9 @@ pub struct State {
     pub escaped: bool,
     /// Bit `i`: turret `i` has been knocked over.
     pub down: u32,
+    /// Bit `i`: the inputs of wired dropper `i` (`Model::redrops`) were on when the state
+    /// last settled. Follows from the rest once settled.
+    pub redrop: u32,
     /// Painted faces, sorted, each `face << 2 | PaintKind` (face: index into
     /// `Model::paint_faces`).
     pub paint: Vec<u32>,
@@ -354,12 +359,15 @@ enum BitRule {
     },
 }
 
-/// A cube that waits in its dropper until the dropper's inputs are first on.
+/// A cube that waits in its dropper until the dropper's inputs are first on, or (`redrops`)
+/// a wired dropper's cube.
 #[derive(Clone, Debug)]
 struct Held {
     kind: CubeKind,
     home: CubeLoc,
     inputs: Vec<Signal>,
+    /// The turret (index into `Level::turrets`) it lands on, knocking it over.
+    turret: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -500,8 +508,12 @@ pub struct Model {
     spots_in: Vec<Vec<usize>>,
     /// Per beam end face (a class of its own), its class.
     beam_end_class: HashMap<Face, usize>,
+    /// Per panel (`Level::panels`), the class of its face, if it takes portals.
+    panel_class: Vec<Option<usize>>,
     /// Cubes waiting in droppers.
     held_back: Vec<Held>,
+    /// Cubes of wired droppers, which drop a new one each time their inputs come on.
+    redrops: Vec<Held>,
     /// Devices, lasers or waiting cubes: `settle` has work after any action.
     dynamic: bool,
     /// Where the portals are can switch devices (a bridge or funnel through them) or carry a
@@ -909,6 +921,7 @@ impl Model {
             .filter(|d| d.props.get_i32("ITEM_PROPERTY_AUTO_DROP_CUBE") == Some(0))
             .map(|d| (d.index, Vec::new()))
             .collect();
+        let mut dropper_inputs: HashMap<i32, Vec<Signal>> = HashMap::new();
 
         let mut exit_inputs = Vec::new();
         for link in &level.links {
@@ -964,10 +977,12 @@ impl Model {
                 Some(_) if switch_of.contains_key(&link.receiver) => {
                     switches[switch_of[&link.receiver]].inputs.push(signal);
                 }
-                Some(ItemKind::CubeDropper) if waiting.contains_key(&link.receiver) => {
-                    waiting.get_mut(&link.receiver).unwrap().push(signal);
+                Some(ItemKind::CubeDropper) => {
+                    if let Some(w) = waiting.get_mut(&link.receiver) {
+                        w.push(signal);
+                    }
+                    dropper_inputs.entry(link.receiver).or_default().push(signal);
                 }
-                Some(ItemKind::CubeDropper) => {} // Re-drops its cube: nothing new.
                 _ => problems.push(Problem::Unsupported(format!(
                     "wire {} -> {} drives something that takes no input",
                     link.sender, link.receiver
@@ -1019,6 +1034,9 @@ impl Model {
         };
         let mut cubes = Vec::new();
         let mut held_back = Vec::new();
+        let mut redrops = Vec::new();
+        // Turrets a cube dropped at the start lands on, knocked over from the start.
+        let mut start_down = 0u32;
         for cube in level.of_kind(&ItemKind::Cube) {
             // A cube that would fall into goo is simply gone.
             if let Some(l) = Landing::from_fall(level, &graph, cube.cell) {
@@ -1033,16 +1051,32 @@ impl Model {
                     .get(&cube.index)
                     .and_then(|d| waiting.get(d))
                     .filter(|inputs| !inputs.is_empty());
+                if let Some(inputs) = level.dropper_of.get(&cube.index).and_then(|d| dropper_inputs.get(d)) {
+                    if home != CubeLoc::Gone {
+                        redrops.push(Held {
+                            kind: cube.cube_kind(),
+                            home,
+                            inputs: inputs.clone(),
+                            turret: l.turret,
+                        });
+                    }
+                }
                 let loc = match wait {
                     Some(inputs) => {
                         held_back.push(Held {
                             kind: cube.cube_kind(),
                             home,
                             inputs: inputs.clone(),
+                            turret: l.turret,
                         });
                         CubeLoc::Gone
                     }
-                    None => loc,
+                    None => {
+                        if let Some(t) = l.turret.filter(|&t| t < 32) {
+                            start_down |= 1 << t;
+                        }
+                        loc
+                    }
                 };
                 cubes.push(Cube {
                     kind: cube.cube_kind(),
@@ -1052,6 +1086,13 @@ impl Model {
             }
         }
         cubes.sort();
+        if redrops.len() > 32 {
+            problems.push(Problem::Unsupported(format!(
+                "{} wired cube droppers (at most 32 re-drop)",
+                redrops.len()
+            )));
+            redrops.truncate(32);
+        }
 
         let tosses = graph
             .regions
@@ -1064,7 +1105,10 @@ impl Model {
                     .filter(|&(c, d)| level.face(c, d).barrier.is_none())
                     .filter_map(|(c, d)| {
                         let n = step(c, d);
-                        if level.solid(n) || geo.stand(n) == Some(Cond::ALWAYS) {
+                        // Across a field, into a floor of another region: through it.
+                        let across = level.face(c, d).hazards != 0
+                            && graph.region_of(n).is_some_and(|o| o != r.id);
+                        if level.solid(n) || (geo.stand(n) == Some(Cond::ALWAYS) && !across) {
                             return None;
                         }
                         let mut ls = Landing::falls(geo, &graph, n);
@@ -1385,6 +1429,14 @@ impl Model {
             .filter(|c| c.beam_end)
             .map(|c| (c.faces[0], c.id))
             .collect();
+        let panel_class: Vec<Option<usize>> = level
+            .panels
+            .iter()
+            .map(|p| {
+                let face = (p.cell, p.normal.opposite());
+                portals.classes.iter().position(|c| c.faces.contains(&face))
+            })
+            .collect();
         let regions_n = graph.regions.len();
         let mut spots_in = vec![Vec::new(); regions_n];
         for (k, sp) in beams.spots.iter().enumerate() {
@@ -1410,7 +1462,10 @@ impl Model {
                 on_platform[r] |= !graph.regions[r].cond.is_always() || !level.standable(c);
             }
         }
-        let dynamic = !devices.is_empty() || !beams.is_empty() || !held_back.is_empty();
+        let dynamic = !devices.is_empty()
+            || !beams.is_empty()
+            || !held_back.is_empty()
+            || !redrops.is_empty();
         let mut switch_bits = vec![0u64; switches.len()];
         let mut routed = 0u64;
         let mut class_ends = vec![0u64; portals.classes.len()];
@@ -1588,7 +1643,8 @@ impl Model {
                 cubes,
                 latched: 0,
                 escaped: false,
-                down: 0,
+                down: start_down,
+                redrop: 0,
                 paint: Vec::new(),
                 lit: 0,
                 dev: 0,
@@ -1609,7 +1665,9 @@ impl Model {
             emitter_switch,
             spots_in,
             beam_end_class,
+            panel_class,
             held_back,
+            redrops,
             dynamic,
             portals_drive,
             complete,
@@ -1859,12 +1917,15 @@ impl Model {
             }
         }
         let paint = CUBES + ids.len();
+        let end = paint + self.paint_faces.len().div_ceil(16);
+        let redrop = (!self.redrops.is_empty()).then_some(end);
         Layout {
             homes: ids.iter().map(|&(_, home)| self.loc_code(home)).collect(),
             kinds: ids.iter().map(|&(kind, _)| kind).collect(),
             group,
             paint,
-            len: paint + self.paint_faces.len().div_ceil(16),
+            redrop,
+            len: end + redrop.is_some() as usize,
         }
     }
 
@@ -1948,6 +2009,9 @@ impl Model {
         for &e in &s.paint {
             lay.set_paint(&mut w, e as usize >> 2, (e & 3) + 1);
         }
+        if let Some(r) = lay.redrop {
+            w[r] = s.redrop;
+        }
         w
     }
 
@@ -1965,6 +2029,7 @@ impl Model {
             latched: w[LATCHED],
             escaped: w[0] & ESCAPED != 0,
             down: w[DOWN],
+            redrop: lay.redrop.map_or(0, |r| w[r]),
             lit: w[LIT],
             dev: dev_of(w),
             paint: (0..self.paint_faces.len())
@@ -1978,6 +2043,24 @@ impl Model {
 
     fn initial_packed(&self, cx: &Ctx<'_>) -> Vec<u32> {
         let mut s = self.pack(&cx.lay, &self.start);
+        // A cube that came to rest where a device is at the start (dropped onto a wall piston
+        // that starts out) sits on top of it.
+        if self.dynamic {
+            let dev = self.device_bits(&cx.lay, &s, None);
+            for i in 0..cx.lay.kinds.len() {
+                let Some(r) = self.loc_region(self.code_loc(s[CUBES + i])) else { continue };
+                if self.graph.regions[r].cond.holds(dev) {
+                    continue;
+                }
+                let on_top = self.graph.regions[r].cells.iter().find_map(|&c| {
+                    let up = self.graph.region_of(step(c, Dir::PosZ))?;
+                    self.graph.regions[up].cond.holds(dev).then_some(up)
+                });
+                if let Some(up) = on_top {
+                    cx.lay.move_cube(&mut s, i, self.loc_code(CubeLoc::Loose(up)));
+                }
+            }
+        }
         for (g, gel) in self.gels.iter().enumerate() {
             if gel.dropper.is_none() && self.gel_enabled[g] {
                 cx.lay.paint(&mut s, &gel.spot, gel.kind);
@@ -2070,6 +2153,22 @@ impl Model {
                 })
         };
         let (blue, orange) = (portal(s, 0), portal(s, 1));
+        // The beam out of the other portal, for one going into a portal on `class`. Not out
+        // of a deployed panel (its beam would leave at the panel's angle).
+        let through = |class: usize| {
+            let out = if blue == Some(class) {
+                orange
+            } else if orange == Some(class) {
+                blue
+            } else {
+                None
+            }?;
+            let c = &self.portals.classes[out];
+            if c.deployed.as_ref().is_some_and(|&(bit, _)| dev_of(s) & (1 << bit) != 0) {
+                return None;
+            }
+            c.beam_out
+        };
         // Each beam goes one way, so follow each emitter's to its end.
         for (e, &(_, ray)) in self.beams.emitters.iter().enumerate() {
             if !self.switch_on(lay, s, self.emitter_switch[e], None) {
@@ -2085,6 +2184,16 @@ impl Model {
                     match *ev {
                         Event::Receiver(k) => lit |= 1 << k,
                         Event::Turret(t) => hit |= 1 << t,
+                        Event::Panel { p, front } => {
+                            if dev_of(s) & (1 << self.devices.panel_bit[p]) == 0 {
+                                continue;
+                            }
+                            // A portal on the panel takes it on; otherwise it stops here.
+                            let class = self.panel_class[p].filter(|_| front);
+                            next = class.and_then(|c| through(c));
+                            stopped = next.is_none();
+                            break;
+                        }
                         Event::Cube(sc) => {
                             if let Some(k) = cube_at(sc) {
                                 let spot = &self.beams.spots[k];
@@ -2108,14 +2217,7 @@ impl Model {
                 let Some(&class) = self.beam_end_class.get(&end) else {
                     break;
                 };
-                let out = if blue == Some(class) {
-                    orange
-                } else if orange == Some(class) {
-                    blue
-                } else {
-                    None
-                };
-                next = out.and_then(|o| self.portals.classes[o].beam_out);
+                next = through(class);
             }
         }
         (lit, hit)
@@ -2184,9 +2286,10 @@ impl Model {
     fn settle(&self, lay: &Layout, s: &mut [u32]) {
         if self.dynamic {
             for _ in 0..4 {
-                let before = (s[1], s[2], s[LIT], dev_of(s));
+                let redrop = |s: &[u32]| lay.redrop.map_or(0, |r| s[r]);
+                let before = (s[1], s[2], s[LIT], dev_of(s), redrop(s));
                 self.settle_devices(lay, s);
-                if before == (s[1], s[2], s[LIT], dev_of(s)) {
+                if before == (s[1], s[2], s[LIT], dev_of(s), redrop(s)) {
                     break;
                 }
             }
@@ -2262,7 +2365,23 @@ impl Model {
                     lay.kinds[i] == h.kind && lay.homes[i] == home && s[CUBES + i] == gone
                 }) {
                     lay.move_cube(s, i, home);
+                    knock(s, h.turret);
                 }
+            }
+        }
+        // Wired droppers whose inputs just came on: a new cube drops, the old one dissolves.
+        if let Some(w) = lay.redrop {
+            for (r, h) in self.redrops.iter().enumerate() {
+                let on = self.all_on(lay, s, &h.inputs, None);
+                if on && s[w] & (1 << r) == 0 {
+                    let home = self.loc_code(h.home);
+                    if let Some(i) =
+                        (0..lay.kinds.len()).find(|&i| lay.kinds[i] == h.kind && lay.homes[i] == home)
+                    {
+                        lay.move_cube(s, i, home);
+                    }
+                }
+                s[w] = if on { s[w] | 1 << r } else { s[w] & !(1 << r) };
             }
         }
         // Whoever stands where a device went.
@@ -2956,6 +3075,8 @@ struct Layout {
     group: Vec<(usize, usize)>,
     /// Word where paint starts.
     paint: usize,
+    /// Word of `State::redrop`, after the paint, if the model has wired droppers.
+    redrop: Option<usize>,
     /// Words per state.
     len: usize,
 }
@@ -2968,6 +3089,7 @@ impl Layout {
             homes: Vec::new(),
             group: Vec::new(),
             paint: CUBES,
+            redrop: None,
             len: CUBES,
         }
     }

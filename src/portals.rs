@@ -268,7 +268,8 @@ fn behavior(
     extras: &Extras,
 ) -> Behavior {
     let level = geo.level;
-    let entry = (d != Dir::PosZ && level.standable(c))
+    // Also from cells only a device makes standable (a bridge's), while it does.
+    let entry = (d != Dir::PosZ && geo.stand(c).is_some())
         .then(|| graph.region_of(c))
         .flatten();
     let landings = Landing::falls(geo, graph, c);

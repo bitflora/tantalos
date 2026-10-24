@@ -14,7 +14,9 @@
 //!   nothing for walking. Flip panels only change which faces take portals (see `portals`).
 //! - Piston platforms on a floor: down, their bottom stop is a floor; up, their top stop, and
 //!   the column below it is solid. Whoever is on one rides it. On a wall or ceiling, the cells
-//!   they push into when up are solid then, and on a wall the cells over them are floors.
+//!   they push into when up are solid then, and on a wall the cells over them are floors. A
+//!   wall piston coming out pushes whatever stands in those cells out past its end, where it
+//!   falls.
 //! - Rail platforms that stop (not oscillating) are a floor at their first cell, or at their
 //!   last while active; whoever is on one rides it. Oscillating ones are a walkway along their
 //!   track, with rides between stops at different heights: wait for the platform.
@@ -151,6 +153,7 @@ impl Devices {
         let mut blocks: HashMap<(Cell, usize), Cond> = HashMap::new();
         let mut moves: Vec<DynMove> = Vec::new();
         let mut rides: HashMap<Cell, Cell> = HashMap::new();
+        let mut pushes: HashMap<Cell, Cell> = HashMap::new();
         let mut incomplete = false;
         // Two devices making one cell standable under different conditions can't be written
         // as one condition: the first wins.
@@ -219,8 +222,12 @@ impl Devices {
                 continue;
             }
             // Out of a wall or ceiling: the cells it fills only when up.
+            let past = p.at(p.top);
             for l in p.bottom..p.top {
                 let c = p.at(l);
+                if p.normal.axis() != 2 && !level.solid(past) {
+                    pushes.insert(c, past);
+                }
                 if level.standable(c) {
                     claim(&mut stand, &mut incomplete, c, Cond::off(b));
                 }
@@ -351,6 +358,7 @@ impl Devices {
             blocks,
             moves,
             rides,
+            pushes,
         };
         d.incomplete = incomplete;
         Some(d)

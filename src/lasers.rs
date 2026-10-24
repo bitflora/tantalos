@@ -14,6 +14,10 @@
 //!   player looks). Such places are "spots" (cell and direction); a cube anywhere else in a
 //!   region is out of every beam. Only spots that can lead somewhere useful (a catcher, relay,
 //!   turret or portal, perhaps through more spots) are kept.
+//!   A floor button's cell is a spot too: the reflection cube stacked on a cube holding the
+//!   button down (or set down beside one) catches the beam passing over it; it doesn't press
+//!   the button itself. Beams out of portals have spots as well, kept only where the beam out
+//!   of the cube powers a receiver or hits a turret.
 //! - Angled beams: a cube can also be set down anywhere along a beam crossing its cell, turned
 //!   to aim at a receiver, turret or portal surface on the same level (`aim_targets`, from
 //!   three points along the beam). The beam out of it runs at that angle through the grid
@@ -25,13 +29,17 @@
 //!   dropping some (`MAX_ANGLED`) doesn't make the model incomplete.
 //! - A beam that ends at a face with a portal comes out of the other portal, along its
 //!   normal. A beam coming out of a portal and ending at the other one just loops.
+//! - A deployed angled panel (45° or more) stops a straight beam crossing the cell it swings
+//!   into, unless the beam runs along its face; one that hits its front (`Event::Panel`) goes
+//!   into a portal on it and out of the other one. A 30° panel doesn't reach the beam at the
+//!   cell's middle. Angled beams pass panels.
 //! - Beams don't stop the player or cubes. (In-game a beam burns and pushes back a player who
 //!   walks into it: crossing one takes a running jump over it, which play.py does.)
 
 use std::collections::{HashMap, HashSet};
 
 use crate::geom::{step, Cell, Dir};
-use crate::level::{ItemKind, LaserKind, Level};
+use crate::level::{ItemKind, LaserKind, Level, PanelKind};
 use crate::portals::Face;
 
 /// Most spots kept: each is a place a cube can be, so they multiply states.
@@ -58,6 +66,10 @@ pub enum Event {
     Receiver(usize),
     /// It destroys turret `t` (index into `Level::turrets`).
     Turret(usize),
+    /// It crosses where angled panel `p` (index into `Level::panels`) swings out: deployed, the
+    /// panel stops it, and a portal on its face takes it on if `front` (the beam hits the
+    /// white face).
+    Panel { p: usize, front: bool },
 }
 
 /// A straight beam.
@@ -143,8 +155,7 @@ impl Beams {
             .filter(|i| {
                 matches!(
                     i.kind,
-                    ItemKind::FloorButton
-                        | ItemKind::PedestalButton
+                    ItemKind::PedestalButton
                         | ItemKind::EntryDoor
                         | ItemKind::ExitDoor
                         | ItemKind::Turret
@@ -288,12 +299,48 @@ impl Beams {
         }
         // Beams out of portals, if any beam can go into one.
         let ends: HashSet<Face> = rays.iter().filter_map(|r| r.end).collect();
+        let into_panel = rays
+            .iter()
+            .any(|r| r.events.iter().any(|e| matches!(e, Event::Panel { front: true, .. })));
         let mut exits: HashMap<Face, usize> = HashMap::new();
-        if !ends.is_empty() {
+        if !ends.is_empty() || into_panel {
             for f in level.portal_surfaces() {
                 let r =
                     get(&mut tracer, &mut rays, &mut segs, &mut depth, f.0, f.1.opposite(), true, 1);
                 exits.insert(f, r);
+            }
+        }
+        // Spots on beams out of portals, beside the ones found above. Every portalable face has
+        // such a beam, so only spots that go straight to a receiver or turret are kept.
+        let mut exit_candidates: Vec<(usize, Dir, usize)> = Vec::new();
+        if reflectors > 0 {
+            let mut exit_rays: Vec<usize> = exits.values().copied().collect();
+            exit_rays.sort_unstable();
+            for r in exit_rays {
+                for ev in rays[r].events.clone() {
+                    let Event::Cube(sc) = ev else { continue };
+                    if !seen_cells.insert(sc) {
+                        continue;
+                    }
+                    let cell = tracer.spot_cells[sc];
+                    for d in Dir::HORIZONTAL {
+                        let open = !level.solid(step(cell, d)) || level.portal_surface(cell, d);
+                        let behind = step(cell, d.opposite());
+                        let reach = level.standable(behind)
+                            && level.face(cell, d.opposite()).barrier.is_none();
+                        if !open || !reach {
+                            continue;
+                        }
+                        let out = get(&mut tracer, &mut rays, &mut segs, &mut depth, cell, d, false, 2);
+                        let hits = rays[out]
+                            .events
+                            .iter()
+                            .any(|e| matches!(e, Event::Receiver(_) | Event::Turret(_)));
+                        if hits {
+                            exit_candidates.push((sc, d, out));
+                        }
+                    }
+                }
             }
         }
         // Keep what can lead somewhere: rays that power or destroy something, end where a
@@ -310,6 +357,7 @@ impl Beams {
                 let hit = ray.events.iter().any(|e| match *e {
                     Event::Receiver(_) | Event::Turret(_) => true,
                     Event::Cube(sc) => useful_cell[sc],
+                    Event::Panel { front, .. } => portals_help && front,
                 });
                 if hit || (portals_help && ray.end.is_some()) {
                     useful_ray[r] = true;
@@ -330,6 +378,7 @@ impl Beams {
         let mut keep: Vec<(usize, Dir, usize)> = candidates
             .into_iter()
             .filter(|&(_, _, r)| useful_ray[r])
+            .chain(exit_candidates)
             .collect();
         keep.sort_by_key(|&(_, _, r)| (depth[r], r));
         if keep.len() > MAX_SPOTS {
@@ -381,6 +430,33 @@ impl Beams {
         b.rays = rays;
         b
     }
+}
+
+/// The panel a straight beam in `cell` along `d` runs into when deployed, if any: an angled
+/// panel of 45° or more swinging into `cell`, not edge on to the beam. Its face leans from
+/// its normal toward its hinge as it swings, so the beam hits the front if it runs against
+/// that leaning normal.
+fn panel_event(level: &Level, cell: Cell, d: Dir) -> Option<Event> {
+    let p = level
+        .panels
+        .iter()
+        .position(|p| p.kind == PanelKind::Angled && p.cell == cell && p.angle >= 45)?;
+    let panel = &level.panels[p];
+    let dot = |a: Dir| {
+        let (u, v) = (a.vector(), d.vector());
+        u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+    };
+    let (along_n, along_t) = (dot(panel.normal), dot(panel.tilt));
+    if along_n == 0 && along_t == 0 {
+        return None;
+    }
+    let a = (panel.angle as f64).to_radians();
+    let facing = a.cos() * along_n as f64 - a.sin() * along_t as f64;
+    let white = level.portal_surface(cell, panel.normal.opposite());
+    Some(Event::Panel {
+        p,
+        front: white && facing < -1e-9,
+    })
 }
 
 /// What an angled cube aims at.
@@ -474,6 +550,9 @@ impl Tracer<'_> {
         for _ in 0..64 {
             if level.solid(cur) {
                 break;
+            }
+            if let Some(e) = panel_event(level, cur, d) {
+                events.push(e);
             }
             if !first || own {
                 let receiver = level

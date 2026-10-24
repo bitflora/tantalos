@@ -937,6 +937,16 @@ impl Level {
                 PanelKind::Flip => {}
             }
         }
+        // Doors cover the face behind them: no portal goes on a door.
+        let doors: Vec<(Cell, Dir)> = self
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::EntryDoor | ItemKind::ExitDoor))
+            .filter_map(|i| Some((i.cell, i.normal?.opposite())))
+            .collect();
+        for (c, d) in doors {
+            self.voxels.set_face_portalable(c, d, false);
+        }
     }
 
     /// Whether an arc from the middle of cell `a` up to a voxel over the higher of the two and

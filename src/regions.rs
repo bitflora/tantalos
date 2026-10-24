@@ -97,6 +97,9 @@ pub struct Dyn {
     /// Where someone in this cell is taken when its condition fails (a moving platform's other
     /// stop, or off a panel that deploys), instead of falling.
     pub rides: HashMap<Cell, Cell>,
+    /// Where a wall piston coming out pushes someone in this cell: the open cell past its end,
+    /// to fall from.
+    pub pushes: HashMap<Cell, Cell>,
 }
 
 /// From any of `from`, to each of `to` (its own extra condition, the cell where it comes to
@@ -429,7 +432,8 @@ impl RegionGraph {
                         out.push((cp, rp));
                     }
                 }
-                for fall in geo.falls(c) {
+                let pushed = geo.dyn_.pushes.get(&c).map(|&p| geo.falls(p)).unwrap_or_default();
+                for fall in pushed.into_iter().chain(geo.falls(c)) {
                     let cond = match gone {
                         Some(gc) => gc.and(fall.cond),
                         None => Some(fall.cond),
