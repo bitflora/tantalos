@@ -15,8 +15,8 @@ Puzzle Maker's compiler leaves the puzzle readable in the map:
 - Goo, glass and grating aren't instances: they're water, window and grate brushes.
 - Lasers, bridges and funnels: the prop's origin is 16 units into the wall, its forward the way
   it fires or projects (a bridge's walkable side is its up); catchers likewise face out of the
-  wall. `_center` models are centred, others offset (toward wherever the origin is off the
-  face's middle). Faith plates: the plate's arm and its trigger_catapult's launch target (an
+  wall. Centred and `_OFFSET` items share the `_center` models: an offset one's origin is 32
+  units off the face's middle, toward the side it sits. Faith plates: the plate's arm and its trigger_catapult's launch target (an
   info_target, or a helper trigger launching straight up). Panels and stairs: their arms and
   steps, with the instance's angles (local +x: tilt / rising direction) and their branches'
   InitialValue. Pistons: the platform's func_movelinear and its level counters. Rails: the
@@ -825,7 +825,8 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
             else:
                 n = dir_of(e.angles(), (1, 0, 0), inst.name)
                 c = cell_of(add(e.origin(), n, 32))
-            offset = "center" if "center" in e.d.get("model", "") or word == "relay"                 else off_centre(e.origin(), c, n)
+            # Offset items use the `_center` model too, 32 units off the face's middle.
+            offset = off_centre(e.origin(), c, n)
             fields = [c, DIR_TOKEN[n], offset]
             if word == "laser":
                 fields.append("on" if branch(inst) else "off")

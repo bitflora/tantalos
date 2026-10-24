@@ -27,14 +27,17 @@ fn unsolvable(p: &Puzzle) {
 
 #[test]
 fn reflection_cube_powers_the_catcher() {
-    // On the floor its beam passes under the wall catcher; on top of the other cube it doesn't.
-    unsolvable(&fixtures::laser_cube(true));
-    let plan = plan(&fixtures::laser_cube_stand());
-    let at_spots = plan
+    let low = plan(&fixtures::laser_cube(true));
+    assert!(low
+        .iter()
+        .any(|a| matches!(a, Action::PutDown { at: CubeLoc::Spot(_) })));
+    // Centred emitter and catcher: the reflection cube goes on top of the other cube.
+    let high = plan(&fixtures::laser_cube_stand());
+    let at_spots = high
         .iter()
         .filter(|a| matches!(a, Action::PutDown { at: CubeLoc::Spot(_) }))
         .count();
-    assert_eq!(at_spots, 2, "{plan:?}");
+    assert_eq!(at_spots, 2, "{high:?}");
     unsolvable(&fixtures::laser_cube(false));
 }
 

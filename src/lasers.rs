@@ -18,10 +18,13 @@
 //!   button down (or set down beside one) catches the beam passing over it; it doesn't press
 //!   the button itself. Beams out of portals have spots as well (straight, and angled at a
 //!   receiver), kept only where the beam out of the cube powers a receiver or hits a turret.
-//! - Heights (in-game, 2026-10-24): emitters, wall catchers and wall relays sit at the middle
-//!   of their voxel. A reflection cube on the floor catches a beam at that height but sends it
-//!   on too low for a wall catcher or relay; set on top of another cube (on a button or a
-//!   spot in its cell) it sends it high enough. The solver tracks this (`Beams::on_wall`).
+//! - Heights (in-game, 2026-10-24): a centred wall emitter, catcher or relay sits at the middle
+//!   of its voxel ("high"); one offset toward the floor sits low (`_OFFSET` items are 32 units
+//!   off the middle); offset sideways or up counts as high. A reflection cube on the floor is
+//!   low: a high beam passes over it. One set on top of another cube (on a button or a spot in
+//!   its cell) is high. A cube catches only beams at its height and sends them on at it; a
+//!   wall receiver takes only beams at its height; floor and ceiling items take any, and a
+//!   beam keeps its height through portals. The solver tracks this (`Beams::high`).
 //! - Angled beams: a cube can also be set down anywhere along a beam crossing its cell, turned
 //!   to aim at a receiver, turret or portal surface on the same level (`aim_targets`, from
 //!   three points along the beam). The beam out of it runs at that angle through the grid
@@ -107,11 +110,12 @@ type Seg = (usize, [f64; 2], [f64; 2]);
 pub struct Beams {
     /// Catchers and relays (item index, kind), the senders `Signal::Laser` names.
     pub receivers: Vec<(i32, LaserKind)>,
-    /// Per receiver: on a wall (at the middle of its voxel), out of reach of a beam from a
-    /// reflection cube standing on the floor.
-    pub on_wall: Vec<bool>,
+    /// Per receiver: the height it takes beams at (`height`).
+    pub receiver_high: Vec<Option<bool>>,
     /// Emitters: (item index, ray).
     pub emitters: Vec<(i32, usize)>,
+    /// Per emitter: the height its beam runs at.
+    pub emitter_high: Vec<Option<bool>>,
     pub rays: Vec<Ray>,
     pub spot_cells: Vec<Cell>,
     pub spots: Vec<Spot>,
@@ -144,11 +148,11 @@ impl Beams {
                 .filter(|l| l.kind != LaserKind::Emitter)
                 .map(|l| (l.item, l.kind))
                 .collect(),
-            on_wall: level
+            receiver_high: level
                 .lasers
                 .iter()
                 .filter(|l| l.kind != LaserKind::Emitter)
-                .map(|l| l.normal.axis() != 2)
+                .map(height)
                 .collect(),
             ..Beams::default()
         };
@@ -237,6 +241,7 @@ impl Beams {
         for e in &emitters {
             let r = get(&mut tracer, &mut rays, &mut segs, &mut depth, e.cell, e.normal, true, 0);
             b.emitters.push((e.item, r));
+            b.emitter_high.push(height(e));
         }
         // Candidate spots: (cell, dir) -> ray, found from rays at depth below `reflectors`.
         let mut candidates: Vec<(usize, Dir, usize)> = Vec::new();
@@ -501,6 +506,13 @@ fn panel_event(level: &Level, cell: Cell, d: Dir) -> Option<Event> {
         p,
         front: white && facing < -1e-9,
     })
+}
+
+/// The height a laser item takes or sends beams at: `Some(true)` high (the middle of its
+/// voxel), `Some(false)` low (on a wall, offset toward the floor), `None` any (on a floor or
+/// ceiling).
+pub fn height(l: &crate::level::Laser) -> Option<bool> {
+    (l.normal.axis() != 2).then_some(l.offset != Some(Dir::NegZ))
 }
 
 /// What an angled cube aims at.

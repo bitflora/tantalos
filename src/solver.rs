@@ -47,9 +47,9 @@
 //!   regions that need a device only exist while it is in that state, and whoever stands in a
 //!   region that goes away rides or falls (`Region::fallback`), or dies.
 //! - Lasers (`lasers`): catchers and relays are senders, powered while a beam reaches them.
-//!   Reflection cubes put down at a spot (cell and facing) redirect beams. One on the floor
-//!   sends its beam too low for wall receivers (also through portals); another cube in its
-//!   cell (on a button there, or set down at a spot there as a stand) lifts it.
+//!   Reflection cubes put down at a spot (cell and facing) redirect beams. Beams run low or high
+//!   (`lasers::height`): a cube on the floor works low beams, one on another cube in its cell
+//!   (on a button there, or set down at a spot there as a stand) high ones.
 //! - Flings (`flings`): dropping from a ledge into a floor portal (`Action::Dive`) throws the
 //!   player out of the other one at speed. Faith plates launch whatever comes onto them.
 //!   A portal loop (`Action::Loop`): walking into a floor portal whose partner's way out
@@ -1542,17 +1542,12 @@ impl Model {
             })
             .collect();
         let regions_n = graph.regions.len();
-        let reaches_wall = |k: usize| {
-            beams.rays[beams.spots[k].ray]
-                .events
-                .iter()
-                .any(|e| matches!(*e, Event::Receiver(r) if beams.on_wall[r]))
-        };
+        // Stands only matter where some beam runs high.
+        let any_high = beams.emitter_high.iter().chain(&beams.receiver_high).any(|&h| h == Some(true));
         let stand_spot: Vec<bool> = (0..beams.spots.len())
             .map(|k| {
                 let cell = beams.spots[k].cell;
-                let same: Vec<usize> = (0..beams.spots.len()).filter(|&o| beams.spots[o].cell == cell).collect();
-                same[0] == k && same.iter().any(|&o| reaches_wall(o))
+                any_high && (0..beams.spots.len()).find(|&o| beams.spots[o].cell == cell) == Some(k)
             })
             .collect();
         let mut spots_in = vec![Vec::new(); regions_n];
@@ -2504,8 +2499,8 @@ impl Model {
                 continue;
             }
             let mut next = Some(ray);
-            // Out of a reflection cube on the floor: too low for wall receivers.
-            let mut low = false;
+            // The beam's height (`lasers::height`; `None`: any).
+            let mut high = self.beams.emitter_high[e];
             for _ in 0..=8 {
                 let Some(ray) = next.take() else { break };
                 let r = &self.beams.rays[ray];
@@ -2514,7 +2509,8 @@ impl Model {
                 for ev in &r.events {
                     match *ev {
                         Event::Receiver(k) => {
-                            if !(low && self.beams.on_wall[k]) {
+                            let takes = self.beams.receiver_high[k];
+                            if high.is_none() || takes.is_none() || takes == high {
                                 lit |= 1 << k;
                             }
                         }
@@ -2530,16 +2526,20 @@ impl Model {
                             break;
                         }
                         Event::Cube(sc) => {
-                            if let Some(k) = cube_at(sc) {
-                                let spot = &self.beams.spots[k];
-                                if spot.on.is_none_or(|on| on == ray) {
-                                    next = Some(spot.ray);
-                                    low = !stacked(k);
-                                } else {
-                                    stopped = true;
-                                }
-                                break;
+                            let Some(k) = cube_at(sc) else { continue };
+                            // A beam at the other height passes over or under it.
+                            let up = stacked(k);
+                            if high.is_some_and(|h| h != up) {
+                                continue;
                             }
+                            let spot = &self.beams.spots[k];
+                            if spot.on.is_none_or(|on| on == ray) {
+                                next = Some(spot.ray);
+                                high = Some(up);
+                            } else {
+                                stopped = true;
+                            }
+                            break;
                         }
                     }
                 }

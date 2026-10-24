@@ -291,7 +291,7 @@
 		"Item"
 		{
 			"Index"		"4"
-			"Type"		"ITEM_LASER_EMITTER_OFFSET"
+			"Type"		"ITEM_LASER_EMITTER_CENTER"
 			"Deletable"		"1"
 			"VoxelPos"		"5 2 1"
 			"LocalPos"		"0 0 0"
@@ -305,11 +305,11 @@
 		"Item"
 		{
 			"Index"		"5"
-			"Type"		"ITEM_LASER_CATCHER_OFFSET"
+			"Type"		"ITEM_LASER_CATCHER_CENTER"
 			"Deletable"		"1"
 			"VoxelPos"		"3 5 1"
 			"LocalPos"		"0 0 0"
-			"Angles"		"-90 0 90"
+			"Angles"		"-90 90 0"
 			"ITEM_PROPERTY_CONNECTION_COUNT"		"0"
 			"ITEM_PROPERTY_CUBE_TYPE"		"0"
 			"Facing"		"0 0 0"
