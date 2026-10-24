@@ -30,6 +30,10 @@ const MY_FIRST: &str = "size 10 10 4 open 0 0 0 8 6 3 0 7 0 4 7 3 8 7 0 8 9 3 6 
 /// sends the beam (through portals) to the exit's receptacle.
 const LASER_MANAGEMENT: &str = "size 8 6 3 open 1 0 0 7 5 1 0 2 1 7 3 1 1 0 2 3 5 2 5 0 2 7 5 2 white +x 7 0 0 7 5 2 white -x 1 0 0 3 1 2 1 4 0 3 5 2 white +y 5 5 0 7 5 2 white -y 1 0 0 3 5 2 entry 2 5 0 -y exit 7 4 0 -x fizzler 4 0 0 +y +z 2 on dropper 6 1 2 reflection button 2 2 0 weighted > exit > field 0 pedestal 5 1 0 inf > dropper 0 laser 6 0 0 +y -z on catcher 2 5 2 -y -z > field 0 catcher 7 2 0 -x -z > exit";
 
+/// 68655995 "The Grate Escape": the funnel beam out of a wall portal passes grating to the
+/// player's column; moving that portal up a panel at a time lifts them to the exit ledge.
+const GRATE_ESCAPE: &str = "size 3 3 9 open 1 0 0 2 2 6 1 0 7 1 2 8 2 0 7 2 0 8 2 2 7 2 2 8 0 0 8 2 1 8 white -y 1 0 0 2 0 8 white +z 2 1 6 2 2 6 entry 1 1 0 +x exit 2 1 8 -x grating 1 0 0 2 0 6 +y +z grating 1 0 7 1 0 8 +y -z grating 1 2 0 2 2 6 -y +z grating 1 2 7 1 2 8 -y -z grating 2 0 8 2 0 8 +y -z grating 2 1 0 2 1 6 -x +z grating 2 2 8 2 2 8 -y -z funnel 2 1 0 +z on";
+
 fn level(tokens: &str) -> Level {
     Level::from_puzzle(&glados::tokens::decode(tokens).unwrap())
 }
@@ -111,4 +115,14 @@ fn step_out_of_a_turret_and_reach_through_a_portal() {
 fn reflection_cube_on_a_button_holds_it_and_redirects() {
     let plan = solved(LASER_MANAGEMENT);
     assert!(plan.iter().any(|a| matches!(a, Action::PutDown { at: glados::solver::CubeLoc::Spot(_) })), "{plan:?}");
+}
+
+#[test]
+fn funnel_beam_lifts_the_player_as_its_portal_moves_up() {
+    // Not routed yet (`glados route` can't ground a ride up).
+    let model = Model::new(&level(GRATE_ESCAPE), Mode::Conservative).unwrap();
+    let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+        panic!("not solved");
+    };
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: glados::regions::Move::Funnel, .. })), "{plan:?}");
 }

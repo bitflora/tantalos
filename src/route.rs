@@ -769,7 +769,7 @@ impl<'a> Grounder<'a> {
             let end = devices.paths[i].end;
             let k = end.and_then(|e| h.portals.iter().position(|&p| p == Some(e)));
             if let Some(out) = k.and_then(|k| h.portals[1 - k]) {
-                cells.extend(dynamics::path(level, out.0, out.1.opposite()).cells);
+                cells.extend(dynamics::funnel_path(level, out.0, out.1.opposite()).cells);
             }
             if rev {
                 cells.reverse();

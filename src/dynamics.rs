@@ -39,7 +39,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::geom::{step, Cell, Dir};
-use crate::level::{Level, PanelKind, ProjectorKind};
+use crate::level::{BarrierKind, Level, PanelKind, ProjectorKind};
 use crate::portals::Face;
 use crate::regions::{face_key, Cond, Dyn, DynMove, Geo, Move};
 
@@ -146,7 +146,7 @@ impl Devices {
         d.paths = level
             .projectors
             .iter()
-            .map(|p| path(level, p.cell, p.normal))
+            .map(|p| path_with(level, p.cell, p.normal, p.kind == ProjectorKind::Funnel))
             .collect();
         d.routes = vec![Vec::new(); level.projectors.len()];
 
@@ -382,17 +382,27 @@ impl Devices {
             };
             let r = self.reversed_bit[i].unwrap();
             let direct = self.paths[i].cells.clone();
+            // Cells some other portal's beam runs through: a player in the beam can be lifted
+            // into one above them by moving the portal.
+            let lift: HashSet<Cell> = level
+                .portal_surfaces()
+                .into_iter()
+                .filter(|&f| f != end)
+                .flat_map(|f| funnel_path(level, f.0, f.1.opposite()).cells)
+                .collect();
             // Faces whose moves (with a placeholder condition) are the same, as region pairs.
             let mut groups: BTreeMap<Vec<Signature>, (Vec<Face>, Vec<DynMove>)> = BTreeMap::new();
             for f in level.portal_surfaces() {
                 if f == end {
                     continue;
                 }
-                let out_path = path(level, f.0, f.1.opposite());
+                let out_path = funnel_path(level, f.0, f.1.opposite());
                 let mut all = direct.clone();
                 all.extend(out_path.cells.iter().copied());
                 let mut moves = funnel_moves(geo, &all, Cond::on(0));
+                let climbs = climb_moves(geo, &out_path.cells, &lift, Cond::on(0));
                 let back = funnel_moves(geo, &rev(&all), Cond::off(0));
+                moves.extend(climbs);
                 moves.extend(back);
                 let mut sig: Vec<Signature> = Vec::new();
                 for m in &moves {
@@ -488,6 +498,16 @@ fn rev(cells: &[Cell]) -> Vec<Cell> {
 /// The cells a projection from open cell `c` along `d` crosses, and the face it ends at if
 /// portals can go there.
 pub fn path(level: &Level, c: Cell, d: Dir) -> Path {
+    path_with(level, c, d, false)
+}
+
+/// `path` for a funnel, which (measured by a play-tester, 2026-10-24) goes on through grating
+/// but not glass.
+pub fn funnel_path(level: &Level, c: Cell, d: Dir) -> Path {
+    path_with(level, c, d, true)
+}
+
+fn path_with(level: &Level, c: Cell, d: Dir, through_grating: bool) -> Path {
     let mut cells = Vec::new();
     let mut cur = c;
     let mut end = None;
@@ -501,7 +521,12 @@ pub fn path(level: &Level, c: Cell, d: Dir) -> Path {
                 }
                 break;
             }
-            if level.face(cur, d).barrier.is_some() || cells.len() > 64 {
+            let stops = match level.face(cur, d).barrier {
+                None => false,
+                Some(BarrierKind::Grating) => !through_grating,
+                Some(_) => true,
+            };
+            if stops || cells.len() > 64 {
                 break;
             }
             cur = n;
@@ -514,14 +539,73 @@ pub fn path(level: &Level, c: Cell, d: Dir) -> Path {
     }
 }
 
-/// Rides along a funnel whose cells are `cells` in the order it carries the player: from
-/// where they can step in (a cell itself if they can stand there, or a standable cell beside
-/// one at its height) to everywhere they can step out sideways further along.
-pub fn funnel_moves(geo: Geo, cells: &[Cell], cond: Cond) -> Vec<DynMove> {
+/// Rides up a funnel beam that comes out of a portal: the player, in the beam, has the other
+/// portal moved to a face whose beam runs through the cell above them (about half a panel
+/// higher each time), and so on, stepping out sideways anywhere on the way up. `start` are
+/// the cells of the beam out of the portal they step into (as `funnel_moves` does) and `lift`
+/// all cells such a beam can run through.
+fn climb_moves(geo: Geo, start: &[Cell], lift: &HashSet<Cell>, cond: Cond) -> Vec<DynMove> {
     let level = geo.level;
-    let n = cells.len();
-    // Ways out of each cell, with the fields crossed stepping out.
-    let exits: Vec<Vec<(Cond, Cell, u64)>> = cells
+    let mut out = Vec::new();
+    for &f in start {
+        // The cells above, up the column, while a beam can reach them.
+        let mut risen: Vec<(Cell, u64)> = Vec::new();
+        let (mut q, mut hz) = (f, 0);
+        loop {
+            let up = step(q, Dir::PosZ);
+            let face = level.face(q, Dir::PosZ);
+            if level.solid(up) || face.barrier.is_some() || !lift.contains(&up) || risen.len() >= 32 {
+                break;
+            }
+            hz |= face.hazards;
+            risen.push((up, hz));
+            q = up;
+        }
+        if risen.is_empty() {
+            continue;
+        }
+        let ids: Vec<Cell> = risen.iter().map(|r| r.0).collect();
+        let mut to = Vec::new();
+        for (k, outs) in funnel_exits(geo, &ids).into_iter().enumerate() {
+            for (c, cell, h) in outs {
+                to.push((c, cell, h | risen[k].1));
+            }
+        }
+        if to.is_empty() {
+            continue;
+        }
+        // Where they step in, with the fields crossed stepping in.
+        let mut from: Vec<(Cell, u64)> = Vec::new();
+        if geo.stand(f).is_some() {
+            from.push((f, 0));
+        }
+        for d in Dir::HORIZONTAL {
+            let m = step(f, d);
+            let face = level.face(f, d);
+            if geo.stand(m).is_some() && face.barrier.is_none() && geo.block(f, d).is_none() {
+                from.push((m, face.hazards));
+            }
+        }
+        let mut entries: Vec<u64> = from.iter().map(|&(_, h)| h).collect();
+        entries.sort();
+        entries.dedup();
+        for h in entries {
+            out.push(DynMove {
+                from: from.iter().filter(|e| e.1 == h).map(|e| e.0).collect(),
+                to: to.iter().map(|&(c, cell, x)| (c, cell, x | h)).collect(),
+                kind: Move::Funnel,
+                cond,
+                hazards: h,
+            });
+        }
+    }
+    out
+}
+
+/// Ways out of each funnel cell sideways, with the fields crossed stepping out.
+fn funnel_exits(geo: Geo, cells: &[Cell]) -> Vec<Vec<(Cond, Cell, u64)>> {
+    let level = geo.level;
+    cells
         .iter()
         .map(|&f| {
             let mut out = Vec::new();
@@ -542,8 +626,24 @@ pub fn funnel_moves(geo: Geo, cells: &[Cell], cond: Cond) -> Vec<DynMove> {
             }
             out
         })
-        .collect();
+        .collect()
+}
+
+/// Rides along a funnel whose cells are `cells` in the order it carries the player: from
+/// where they can step in (a cell itself if they can stand there, or a standable cell beside
+/// one at its height) to everywhere they can step out sideways further along.
+pub fn funnel_moves(geo: Geo, cells: &[Cell], cond: Cond) -> Vec<DynMove> {
+    let level = geo.level;
+    let n = cells.len();
+    let exits = funnel_exits(geo, cells);
     // Fields crossed between consecutive cells.
+    let walled: Vec<bool> = cells
+        .windows(2)
+        .map(|w| {
+            let apart: i32 = (0..3).map(|a| (w[0][a] - w[1][a]).abs()).sum();
+            apart == 1 && level.face(w[0], n_dir(w[0], w[1])).barrier.is_some()
+        })
+        .collect();
     let along: Vec<u64> = cells
         .windows(2)
         .map(|w| {
@@ -579,6 +679,9 @@ pub fn funnel_moves(geo: Geo, cells: &[Cell], cond: Cond) -> Vec<DynMove> {
         let mut hz = 0;
         for j in i..n {
             if j > i {
+                if walled[j - 1] {
+                    break;
+                }
                 hz |= along[j - 1];
             }
             for &(c, cell, h) in &exits[j] {
