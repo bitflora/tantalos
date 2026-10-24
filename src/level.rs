@@ -472,6 +472,23 @@ impl Stairs {
     pub fn top(&self) -> Cell {
         step(step(step(self.cell, self.dir), self.dir), Dir::PosZ)
     }
+
+    /// Where the deployed stairs can be left, with the hazards crossed on the way: `top`, and
+    /// sideways off the top step onto a ledge level with it (Workshop 3818309212 "???":
+    /// stairs facing a wall, the exit ledge beside their top end; a play-tester walked it).
+    pub fn exits(&self, level: &Level) -> Vec<(Cell, u64)> {
+        let over = step(step(self.cell, self.dir), Dir::PosZ);
+        let mut out = vec![(self.top(), 0)];
+        if !level.solid(over) {
+            for side in Dir::HORIZONTAL {
+                let (t, face) = (step(over, side), level.face(over, side));
+                if side.axis() != self.dir.axis() && face.barrier.is_none() && level.standable(t) {
+                    out.push((t, face.hazards));
+                }
+            }
+        }
+        out
+    }
 }
 
 /// A piston platform pushing out of the surface behind `cell` along `normal`: down, it fills

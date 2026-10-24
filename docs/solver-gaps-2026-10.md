@@ -264,6 +264,53 @@ unchanged.
   training levels go from 2,617 to 3,216 (+23%).
 - Time: 24 min at 50k and 101 min at 250k on 12 threads, about 4× the cost.
 
+## Play-tested small levels (2026-10-23)
+
+The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
+(`out/ws3-unsolv-more/`). What the play-tester found:
+
+- **3818309212 "???"**: easy. The first pedestal toggles the angled panel that blocks the hall;
+  the second pedestal is wired to nothing (its compiled proxy has no outputs; the converter is
+  right). Drop down the shaft onto the stairs, which are always up and face a wall, and step
+  off their top step **sideways** onto the exit ledge. The solver only let stairs lead
+  straight ahead. **Fixed:** `Stairs::exits` (src/level.rs) adds the cells beside the top step,
+  one voxel up, when standable and not walled off; the solver and `glados route` use it. On
+  800 unsolved Workshop levels with stairs, 7 become solvable (none get worse); on 1,000
+  generated stairs levels from data/v5b, 1 becomes solvable and 4 get a shorter plan. The
+  play harness hasn't walked a sideways exit yet.
+- **68464713 "Smallest Puzzle in the Multiverse"**: solvable with two tricks the solver lacks.
+  The two fizzlers cross in the middle of the room, making four quadrants. (1) Press the 3 s
+  pedestal (it turns off the fizzler between the cube's quadrant and the next one), run to the
+  cube, and carry it across that fizzler before the timer ends; it takes a fast, straight run.
+  Our dash allows only walking, and its time counts a whole voxel per cell (5 steps = 3.7 s at
+  conservative speed, 3.4 s at liberal speed, against about 2 s along the real path).
+  (2) Put the cube down right beside the other fizzler. Then stand on the edge of that
+  fizzler's floor button (the corner nearest the cube, diagonal across the fizzler) and pick
+  the cube up across the fizzler while the button holds it off. Then press the pedestal again
+  and carry the cube through the first fizzler to the exit button. **Fixed (2026-10-24)** with
+  two new actions and plan words:
+  - `Action::Fetch` / `fetch P C E`: press a timed pedestal, pick up a loose cube on the way
+    (0.25 s), and carry it on, through no fizzler that is on, to region E. Conservative rules
+    take the worst cell of the cube's region (at most 8 cells), liberal ones the best.
+  - `Action::Reach` / `reach B C`: stand on a weighted floor button and pick up a cube in a
+    cell beside the button's (or across a corner) in another region, across fizzlers that are
+    on but off while the button is held. Conservative rules want every cell of that region in
+    reach; liberal ones any.
+  - Dash timing (`DashTimes`, shared by the solver and `glados route`): steps across a corner
+    cost 1.4 voxels, a cell counts as reached on entering it (half a voxel before its middle),
+    and a held cube half a voxel sooner still. Escaping through the exit still needs the exit
+    cell's middle in time.
+  - The level now solves conservatively in 8 steps, the play-tester's route. Old vs. new
+    release binary (equal speed): 800 random unsolved Workshop levels, 1 uncertain → solvable;
+    800 unsolved Workshop levels with a timed pedestal, 4 uncertain → solvable and 6
+    unsolvable → uncertain; 1,000 random v5b levels, 2 uncertain → solvable and 22 shorter
+    plans; 1,000 v5b levels with a timed pedestal, 3 → solvable, 3 unsolvable → uncertain and
+    39 shorter plans. No verdict got worse. Mechanics: a fetch counts as "timed dash"; a reach
+    has no bit of its own (a new one would add a training-condition group).
+  - `train/play.py` has `act_fetch` and `act_reach`, not yet tried in game. `glados route`
+    can now put a cube down in the player's own cell when its region has no other.
+- 00011..00013 (One Jump, FLAAD TEST, You can't simply jump around it): not recorded here.
+
 ## Recommended order
 
 1. ~~**Angled laser beams**~~: done (above), ~5% of unsolvable levels rather than the 9% the

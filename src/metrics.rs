@@ -166,7 +166,10 @@ impl Metrics {
 pub fn effort(plan: &[Action]) -> f64 {
     plan.iter()
         .map(|a| match a {
-            Action::Fire { .. } | Action::Dash { .. } | Action::Knock { .. } => 1.0,
+            Action::Fire { .. }
+            | Action::Dash { .. }
+            | Action::Fetch { .. }
+            | Action::Knock { .. } => 1.0,
             Action::Move {
                 kind: Move::Bounce | Move::Leap | Move::Plate | Move::Funnel,
                 ..
@@ -303,7 +306,8 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
     }
     let used = |p: usize| {
         plan.iter().any(|a| {
-            matches!(*a, Action::Press { pedestal } | Action::Dash { pedestal, .. } if pedestal == p)
+            matches!(*a, Action::Press { pedestal } | Action::Dash { pedestal, .. }
+                | Action::Fetch { pedestal, .. } if pedestal == p)
         })
     };
     let mut pedestal_needed = vec![false; model.pedestals.len()];
@@ -426,7 +430,7 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
                 }
             }
             Action::Press { .. } => set(5),
-            Action::Dash { .. } => set(6),
+            Action::Dash { .. } | Action::Fetch { .. } => set(6),
             Action::Move {
                 kind: Move::Bounce, ..
             } => set(10),
@@ -547,7 +551,10 @@ pub fn chain_depth(model: &Model, plan: &[Action], path: &[State]) -> f64 {
             kind: Move::Bounce | Move::Leap | Move::Plate | Move::Funnel,
             ..
         } => 1.0,
-        Action::Move { .. } | Action::PickUp { .. } | Action::PutDown { .. } => 0.5,
+        Action::Move { .. }
+        | Action::PickUp { .. }
+        | Action::Reach { .. }
+        | Action::PutDown { .. } => 0.5,
         _ => 1.0,
     };
     let mut depth = vec![0.0f64; n];

@@ -15,7 +15,7 @@
 //! vanishing from under a cube, a flip panel losing its portal, a dropper dropping) is applied
 //! to the concrete state the way the solver's `settle` does (`Grounder::settle`).
 
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::dataset::json_str;
 use crate::dynamics;
@@ -29,8 +29,6 @@ use crate::portals::{self, Face};
 use crate::regions::{Cond, Geo, Move};
 use crate::solver::{Action, Color, Cube, CubeLoc, Mode, Model, Signal, State, Verdict};
 
-const VOXEL: f64 = 128.0;
-const GRAVITY: f64 = 600.0;
 /// Shots preferably meet the face at least this steeply (cosine to its normal, about 25°).
 const MIN_SHOT_COS: f64 = 0.42;
 
@@ -117,6 +115,22 @@ pub enum Act {
         path: Vec<Cell>,
         seconds: f64,
         escape: bool,
+    },
+    /// Press the timed pedestal, walk `path` to the cube in `cube` (the path's end), pick it
+    /// up and carry it along `carry`, before `seconds` run out.
+    Fetch {
+        pedestal: i32,
+        cell: Cell,
+        path: Vec<Cell>,
+        cube: Cell,
+        carry: Vec<Cell>,
+        seconds: f64,
+    },
+    /// Standing on the floor button in `button` (the walk's end), pick up the cube in `cube`
+    /// beside it, across a fizzler the button switches off.
+    Reach {
+        button: Cell,
+        cube: Cell,
     },
     Knock {
         turret: i32,
@@ -875,23 +889,23 @@ impl<'a> Grounder<'a> {
                     })
                 }),
                 Move::Stairs => {
-                    let stairs = level.stairs.iter().enumerate().find(|(i, st)| {
-                        dev & (1 << model.devices.stairs_bit[*i]) != 0
-                            && self.region(st.top()) == Some(to)
+                    let stairs = level.stairs.iter().enumerate().find_map(|(i, st)| {
+                        if dev & (1 << model.devices.stairs_bit[i]) == 0 {
+                            return None;
+                        }
+                        let (top, _) =
+                            st.exits(level).into_iter().find(|&(t, _)| self.region(t) == Some(to))?;
+                        Some((st, top))
                     });
-                    stairs.and_then(|(_, st)| {
+                    stairs.and_then(|(st, top)| {
                         let second = step(st.cell, st.dir);
                         self.find(h, s, |c| {
                             if c != st.cell && c != second {
                                 return None;
                             }
                             let mut after = h.clone();
-                            after.player = st.top();
-                            let path = if c == second {
-                                vec![st.top()]
-                            } else {
-                                vec![second, st.top()]
-                            };
+                            after.player = top;
+                            let path = if c == second { vec![top] } else { vec![second, top] };
                             self.fits(after, next).map(|after| (Act::Climb { path }, after))
                         })
                     })
@@ -1225,36 +1239,41 @@ impl<'a> Grounder<'a> {
                             }
                         });
                 }
-                self.find(h, s, |c| {
-                    if self.in_the_way(h, s, c) {
-                        return None;
-                    }
-                    let spots: Vec<Cell> = match at {
-                        CubeLoc::OnButton(b) => {
-                            let t = model.buttons[b].cell;
-                            if !self.beside(t).contains(&c) {
-                                return None;
-                            }
-                            vec![t]
+                // In a cell beside the player's; failing that (a region of one cell), in theirs.
+                let put = |own_cell: bool| {
+                    self.find(h, s, |c| {
+                        if self.in_the_way(h, s, c) {
+                            return None;
                         }
-                        _ => self
-                            .beside(c)
-                            .into_iter()
-                            .filter(|&t| !self.in_the_way(h, s, t) && !doors.contains(&t))
-                            .collect(),
-                    };
-                    spots.into_iter().find_map(|t| {
-                        let mut after = h.clone();
-                        after.cubes[i].at = Some(t);
-                        let button = matches!(at, CubeLoc::OnButton(_));
-                        let act = Act::PutDown {
-                            at: t,
-                            button,
-                            facing: None,
+                        let spots: Vec<Cell> = match at {
+                            CubeLoc::OnButton(b) => {
+                                let t = model.buttons[b].cell;
+                                if own_cell || !self.beside(t).contains(&c) {
+                                    return None;
+                                }
+                                vec![t]
+                            }
+                            _ if own_cell => vec![c],
+                            _ => self
+                                .beside(c)
+                                .into_iter()
+                                .filter(|&t| !self.in_the_way(h, s, t) && !doors.contains(&t))
+                                .collect(),
                         };
-                        self.fits(after, next).map(|after| (act, after))
+                        spots.into_iter().find_map(|t| {
+                            let mut after = h.clone();
+                            after.cubes[i].at = Some(t);
+                            let button = matches!(at, CubeLoc::OnButton(_));
+                            let act = Act::PutDown {
+                                at: t,
+                                button,
+                                facing: None,
+                            };
+                            self.fits(after, next).map(|after| (act, after))
+                        })
                     })
-                })
+                };
+                put(false).or_else(|| put(true))
             }
 
             Action::Toss { .. } => {
@@ -1318,52 +1337,25 @@ impl<'a> Grounder<'a> {
             } => {
                 let p = &model.pedestals[pedestal];
                 let seconds = p.timer?;
-                let on = model.hazards_on_in(s, Some(Signal::Pedestal(pedestal)));
-                let alive = model
-                    .turret_enabled
-                    .iter()
-                    .enumerate()
-                    .filter(|&(t, &e)| e && s.down & (1 << t) == 0)
-                    .fold(0u32, |m, (t, _)| m | 1 << t);
-                // The fastest dash from each stand cell beside the pedestal (or, failing that,
-                // from the pedestal's own cell, as the solver times it); the walk goes to the
-                // stand cell with the fastest one.
-                let near: Vec<Cell> = self
-                    .beside(p.cell)
-                    .into_iter()
-                    .filter(|&c| !self.in_the_way(h, s, c))
-                    .chain([p.cell])
-                    .collect();
-                let mut best: Option<(f64, Cell, Vec<Cell>, Here)> = None;
-                for &c in &near {
-                    if c == p.cell && best.is_some() {
-                        break;
+                let limit = model.dash_times(seconds).limit;
+                let (stand, path, _, after) = self.dash_from(pedestal, s, None, |cell, fizzled, t| {
+                    let mut after = h.clone();
+                    after.player = if escaped { self.exit_door.0 } else { cell };
+                    // Out of the exit, the level is over: the solver applies no fizzler
+                    // crossed on the way.
+                    if fizzled && !escaped {
+                        Self::fizzle(&mut after);
                     }
-                    let Some((t, path, after)) = self.dash(c, on, alive, |cell, fizzled| {
-                        let mut after = h.clone();
-                        after.player = if escaped { self.exit_door.0 } else { cell };
-                        // Out of the exit, the level is over: the solver applies no
-                        // fizzler crossed on the way.
-                        if fizzled && !escaped {
-                            Self::fizzle(&mut after);
-                        }
-                        let arrived = if escaped {
-                            cell == self.exit_door.0
-                        } else {
-                            self.region(cell) == Some(to)
-                        };
-                        if !arrived {
-                            return None;
-                        }
-                        self.fits(after, next)
-                    }) else {
-                        continue;
+                    let arrived = if escaped {
+                        cell == self.exit_door.0 && t <= limit
+                    } else {
+                        self.region(cell) == Some(to)
                     };
-                    if t <= seconds && best.as_ref().is_none_or(|b| t < b.0) {
-                        best = Some((t, c, path, after));
+                    if !arrived {
+                        return None;
                     }
-                }
-                let (_, stand, path, after) = best?;
+                    self.fits(after, next)
+                })?;
                 let act = Act::Dash {
                     pedestal: p.index,
                     cell: p.cell,
@@ -1372,6 +1364,60 @@ impl<'a> Grounder<'a> {
                     escape: escaped,
                 };
                 self.find(h, s, |c| (c == stand).then(|| (act.clone(), after.clone())))
+            }
+
+            Action::Fetch {
+                pedestal,
+                cube,
+                from,
+                to,
+            } => {
+                let p = &model.pedestals[pedestal];
+                let seconds = p.timer?;
+                let locs = self.cubes(h);
+                let i = (0..h.cubes.len()).find(|&i| {
+                    h.cubes[i].kind == cube && locs[i].loc == from && !h.cubes[i].gone
+                })?;
+                let q = h.cubes[i].at?;
+                let (stand, path, carry, after) =
+                    self.dash_from(pedestal, s, Some(q), |cell, fizzled, _| {
+                        if self.region(cell) != Some(to) {
+                            return None;
+                        }
+                        let mut after = h.clone();
+                        if fizzled {
+                            Self::fizzle(&mut after);
+                        }
+                        after.cubes[i].at = None;
+                        after.cubes[i].spot = None;
+                        after.player = cell;
+                        self.fits(after, next)
+                    })?;
+                let act = Act::Fetch {
+                    pedestal: p.index,
+                    cell: p.cell,
+                    path,
+                    cube: q,
+                    carry,
+                    seconds,
+                };
+                self.find(h, s, |c| (c == stand).then(|| (act.clone(), after.clone())))
+            }
+
+            Action::Reach { cube, from, button } => {
+                let at = model.buttons[button].cell;
+                let locs = self.cubes(h);
+                let i = (0..h.cubes.len()).find(|&i| {
+                    h.cubes[i].kind == cube && locs[i].loc == from && !h.cubes[i].gone
+                })?;
+                let q = h.cubes[i].at?;
+                let mut after = h.clone();
+                after.cubes[i].at = None;
+                after.cubes[i].spot = None;
+                after.player = at;
+                let after = self.fits(after, next)?;
+                let act = Act::Reach { button: at, cube: q };
+                self.find(h, s, |c| (c == at).then(|| (act.clone(), after.clone())))
             }
 
             Action::Knock { turret } => {
@@ -1403,6 +1449,7 @@ impl<'a> Grounder<'a> {
                 | Act::Toss { .. }
                 | Act::Throw { .. }
                 | Act::Press { .. }
+                | Act::Reach { .. }
                 | Act::Knock { .. }
         );
         if let (true, Some(&end)) = (stays, walk.last()) {
@@ -1420,70 +1467,35 @@ impl<'a> Grounder<'a> {
         })
     }
 
-    /// The quickest walk from `from` (Dijkstra on the solver's dash timing) to a cell where
-    /// `arrive(cell, fizzled)` gives the state afterwards: (seconds, the cells after `from`,
-    /// that state). Laser fields that are on (`on`) and cells live turrets (`alive`) can
-    /// shoot stop it.
-    fn dash(
+    /// The quickest timed dash of pedestal `p` (`Model::dash_way`, fetching the cube in `cube`
+    /// if given) from a stand cell beside it, or failing that from its own cell (as the
+    /// solver times it), to where `arrive` gives the state afterwards: the stand cell, the
+    /// cells walked to the cube (all, without one) and after it, and that state.
+    fn dash_from(
         &self,
-        from: Cell,
-        on: u64,
-        alive: u32,
-        arrive: impl Fn(Cell, bool) -> Option<Here>,
-    ) -> Option<(f64, Vec<Cell>, Here)> {
-        let (level, model) = (self.level, self.model);
-        let step_time = VOXEL / model.rules.walk_speed;
-        let fall_time = |h: i32| (2.0 * h as f64 * VOXEL / GRAVITY).sqrt();
-        // A node is (cell, fizzled on the way). Heap of (time in µs, node); best time and
-        // parent per node.
-        type Node = (Cell, bool);
-        let mut best: HashMap<Node, (u64, Option<Node>)> =
-            HashMap::from([((from, false), (0, None))]);
-        let mut heap = BinaryHeap::from([(std::cmp::Reverse(0u64), from, false)]);
-        while let Some((std::cmp::Reverse(t), c, fizzled)) = heap.pop() {
-            if best[&(c, fizzled)].0 < t {
-                continue;
+        p: usize,
+        s: &State,
+        cube: Option<Cell>,
+        arrive: impl Fn(Cell, bool, u64) -> Option<Here>,
+    ) -> Option<(Cell, Vec<Cell>, Vec<Cell>, Here)> {
+        let model = self.model;
+        let ped = &model.pedestals[p];
+        let near: Vec<Cell> = self.beside(ped.cell).into_iter().chain([ped.cell]).collect();
+        let mut best: Option<(u64, Cell, Vec<Cell>, Vec<Cell>, Here)> = None;
+        for &c in &near {
+            if c == ped.cell && best.is_some() {
+                break;
             }
-            if let Some(after) = arrive(c, fizzled) {
-                let mut path = Vec::new();
-                let mut x = (c, fizzled);
-                while x != (from, false) {
-                    path.push(x.0);
-                    x = best[&x].1.unwrap();
-                }
-                path.reverse();
-                return Some((t as f64 / 1e6, path, after));
-            }
-            for d in Dir::HORIZONTAL {
-                let face = level.face(c, d);
-                let n = step(c, d);
-                if face.barrier.is_some() || level.solid(n) {
-                    continue;
-                }
-                let (f, fallen) = if level.standable(n) {
-                    (n, 0)
-                } else {
-                    match level.fall_path(n) {
-                        Some(x) => x,
-                        None => continue,
-                    }
-                };
-                let hazards = face.hazards | fallen;
-                let Some(r) = self.region(f) else { continue };
-                if hazards & on & model.lasers != 0
-                    || (!model.rules.run_past_turrets && model.graph.regions[r].danger & alive != 0)
-                {
-                    continue;
-                }
-                let nf = fizzled || hazards & on & model.fizzlers != 0;
-                let nt = t + ((step_time + fall_time(n[2] - f[2])) * 1e6) as u64;
-                if best.get(&(f, nf)).is_none_or(|b| nt < b.0) {
-                    best.insert((f, nf), (nt, Some((c, fizzled))));
-                    heap.push((std::cmp::Reverse(nt), f, nf));
+            let way = model.dash_way(s, p, c, cube, |cell, fizzled, t| {
+                arrive(cell, fizzled, t).map(|after| (t, after))
+            });
+            if let Some((path, carry, (t, after))) = way {
+                if best.as_ref().is_none_or(|b| t < b.0) {
+                    best = Some((t, c, path, carry, after));
                 }
             }
         }
-        None
+        best.map(|(_, c, path, carry, after)| (c, path, carry, after))
     }
 
     /// The last leg: walk to the exit door's cell and out through it.
@@ -1519,6 +1531,8 @@ impl<'a> Grounder<'a> {
             | Step::Throw(_, c)
             | Step::Press(c)
             | Step::Dash(c, _)
+            | Step::Fetch(c, _, _)
+            | Step::Reach(c, _)
             | Step::Knock(c)
             | Step::Bounce(c)
             | Step::Leap(c)
@@ -1755,6 +1769,28 @@ fn act_json(act: &Act) -> String {
             cell_json(*cell),
             point_json(above(*cell, PEDESTAL_TOP)),
             cells_json(path)
+        ),
+        Act::Fetch {
+            pedestal,
+            cell,
+            path,
+            cube,
+            carry,
+            seconds,
+        } => format!(
+            "\"action\":\"fetch\",\"item\":{pedestal},\"cell\":{},\"look\":{},\"path\":{},\"cube\":{},\"cube_look\":{},\"carry\":{},\"seconds\":{seconds}",
+            cell_json(*cell),
+            point_json(above(*cell, PEDESTAL_TOP)),
+            cells_json(path),
+            cell_json(*cube),
+            point_json(above(*cube, CUBE_CENTRE)),
+            cells_json(carry)
+        ),
+        Act::Reach { button, cube } => format!(
+            "\"action\":\"reach\",\"cell\":{},\"cube\":{},\"look\":{}",
+            cell_json(*button),
+            cell_json(*cube),
+            point_json(above(*cube, CUBE_CENTRE))
         ),
         Act::Knock { turret, cell } => format!(
             "\"action\":\"knock\",\"item\":{turret},\"cell\":{},\"look\":{}",

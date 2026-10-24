@@ -3,7 +3,8 @@
 //! effects reach the region graph as a `Dyn` (see `regions`).
 //!
 //! Rules (ASSUMPTIONS until checked in-game):
-//! - Stairs, deployed, climb from their two cells onto the ledge they face (`Move::Stairs`).
+//! - Stairs, deployed, climb from their two cells onto the ledge they face, or a ledge beside
+//!   their top step (`Move::Stairs`, `Stairs::exits`).
 //!   Deployed, they are a ramp of steps up to most of a voxel high: nobody walks onto or off
 //!   them sideways (in-game, a walk across their top end stuck on the steps), so their cells'
 //!   side faces are walls; they are walked into from behind.
@@ -176,7 +177,7 @@ impl Devices {
             }
             moves.push(DynMove {
                 from: vec![s.cell, step(s.cell, s.dir)],
-                to: vec![(Cond::ALWAYS, s.top(), 0)],
+                to: s.exits(level).into_iter().map(|(t, h)| (Cond::ALWAYS, t, h)).collect(),
                 kind: Move::Stairs,
                 cond: Cond::on(b),
                 hazards: 0,

@@ -1198,6 +1198,46 @@ class Game:
             return self.act_exit({"normal": self.exit_normal})
         return took <= leg["seconds"]
 
+    def act_fetch(self, leg):
+        """Presses a timed pedestal, runs to the cube at the path's end, picks it up and carries
+        it along `carry` before the timer runs out (solver.rs `Action::Fetch`). Unverified in
+        game: the solver's timing has the cube across the field with little to spare."""
+        self.act_press(leg)
+        start = time.time()
+        if leg["path"][:-1]:
+            self.walk_cells(leg["path"][:-1], tol=24)
+        if not self.act_pickup({"look": leg["cube_look"]}):
+            return False
+        picked = time.time() - start
+        self.walk_cells(leg["carry"], tol=24)
+        took = time.time() - start
+        print(f"    fetch: cube picked up at {picked:.1f} s, carried by {took:.1f} s of {leg['seconds']} s",
+              flush=True)
+        return True
+
+    def act_reach(self, leg):
+        """Stands on the floor button in `cell`, on its edge nearest the cube, and picks the cube
+        up across the fizzler the button switches off (solver.rs `Action::Reach`). Unverified
+        in game: done by hand in Workshop 68464713, with the cube put down close to the field."""
+        button, at = self.floor(leg["cell"]), self.world(leg["look"])
+        d = max(hdist(button, at), 1.0)
+        u = ((at[0] - button[0]) / d, (at[1] - button[1]) / d)
+        self.shift_to([button[0] + u[0] * 40, button[1] + u[1] * 40])
+        time.sleep(0.5)  # the button goes down, and the fizzler off
+        cube = self.nearest_cube(self.obs(), at, within=128)
+        if cube is None:
+            return False
+        self.look_at(cube["o"])
+        time.sleep(0.15)
+        self.tap("use")
+        time.sleep(0.4)
+        if not self.follows_view(cube["id"]):
+            return False
+        self.held_id = cube["id"]
+        now = next((c for c in self.obs()["cubes"] if c["id"] == cube["id"]), cube)
+        self.hold_dist = math.dist(now["o"], self.obs()["eye"])
+        return True
+
     def act_knock(self, leg):
         p = self.world(leg["look"])
         if hdist(self.obs()["o"], p) > 80:
@@ -1679,9 +1719,10 @@ def walk_out(game, seconds):
 # Where a leg's action starts matters (aim, reach, a run-up): a careful retry puts the player
 # exactly there after walking. For the rest the walk is the action, or a device moves them.
 PLACED = ("fire", "pickup", "putdown", "toss", "throw", "press", "knock", "enter", "leap", "dive",
-          "bounce")
+          "bounce", "fetch", "reach")
 # Lining up a cube or reaching for something can take the player half a cell over.
-SLACK = ("pickup", "putdown", "toss", "throw", "press", "knock", "funnel", "plate", "dive", "ride")
+SLACK = ("pickup", "putdown", "toss", "throw", "press", "knock", "funnel", "plate", "dive", "ride",
+         "reach")
 
 
 def intended_fields(game, before, leg):

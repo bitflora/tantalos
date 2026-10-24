@@ -14,6 +14,9 @@
 //! throw blue|orange X Y Z   where the cube lands, thrown into that portal
 //! press X Y Z               a latching pedestal's cell
 //! dash X Y Z X Y Z          a timed pedestal's cell, and where the dash ends
+//! fetch X Y Z X Y Z X Y Z    a timed pedestal's cell, the cube's (picked up on the way), and
+//!                           where the dash ends with it
+//! reach X Y Z X Y Z          a floor button's cell, stood on, and the cube's beside it
 //! knock X Y Z               a turret's cell
 //! bounce|leap|plate|climb|funnel|ride X Y Z    where the player ends up
 //! dive blue|orange X Y Z    where the player lands, having dived into that floor portal
@@ -44,6 +47,8 @@ pub enum Step {
     Throw(Color, Cell),
     Press(Cell),
     Dash(Cell, Cell),
+    Fetch(Cell, Cell, Cell),
+    Reach(Cell, Cell),
     Knock(Cell),
     Bounce(Cell),
     Leap(Cell),
@@ -54,10 +59,12 @@ pub enum Step {
     Dive(Color, Cell),
 }
 
-/// Words plans use beyond the level format's numbers and directions.
-pub const WORDS: [&str; 19] = [
+/// Words plans use beyond the level format's numbers and directions. New words go last, so
+/// older solver nets' vocabularies stay a prefix (train/data.py `PLAN_WORDS`).
+pub const WORDS: [&str; 21] = [
     "walk", "fire", "enter", "pickup", "putdown", "toss", "throw", "press", "dash", "knock",
-    "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange",
+    "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "fetch",
+    "reach",
 ];
 
 /// Every word a plan can use (`exit` and the numbers and directions are in `tokens::vocab`
@@ -110,6 +117,8 @@ pub fn encode(route: &Route) -> String {
             Act::Throw { color, landing, .. } => put(&["throw", color_word(*color)], &[*landing]),
             Act::Press { cell, .. } => put(&["press"], &[*cell]),
             Act::Dash { cell, .. } => put(&["dash"], &[*cell, to]),
+            Act::Fetch { cell, cube, .. } => put(&["fetch"], &[*cell, *cube, to]),
+            Act::Reach { button, cube } => put(&["reach"], &[*button, *cube]),
             Act::Knock { cell, .. } => put(&["knock"], &[*cell]),
             Act::Bounce { .. } => put(&["bounce"], &[to]),
             Act::Leap { .. } => put(&["leap"], &[to]),
@@ -205,6 +214,8 @@ pub fn decode(text: &str) -> Result<Vec<Step>, String> {
             "throw" => Step::Throw(r.color()?, r.cell()?),
             "press" => Step::Press(r.cell()?),
             "dash" => Step::Dash(r.cell()?, r.cell()?),
+            "fetch" => Step::Fetch(r.cell()?, r.cell()?, r.cell()?),
+            "reach" => Step::Reach(r.cell()?, r.cell()?),
             "knock" => Step::Knock(r.cell()?),
             "bounce" => Step::Bounce(r.cell()?),
             "leap" => Step::Leap(r.cell()?),
@@ -347,6 +358,8 @@ pub fn step_text(step: &Step) -> String {
         Step::Throw(k, x) => format!("throw {} {}", color_word(*k), c(x)),
         Step::Press(x) => format!("press {}", c(x)),
         Step::Dash(x, y) => format!("dash {} {}", c(x), c(y)),
+        Step::Fetch(x, y, z) => format!("fetch {} {} {}", c(x), c(y), c(z)),
+        Step::Reach(x, y) => format!("reach {} {}", c(x), c(y)),
         Step::Knock(x) => format!("knock {}", c(x)),
         Step::Bounce(x) => format!("bounce {}", c(x)),
         Step::Leap(x) => format!("leap {}", c(x)),
@@ -370,6 +383,8 @@ pub fn step_verb(step: &Step) -> &'static str {
         Step::Throw(..) => "throw",
         Step::Press(_) => "press",
         Step::Dash(..) => "dash",
+        Step::Fetch(..) => "fetch",
+        Step::Reach(..) => "reach",
         Step::Knock(_) => "knock",
         Step::Bounce(_) => "bounce",
         Step::Leap(_) => "leap",
@@ -414,6 +429,12 @@ fn fits(model: &Model, s: &State, a: &Action, next: &State, step: &Step) -> bool
         (Step::Dash(p, end), Action::Dash { pedestal, escaped, .. }) => {
             // Out of the exit, the level is over wherever the dash ends.
             model.pedestals[pedestal].cell == p && (escaped || lands(&end))
+        }
+        (Step::Fetch(p, c, end), Action::Fetch { pedestal, from, .. }) => {
+            model.pedestals[pedestal].cell == p && loc_fits(model, from, c, None, None) && lands(&end)
+        }
+        (Step::Reach(b, c), Action::Reach { from, button, .. }) => {
+            model.buttons[button].cell == b && loc_fits(model, from, c, None, None)
         }
         (Step::Knock(c), Action::Knock { turret }) => model.turrets[turret].cell == c,
         (Step::Dive(k, c), Action::Dive { color, .. }) => k == color && lands(&c),

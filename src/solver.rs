@@ -14,13 +14,18 @@
 //! - Floor buttons are held down by cubes the button accepts (weighted: any; cube: not the
 //!   sphere; sphere: only the sphere). The player can stand on a weighted one too, but all
 //!   they do there is fire a portal from its cell while it is down (`Action::Fire` with
-//!   `stand_on`): walking off releases it.
+//!   `stand_on`), or pick up a cube beside its cell across a fizzler it switches off
+//!   (`Action::Reach`, `button_reaches`): walking off releases it.
 //! - Each receiver (exit door, fizzler, laser field) is on when all its inputs are (AND).
 //!   The exit door opens on that, inverted by `Start Open`; with no inputs it is open. A hazard
 //!   with inputs is on when `Start Enabled` XOR all inputs on; with none, `Start Enabled`.
 //! - Pedestal buttons: infinite timer latches its outputs on; a timed one keeps them on for
-//!   its timer, during which the player may only walk and drop (no portals, no cubes).
-//!   Walking speed: conservative 140 u/s, liberal 190 u/s; falls take sqrt(2h/600) s.
+//!   its timer, during which the player may only walk and drop (no portals), and pick up one
+//!   loose cube on the way to carry it on (`Action::Fetch`; pressing with a cube in hand drops
+//!   it, so a fetch starts empty-handed). Walking speed: conservative 140 u/s, liberal 190
+//!   u/s, a voxel per step and 1.4 across a corner; falls take sqrt(2h/600) s. A cell is
+//!   reached on entering it, half a voxel before its middle; a carried cube, held ahead,
+//!   enters one half a voxel sooner still; picking one up takes 0.25 s (`DashTimes`).
 //! - Fizzlers: walking or falling through an active one clears both portals and destroys a
 //!   held cube, which respawns where it started. A cube falling through one respawns too.
 //!   Active fizzlers stop portal shots. Laser fields: the player can't pass an active one;
@@ -88,6 +93,10 @@ pub const DECORATIVE: &[&str] = &[
 
 pub const DEFAULT_MAX_STATES: usize = 1_000_000;
 const MAX_PEDESTALS: usize = 32;
+/// Seconds to pick up a cube, in a timed dash (`Action::Fetch`).
+const PICKUP_TIME: f64 = 0.25;
+/// Most cells a cube's region may have for conservative rules to fetch it in a timed dash.
+const MAX_FETCH_CELLS: usize = 8;
 const GRAVITY: f64 = 600.0;
 const VOXEL: f64 = 128.0;
 
@@ -241,6 +250,21 @@ pub enum Action {
         pedestal: usize,
         to: usize,
         escaped: bool,
+    },
+    /// Press a timed pedestal, pick up the cube at `from` on the way, and carry it to `to`
+    /// across the fields the timer holds off, before it runs out.
+    Fetch {
+        pedestal: usize,
+        cube: CubeKind,
+        from: CubeLoc,
+        to: usize,
+    },
+    /// Stand on floor button `button` (index into `Model::buttons`) and pick up the cube at
+    /// `from`, beside its cell across a fizzler the button switches off.
+    Reach {
+        cube: CubeKind,
+        from: CubeLoc,
+        button: usize,
     },
     /// Walk up to a turret from where it can't shoot and knock it over.
     Knock {
@@ -414,10 +438,12 @@ struct GelMove {
 #[derive(Default)]
 struct WalkGraph {
     node: HashMap<Cell, usize>,
+    /// Per node, its cell.
+    cells: Vec<Cell>,
     region: Vec<usize>,
-    /// (to, fall height in voxels, hazards crossed, devices needed). Every move walks one
-    /// voxel first.
-    moves: Vec<Vec<(usize, i32, u64, Cond)>>,
+    /// (to, fall height in voxels, hazards crossed, devices needed, voxels walked first: one,
+    /// or the square root of two across a corner).
+    moves: Vec<Vec<(usize, i32, u64, Cond, f64)>>,
 }
 
 /// Everything the search needs, precomputed from a level.
@@ -483,6 +509,9 @@ pub struct Model {
     buttons_in: Vec<Vec<usize>>,
     pedestals_in: Vec<Vec<usize>>,
     knock_from: Vec<Vec<usize>>,
+    /// Per region, the cubes the player can reach for standing on one of its floor buttons
+    /// (`button_reaches`).
+    reaches: Vec<Vec<Reach>>,
     /// Hazards that are fizzlers, and those that are laser fields.
     pub fizzlers: u64,
     pub lasers: u64,
@@ -630,9 +659,9 @@ const USES_PEDESTAL: u32 = 2 << 30;
 fn uses(a: &Action) -> u32 {
     match *a {
         Action::Fire { class, .. } => USES_CLASS | class as u32,
-        Action::Press { pedestal } | Action::Dash { pedestal, .. } => {
-            USES_PEDESTAL | pedestal as u32
-        }
+        Action::Press { pedestal }
+        | Action::Dash { pedestal, .. }
+        | Action::Fetch { pedestal, .. } => USES_PEDESTAL | pedestal as u32,
         _ => 0,
     }
 }
@@ -1581,6 +1610,7 @@ impl Model {
                 .filter(|(_, h)| h.kind == kind)
                 .fold(0u64, |m, (i, _)| m | 1 << i)
         };
+        let reaches = button_reaches(geo, &graph, &buttons, mode, kind_mask(HazardKind::Fizzler));
         let mut model = Model {
             edge_range: ranges(&edge_from),
             gel_move_range: ranges(&gel_move_from),
@@ -1610,6 +1640,7 @@ impl Model {
             pedestals_in: by_region(pedestals.len(), &|p| pedestals[p].region),
             footholds,
             knock_from,
+            reaches,
             fizzlers: kind_mask(HazardKind::Fizzler),
             panel_shots,
             lasers: kind_mask(HazardKind::LaserField),
@@ -1705,6 +1736,77 @@ impl Model {
     pub fn hazards_on_in(&self, s: &State, held: Option<Signal>) -> u64 {
         let cx = self.context();
         self.hazards_on(&cx.lay, &self.pack(&cx.lay, s), held)
+    }
+
+    /// A timed dash's way on foot, for `route`, timed as the search times it: press pedestal
+    /// `p` in state `s` standing in `from`, pick up the cube in cell `cube` (fetching it) on
+    /// entering that cell, and go on until `arrive` (a cell, whether a fizzler was crossed on
+    /// the way, µs since the press) gives something; the earliest such. Returns the cells
+    /// walked to the cube (all of them without one) and after it, each one move from the last
+    /// (a step, a drop or across a corner), not counting `from`.
+    pub fn dash_way<T>(
+        &self,
+        s: &State,
+        p: usize,
+        from: Cell,
+        cube: Option<Cell>,
+        mut arrive: impl FnMut(Cell, bool, u64) -> Option<T>,
+    ) -> Option<(Vec<Cell>, Vec<Cell>, T)> {
+        let seconds = self.pedestals[p].timer?;
+        let start = *self.walk.node.get(&from)?;
+        let cx = self.context();
+        let w = self.pack(&cx.lay, s);
+        let timed = Some(Signal::Pedestal(p));
+        let on = self.hazards_on(&cx.lay, &w, timed);
+        let dev = if self.devices.is_empty() {
+            0
+        } else {
+            self.device_bits(&cx.lay, &w, timed)
+        };
+        let alive = cx.turrets & !w[DOWN];
+        let t = self.dash_times(seconds);
+        let mut sc = Scratch::default();
+        let mut walked = Vec::new();
+        self.walk_times(&[(start, false, 0)], on, dev, alive, false, t.enter, &mut walked, &mut sc);
+        let mut came = std::mem::take(&mut sc.parent);
+        // The cells back to a source (not included), and the source's key.
+        let way = |parent: &[u32], mut k: usize| {
+            let mut cells = Vec::new();
+            while parent[k] != u32::MAX {
+                cells.push(self.walk.cells[k / 2]);
+                k = parent[k] as usize;
+            }
+            cells.reverse();
+            (cells, k)
+        };
+        let earliest = |times: &[u64]| {
+            let mut keys: Vec<usize> = (0..times.len()).filter(|&k| times[k] < u64::MAX).collect();
+            keys.sort_by_key(|&k| (times[k], k));
+            keys
+        };
+        let Some(q) = cube else {
+            return earliest(&walked).into_iter().find_map(|k| {
+                let found = arrive(self.walk.cells[k / 2], k % 2 == 1, walked[k])?;
+                Some((way(&came, k).0, Vec::new(), found))
+            });
+        };
+        let qn = *self.walk.node.get(&q)?;
+        let sources: Vec<(usize, bool, u64)> = [false, true]
+            .into_iter()
+            .filter(|&f| walked[2 * qn + f as usize] < u64::MAX)
+            .map(|f| (qn, f, walked[2 * qn + f as usize].saturating_sub(t.half) + t.pickup))
+            .collect();
+        let mut carried = Vec::new();
+        self.walk_times(&sources, on, dev, alive, true, t.carry, &mut carried, &mut sc);
+        let after = std::mem::take(&mut sc.parent);
+        let found = earliest(&carried).into_iter().find_map(|k| {
+            let found = arrive(self.walk.cells[k / 2], k % 2 == 1, carried[k])?;
+            let (carry, source) = way(&after, k);
+            let to_cube = way(&came, source).0;
+            Some((to_cube, carry, found))
+        });
+        came.clear();
+        found
     }
 
     /// `shot_stops` in state `s`: a shot with mask `m` is clear when `m & stops == 0`.
@@ -2743,6 +2845,34 @@ impl Model {
                 };
                 done(&mut sc.n, a, !matches!(from, CubeLoc::OnButton(_) | CubeLoc::Spot(_)));
             }
+            // Across a fizzler that is on now and off while the player stands on the button.
+            for reach in &self.reaches[r] {
+                let b = reach.button;
+                if reach.hazards & on == 0
+                    || cubes.contains(&self.button_code(b))
+                    || reach.hazards & self.hazards_on(lay, s, Some(Signal::Floor(b))) != 0
+                {
+                    continue;
+                }
+                let from = CubeLoc::Loose(reach.region);
+                let code = self.loc_code(from);
+                let mut last = None;
+                for (i, &c) in cubes.iter().enumerate() {
+                    let id = (lay.kinds[i], lay.homes[i]);
+                    if c != code || last == Some(id) {
+                        continue;
+                    }
+                    last = Some(id);
+                    copy(&mut sc.n);
+                    lay.move_cube(&mut sc.n, i, HELD);
+                    let a = Action::Reach {
+                        cube: lay.kinds[i],
+                        from,
+                        button: b,
+                    };
+                    done(&mut sc.n, a, true);
+                }
+            }
         }
 
         for &p in &self.pedestals_in[r] {
@@ -2771,7 +2901,9 @@ impl Model {
     }
 
     /// Press timed pedestal `p` at `cell` and walk for at most `seconds`: every region reachable
-    /// in time, and escaping if the exit door's cell is reached while it's open.
+    /// in time, and escaping if the exit door's cell is reached while it's open. With no cube
+    /// in hand, also fetch each loose cube (`Action::Fetch`): pick it up on the way and carry
+    /// it on, through no fizzler that is on (it would dissolve), to a region past its own.
     #[allow(clippy::too_many_arguments)]
     fn dash(
         &self,
@@ -2795,43 +2927,14 @@ impl Model {
             self.device_bits(lay, s, timed)
         };
         let alive = cx.turrets & !s[DOWN];
-        let step_time = VOXEL / self.rules.walk_speed;
-        let fall_time = |h: i32| (2.0 * h as f64 * VOXEL / GRAVITY).sqrt();
-        // Dijkstra over (node, fizzled); times as integer microseconds for the heap.
+        let t = self.dash_times(seconds);
         let key = |node: usize, fizzled: bool| 2 * node + fizzled as usize;
-        let best = &mut sc.dist;
-        best.clear();
-        best.resize(2 * self.walk.region.len(), u64::MAX);
-        best[key(start, false)] = 0;
-        let heap = &mut sc.heap;
-        heap.clear();
-        heap.push(Reverse((0u64, start, false)));
-        let limit = (seconds * 1e6) as u64;
-        while let Some(Reverse((t, node, fizzled))) = heap.pop() {
-            if best[key(node, fizzled)] < t {
-                continue;
-            }
-            for &(to, fall, hazards, cond) in &self.walk.moves[node] {
-                if hazards & on & self.lasers != 0 || !cond.holds(dev) {
-                    continue;
-                }
-                let region = self.walk.region[to];
-                if !self.rules.run_past_turrets && self.graph.regions[region].danger & alive != 0 {
-                    continue;
-                }
-                let f = fizzled || hazards & on & self.fizzlers != 0;
-                let nt = t + ((step_time + fall_time(fall)) * 1e6) as u64;
-                if nt <= limit && nt < best[key(to, f)] {
-                    best[key(to, f)] = nt;
-                    heap.push(Reverse((nt, to, f)));
-                }
-            }
-        }
+        let mut walked = std::mem::take(&mut sc.dist);
+        self.walk_times(&[(start, false, 0)], on, dev, alive, false, t.enter, &mut walked, sc);
 
-        let reached =
-            |node: usize| best[key(node, false)] < u64::MAX || best[key(node, true)] < u64::MAX;
         let exit = self.walk.node.get(&self.exit_cell).copied();
-        if self.exit_open_with(lay, s, timed) && exit.is_some_and(reached) {
+        let escapes = exit.is_some_and(|x| walked[key(x, false)].min(walked[key(x, true)]) <= t.limit);
+        if self.exit_open_with(lay, s, timed) && escapes {
             sc.n.clear();
             sc.n.extend_from_slice(s);
             sc.n[0] = self.exit_region as u32 | ESCAPED;
@@ -2845,7 +2948,7 @@ impl Model {
         sc.ends.clear();
         for node in 0..self.walk.region.len() {
             for fizzled in [false, true] {
-                if best[key(node, fizzled)] < u64::MAX {
+                if walked[key(node, fizzled)] < u64::MAX {
                     sc.ends.push((self.walk.region[node], fizzled));
                 }
             }
@@ -2866,6 +2969,180 @@ impl Model {
                     escaped: false,
                 };
                 done(&mut sc.n, a, false);
+            }
+        }
+
+        let cubes = lay.cubes(s);
+        if !cubes.contains(&HELD) {
+            let mut last = None;
+            for (i, &code) in cubes.iter().enumerate() {
+                let from = self.code_loc(code);
+                let CubeLoc::Loose(home) = from else { continue };
+                let id = (lay.kinds[i], lay.homes[i], code);
+                if last == Some(id) {
+                    continue;
+                }
+                last = Some(id);
+                let Some(ends) = self.fetch_ends(&walked, home, &t, on, dev, alive, sc) else {
+                    continue;
+                };
+                for (region, &end) in ends.iter().enumerate() {
+                    if end == u8::MAX || region == home {
+                        continue;
+                    }
+                    sc.n.clear();
+                    sc.n.extend_from_slice(s);
+                    sc.n[0] = region as u32;
+                    if end == 1 {
+                        lay.fizzle(&mut sc.n);
+                    }
+                    lay.move_cube(&mut sc.n, i, HELD);
+                    let a = Action::Fetch {
+                        pedestal: p,
+                        cube: lay.kinds[i],
+                        from,
+                        to: region,
+                    };
+                    done(&mut sc.n, a, false);
+                }
+                sc.fetch = ends;
+            }
+        }
+        sc.dist = walked;
+    }
+
+    /// Times for a timed dash of `seconds`, in µs (see `DashTimes`).
+    pub(crate) fn dash_times(&self, seconds: f64) -> DashTimes {
+        let half = VOXEL / 2.0 / self.rules.walk_speed;
+        let us = |x: f64| (x * 1e6) as u64;
+        DashTimes {
+            limit: us(seconds),
+            enter: us(seconds + half),
+            carry: us(seconds + 2.0 * half),
+            half: us(half),
+            pickup: us(PICKUP_TIME),
+        }
+    }
+
+    /// Where a cube loose in region `home` can be carried in a timed dash, after a walk that
+    /// took `walked` (as `walk_times` leaves it): per region, 0 if the player gets there with
+    /// it without having crossed a fizzler before picking it up, 1 only having crossed one,
+    /// `u8::MAX` not in time. The player picks it up on entering its cell. Conservative rules
+    /// take the worst cell of `home` (the cube may be in any), liberal ones the best. `None`
+    /// if it can't be fetched (conservatively: some cell of `home` is out of reach, or there
+    /// are too many to time).
+    #[allow(clippy::too_many_arguments)]
+    fn fetch_ends(
+        &self,
+        walked: &[u64],
+        home: usize,
+        t: &DashTimes,
+        on: u64,
+        dev: u64,
+        alive: u32,
+        sc: &mut Scratch,
+    ) -> Option<Vec<u8>> {
+        let key = |node: usize, fizzled: bool| 2 * node + fizzled as usize;
+        let picked = |node: usize, fizzled: bool| {
+            let at = walked[key(node, fizzled)];
+            (at < u64::MAX).then(|| (node, fizzled, at.saturating_sub(t.half) + t.pickup))
+        };
+        let cells: Vec<usize> =
+            (0..self.walk.region.len()).filter(|&n| self.walk.region[n] == home).collect();
+        let liberal = self.mode == Mode::Liberal;
+        if cells.is_empty() || (!liberal && cells.len() > MAX_FETCH_CELLS) {
+            return None;
+        }
+        let groups: Vec<Vec<usize>> = if liberal {
+            vec![cells]
+        } else {
+            cells.into_iter().map(|c| vec![c]).collect()
+        };
+        let regions = self.graph.regions.len();
+        let mut ends = std::mem::take(&mut sc.fetch);
+        ends.clear();
+        ends.resize(regions, if liberal { u8::MAX } else { 0 });
+        let mut carried = Vec::new();
+        let mut here = vec![u8::MAX; regions];
+        for group in groups {
+            let sources: Vec<(usize, bool, u64)> = group
+                .iter()
+                .flat_map(|&n| [picked(n, false), picked(n, true)])
+                .flatten()
+                .collect();
+            if sources.is_empty() {
+                sc.fetch = ends;
+                return None;
+            }
+            self.walk_times(&sources, on, dev, alive, true, t.carry, &mut carried, sc);
+            here.fill(u8::MAX);
+            for node in 0..self.walk.region.len() {
+                let region = self.walk.region[node];
+                for fizzled in [false, true] {
+                    if carried[key(node, fizzled)] < u64::MAX {
+                        here[region] = here[region].min(fizzled as u8);
+                    }
+                }
+            }
+            for (e, &h) in ends.iter_mut().zip(&here) {
+                *e = if liberal { (*e).min(h) } else { (*e).max(h) };
+            }
+        }
+        Some(ends)
+    }
+
+    /// The fastest times on foot over the walk graph from `sources` ((node, fizzled, µs)), up
+    /// to `limit` µs, into `best[2 * node + fizzled]` (`u64::MAX`: not in time), with the key
+    /// each came from in `sc.parent` (`u32::MAX`: a source). Carrying a cube, no move crosses
+    /// a fizzler that is on: it would dissolve the cube.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_times(
+        &self,
+        sources: &[(usize, bool, u64)],
+        on: u64,
+        dev: u64,
+        alive: u32,
+        carrying: bool,
+        limit: u64,
+        best: &mut Vec<u64>,
+        sc: &mut Scratch,
+    ) {
+        let step_time = VOXEL / self.rules.walk_speed;
+        let fall_time = |h: i32| (2.0 * h as f64 * VOXEL / GRAVITY).sqrt();
+        let key = |node: usize, fizzled: bool| 2 * node + fizzled as usize;
+        let nodes = self.walk.region.len();
+        best.clear();
+        best.resize(2 * nodes, u64::MAX);
+        sc.parent.clear();
+        sc.parent.resize(2 * nodes, u32::MAX);
+        let heap = &mut sc.heap;
+        heap.clear();
+        for &(node, fizzled, t) in sources {
+            if t <= limit && t < best[key(node, fizzled)] {
+                best[key(node, fizzled)] = t;
+                heap.push(Reverse((t, node, fizzled)));
+            }
+        }
+        while let Some(Reverse((t, node, fizzled))) = heap.pop() {
+            if best[key(node, fizzled)] < t {
+                continue;
+            }
+            for &(to, fall, hazards, cond, len) in &self.walk.moves[node] {
+                let fizzles = hazards & on & self.fizzlers != 0;
+                if hazards & on & self.lasers != 0 || !cond.holds(dev) || (carrying && fizzles) {
+                    continue;
+                }
+                let region = self.walk.region[to];
+                if !self.rules.run_past_turrets && self.graph.regions[region].danger & alive != 0 {
+                    continue;
+                }
+                let f = fizzled || fizzles;
+                let nt = t + ((len * step_time + fall_time(fall)) * 1e6) as u64;
+                if nt <= limit && nt < best[key(to, f)] {
+                    best[key(to, f)] = nt;
+                    sc.parent[key(to, f)] = key(node, fizzled) as u32;
+                    heap.push(Reverse((nt, to, f)));
+                }
             }
         }
     }
@@ -2977,6 +3254,28 @@ impl Model {
                     )
                 }
             }
+            Action::Fetch {
+                pedestal,
+                cube,
+                from,
+                to,
+            } => {
+                let p = &self.pedestals[pedestal];
+                format!(
+                    "press pedestal button {}, pick up the {} in {} and carry it to region {} within {} s",
+                    p.index,
+                    cube_name(cube),
+                    self.loc_name(from),
+                    label(to),
+                    p.timer.unwrap_or(0.0)
+                )
+            }
+            Action::Reach { cube, from, button } => format!(
+                "stand on button {} and reach for the {} in {}",
+                self.buttons[button].index,
+                cube_name(cube),
+                self.loc_name(from)
+            ),
             Action::Knock { turret } => {
                 format!("knock over turret {}", self.turrets[turret].index)
             }
@@ -3149,6 +3448,88 @@ impl Layout {
     }
 }
 
+/// A cube in reach of a floor button (`Model::reaches`): standing on `button`, the player
+/// can pick up a cube in `region` across the fizzlers `hazards`.
+#[derive(Clone, Copy, Debug)]
+struct Reach {
+    button: usize,
+    region: usize,
+    hazards: u64,
+}
+
+/// Per region, the cubes the player can reach for standing on one of its weighted floor
+/// buttons: a cube in a cell beside the button's (or across a corner, either way round it)
+/// in another region, with only fizzlers (`fizzlers`) in between. Conservative rules want
+/// every cell of that region in reach, as the cube could be anywhere in it; liberal ones any
+/// cell (the player can put it there first). Seen in game: "Smallest Puzzle in the
+/// Multiverse" (Workshop 68464713), a cube across a corner of a fizzler from its button.
+fn button_reaches(
+    geo: Geo,
+    graph: &RegionGraph,
+    buttons: &[Button],
+    mode: Mode,
+    fizzlers: u64,
+) -> Vec<Vec<Reach>> {
+    let level = geo.level;
+    let open = |f: Cell, d: Dir| {
+        level.face(f, d).barrier.is_none() && geo.block(f, d).is_none() && !level.solid(step(f, d))
+    };
+    let mut out = vec![Vec::new(); graph.regions.len()];
+    for (b, button) in buttons.iter().enumerate() {
+        let Some(r) = button.region else { continue };
+        if button.kind != ButtonKind::Weighted {
+            continue;
+        }
+        let c = button.cell;
+        // Cells in reach and the hazards in between, by the way round with fewest.
+        let mut cells: Vec<(Cell, u64)> = Dir::HORIZONTAL
+            .into_iter()
+            .filter(|&d| open(c, d))
+            .map(|d| (step(c, d), level.face(c, d).hazards))
+            .collect();
+        for dx in [Dir::PosX, Dir::NegX] {
+            for dy in [Dir::PosY, Dir::NegY] {
+                let n = step(step(c, dx), dy);
+                let way = [(dx, dy), (dy, dx)]
+                    .into_iter()
+                    .filter(|&(a, d)| open(c, a) && open(step(c, a), d))
+                    .map(|(a, d)| level.face(c, a).hazards | level.face(step(c, a), d).hazards)
+                    .min_by_key(|h| h.count_ones());
+                cells.extend(way.map(|h| (n, h)));
+            }
+        }
+        let mut by: BTreeMap<usize, (u64, usize)> = BTreeMap::new();
+        for (k, h) in cells {
+            let Some(rk) = graph.region_of(k) else { continue };
+            if rk == r || h == 0 || h & !fizzlers != 0 {
+                continue;
+            }
+            if mode == Mode::Liberal {
+                out[r].push(Reach {
+                    button: b,
+                    region: rk,
+                    hazards: h,
+                });
+            }
+            let e = by.entry(rk).or_insert((0, 0));
+            e.0 |= h;
+            e.1 += 1;
+        }
+        if mode == Mode::Conservative {
+            for (rk, (h, n)) in by {
+                if n == graph.regions[rk].cells.len() {
+                    out[r].push(Reach {
+                        button: b,
+                        region: rk,
+                        hazards: h,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A face class the player may fire at from a region (`Model::fire_from`).
 struct Target {
     class: usize,
@@ -3203,10 +3584,26 @@ struct Scratch {
     n: Vec<u32>,
     /// Weighted buttons the player can stand on, and the hazards on meanwhile.
     foot: Vec<(usize, u64)>,
-    /// Timed dashes: best times, the queue, and the (region, fizzled) pairs reached.
+    /// Timed dashes: best times, where each came from, the queue, the (region, fizzled)
+    /// pairs reached, and per region where a fetched cube gets (`Model::fetch_ends`).
     dist: Vec<u64>,
+    parent: Vec<u32>,
     heap: BinaryHeap<Reverse<(u64, usize, bool)>>,
     ends: Vec<(usize, bool)>,
+    fetch: Vec<u8>,
+}
+
+/// Limits of a timed dash, in µs from the press. A cell counts as reached on entering it,
+/// half a voxel's walk before its middle (`enter`); out through the exit door takes its
+/// middle by `limit`. A carried cube, held ahead, enters a cell half a voxel before the
+/// player does (`carry`). Picking a cube up takes `pickup` once the player enters its cell
+/// (`half` before its middle).
+pub(crate) struct DashTimes {
+    pub limit: u64,
+    pub enter: u64,
+    pub carry: u64,
+    pub half: u64,
+    pub pickup: u64,
 }
 
 /// The packed states of a search, each stored once, in the order found, with an
@@ -3314,6 +3711,7 @@ fn walk_graph(geo: Geo, graph: &RegionGraph) -> WalkGraph {
     for r in &graph.regions {
         for &c in &r.cells {
             w.node.insert(c, w.region.len());
+            w.cells.push(c);
             w.region.push(r.id);
         }
     }
@@ -3349,7 +3747,32 @@ fn walk_graph(geo: Geo, graph: &RegionGraph) -> WalkGraph {
             }
             for (cond, f, fallen) in targets {
                 if let Some(&j) = w.node.get(&f) {
-                    w.moves[i].push((j, n[2] - f[2], face.hazards | fallen, cond));
+                    w.moves[i].push((j, n[2] - f[2], face.hazards | fallen, cond, 1.0));
+                }
+            }
+        }
+        // Diagonally across a corner, where both cells beside it can be stood in and nothing
+        // walls off its four faces: through the corner, so across the hazards of all four.
+        for dx in [Dir::PosX, Dir::NegX] {
+            for dy in [Dir::PosY, Dir::NegY] {
+                let (m1, m2) = (step(c, dx), step(c, dy));
+                let n = step(m1, dy);
+                let Some(&j) = w.node.get(&n) else { continue };
+                let faces = [(c, dx), (m1, dy), (c, dy), (m2, dx)];
+                if !w.node.contains_key(&m1)
+                    || !w.node.contains_key(&m2)
+                    || faces
+                        .iter()
+                        .any(|&(f, d)| level.face(f, d).barrier.is_some() || geo.block(f, d).is_some())
+                {
+                    continue;
+                }
+                let cond = [c, m1, m2, n]
+                    .iter()
+                    .try_fold(Cond::ALWAYS, |acc, &x| geo.stand(x).and_then(|s| acc.and(s)));
+                let hazards = faces.iter().fold(0, |h, &(f, d)| h | level.face(f, d).hazards);
+                if let Some(cond) = cond {
+                    w.moves[i].push((j, 0, hazards, cond, std::f64::consts::SQRT_2));
                 }
             }
         }
@@ -3360,7 +3783,7 @@ fn walk_graph(geo: Geo, graph: &RegionGraph) -> WalkGraph {
             let Some(&i) = w.node.get(f) else { continue };
             for &(c, t, h) in &m.to {
                 if let (Some(&j), Some(cond)) = (w.node.get(&t), m.cond.and(c)) {
-                    w.moves[i].push((j, 0, m.hazards | h, cond));
+                    w.moves[i].push((j, 0, m.hazards | h, cond, 1.0));
                 }
             }
         }

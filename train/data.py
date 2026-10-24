@@ -36,9 +36,11 @@ import torch
 SPECIAL = ["<pad>", "<bos>", "<sep>", "<eos>"]
 PAD, BOS, SEP, EOS = range(4)
 # Plan words (src/plan.rs `plan::vocab`) beyond the level format's numbers and directions. Some
-# (`exit`, `plate`, `funnel`) are level words too and are the same token.
+# (`exit`, `plate`, `funnel`) are level words too and are the same token. New words go last, so
+# an older vocabulary is a prefix of a newer one.
 PLAN_WORDS = ["walk", "fire", "enter", "pickup", "putdown", "toss", "throw", "press", "dash", "knock",
-              "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "exit"]
+              "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "exit",
+              "fetch", "reach"]
 
 LEN_BUCKETS = [(0, 0), (1, 2), (3, 4), (5, 7), (8, 11), (12, 10**9)]
 FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo", "turret", "gel", "wall", "balcony"]

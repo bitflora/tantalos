@@ -4,7 +4,7 @@ use glados::fixtures;
 use glados::geom::{step, Cell, Dir};
 use glados::dynamics::Devices;
 use glados::level::Level;
-use glados::regions::Geo;
+use glados::regions::{Geo, Move};
 use glados::portals::{shots_from, Sight};
 use glados::route::{route, Act, Route};
 use glados::solver::{Mode, Model, Verdict, DEFAULT_MAX_STATES};
@@ -18,6 +18,37 @@ fn legal_step(geo: Geo, a: Cell, b: Cell) -> bool {
         level.face(a, d).barrier.is_none()
             && !level.solid(n)
             && (n == b && geo.stand(n).is_some() || geo.falls(n).iter().any(|f| f.cell == b))
+    })
+}
+
+/// A step of a timed dash: one on foot, across a corner (both cells beside it can be stood
+/// in, nothing walls its four faces off), or up deployed stairs.
+fn legal_dash_step(geo: Geo, a: Cell, b: Cell) -> bool {
+    let level = geo.level;
+    let corner = [Dir::PosX, Dir::NegX].iter().any(|&dx| {
+        [Dir::PosY, Dir::NegY].iter().any(|&dy| {
+            let (m1, m2) = (step(a, dx), step(a, dy));
+            step(m1, dy) == b
+                && [m1, m2].iter().all(|&m| geo.stand(m).is_some())
+                && [(a, dx), (m1, dy), (a, dy), (m2, dx)]
+                    .iter()
+                    .all(|&(f, d)| level.face(f, d).barrier.is_none())
+        })
+    });
+    let stairs = geo
+        .dyn_
+        .moves
+        .iter()
+        .any(|m| m.kind == Move::Stairs && m.from.contains(&a) && m.to.iter().any(|t| t.1 == b));
+    legal_step(geo, a, b) || corner || stairs
+}
+
+fn legal_dash(geo: Geo, from: Cell, cells: &[Cell]) -> bool {
+    let mut at = from;
+    cells.iter().all(|&c| {
+        let ok = geo.stand(c).is_some() && legal_dash_step(geo, at, c);
+        at = c;
+        ok
     })
 }
 
@@ -71,7 +102,19 @@ fn check(name: &str, level: &Level, r: &Route) {
             }
             Act::Throw { out, .. } => assert_eq!(leg.after.player, end, "{at}: {out:?}"),
             Act::Dash { path, .. } => {
-                assert!(legal_walk(geo, end, path), "{at}: dash {path:?}");
+                assert!(legal_dash(geo, end, path), "{at}: dash {path:?}");
+            }
+            Act::Fetch {
+                path, cube, carry, ..
+            } => {
+                assert!(legal_dash(geo, end, path), "{at}: fetch {path:?}");
+                assert_eq!(path.last().unwrap_or(&end), cube, "{at}");
+                assert!(legal_dash(geo, *cube, carry), "{at}: carry {carry:?}");
+                assert_eq!(leg.after.player, *carry.last().unwrap_or(cube), "{at}");
+            }
+            Act::Reach { button, .. } => {
+                assert_eq!(*button, end, "{at}");
+                assert_eq!(leg.after.player, end, "{at}");
             }
             Act::Plate { from, to, .. } | Act::Ride { from, to } => {
                 assert_eq!(*from, end, "{at}");
