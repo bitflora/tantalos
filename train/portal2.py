@@ -371,7 +371,7 @@ def quit_game(saved, pid, con=None, timeout=60):
 
 # --- checking ------------------------------------------------------------------------------
 
-def check_one(path, n, con, pid, timeout=20, settle=0.1):
+def check_one(path, n, con, pid, timeout=20, settle=0.1, keep_vmf=None):
     STAGE.mkdir(parents=True, exist_ok=True)
     staged = STAGE / f"check{n % 2}.p2c"  # alternate names so a stale load can't pass as fresh
     shutil.copyfile(path, staged)
@@ -408,6 +408,9 @@ def check_one(path, n, con, pid, timeout=20, settle=0.1):
         verdict = "invalid"
     elif size and VMF.exists():
         verdict = "valid"
+        if keep_vmf:
+            Path(keep_vmf).mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(VMF, Path(keep_vmf) / (Path(path).stem + ".vmf"))
     else:
         verdict = "error"
     return {"file": str(path), "verdict": verdict, "invalid_items": items,
@@ -416,7 +419,7 @@ def check_one(path, n, con, pid, timeout=20, settle=0.1):
 
 
 def check(files, out_path, launch_game=False, timeout=20, progress=print, restart_every=100,
-          max_crashes=None, port=None, password="", canary_every=50, max_bad=3):
+          max_crashes=None, port=None, password="", canary_every=50, max_bad=3, keep_vmf=None):
     """Check .p2c files, appending one JSON line each to out_path (resumable). With
     launch_game, the game is restarted every `restart_every` levels and after a crash (exports
     slow from ~0.15 s to ~0.6 s over the first 150 levels of a session, and neither
@@ -433,7 +436,7 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
     (a level the editor must call invalid) is checked first and then every `canary_every`
     levels. Results are only written
     once a canary after them has passed; if it fails, the game is restarted and those levels
-    are checked again."""
+    are checked again. With keep_vmf, each valid level's export goes there as <stem>.vmf."""
     out_path = Path(out_path)
     done = set()
     if out_path.exists():
@@ -474,9 +477,10 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
                 con = Console(port, password)
             try:
                 def one(path):
-                    r = check_one(path, next(seq), con, pid, timeout)
+                    keep = None if path == CANARY else keep_vmf
+                    r = check_one(path, next(seq), con, pid, timeout, keep_vmf=keep)
                     if r["verdict"] == "timeout":  # alive but silent: give it one more go
-                        r = check_one(path, next(seq), con, pid, timeout)
+                        r = check_one(path, next(seq), con, pid, timeout, keep_vmf=keep)
                     if r["verdict"] == "timeout":
                         if not launch_game:
                             raise GameUnavailable(f"the game stopped answering at {path}")
@@ -543,13 +547,14 @@ def main():
     c.add_argument("--timeout", type=float, default=20)
     c.add_argument("--port", type=int, help="console port (-netconport) of a game you started")
     c.add_argument("--password", default="", help="its -netconpassword")
+    c.add_argument("--keep-vmf", help="copy each valid level's exported VMF into this directory")
     p = sub.add_parser("patch", help="patch a game already running with -insecure")
     p.add_argument("--undo", action="store_true")
     a = ap.parse_args()
     try:
         if a.cmd == "check":
             check(p2c_files(a.files), a.out, a.launch, a.timeout, progress=lambda s: print(s, flush=True),
-                  port=a.port, password=a.password)
+                  port=a.port, password=a.password, keep_vmf=a.keep_vmf)
         else:
             patch(a.undo)
             print("unpatched" if a.undo else "patched")

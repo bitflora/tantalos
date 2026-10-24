@@ -506,10 +506,13 @@ impl Builder {
     /// A faith plate in open `cell` on the surface against `normal`, launching to a target in
     /// open `target` on the surface against `target_normal`. Its speed is what a lob over the
     /// higher of the two by two voxels needs (ASSUMPTION: the compiled trigger aims at the
-    /// target with this speed). A target straight over a floor plate hangs in the air there,
-    /// marked `VERTICAL_ALIGNMENT` on both (ASSUMPTION: as the editor marks a plate throwing
-    /// straight up; Workshop maps have them, and a 0 there makes the editor reject the level).
-    /// Returns (plate, target).
+    /// target with this speed). A floor target straight over a floor plate (in the air: how
+    /// the Workshop converter writes one) means a plate throwing straight up, to its height. In-game checks of 2026-10-24: `VERTICAL_ALIGNMENT` 1
+    /// on the plate makes the editor throw straight up wherever its target is, and the editor
+    /// rejects a target in the air but takes one on the plate itself, so the target goes there.
+    /// The throw rises `CatapultHeight` × 64 units over a trigger 56 units above the floor,
+    /// so twice the voxels up reaches `target` (`level::vertical_reach`). Returns (plate,
+    /// target).
     pub fn faith_plate(
         &mut self,
         cell: Cell,
@@ -524,11 +527,14 @@ impl Builder {
         let vz = (2.0 * GRAVITY * rise).sqrt();
         let t = vz / GRAVITY + (2.0 * (rise - dz) / GRAVITY).sqrt();
         let speed = (vz * vz + (flat / t).powi(2)).sqrt();
-        let height = (rise / 128.0).round();
-        let vertical = if normal == Dir::PosZ && target[..2] == cell[..2] && target[2] > cell[2] {
-            "1"
+        let up = normal == Dir::PosZ
+            && target_normal == Dir::PosZ
+            && target[..2] == cell[..2]
+            && target[2] > cell[2];
+        let (height, vertical, target) = if up {
+            (2.0 * (target[2] - cell[2]) as f64, "1", cell)
         } else {
-            "0"
+            ((rise / 128.0).round(), "0", target)
         };
         let plate = self.add(
             "ITEM_CATAPULT",

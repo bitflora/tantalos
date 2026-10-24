@@ -417,13 +417,20 @@ fn nothing_may_sit_in_a_fields_sweep() {
 fn workshop_tricks_the_editor_allows() {
     const OPEN: &str = "size 6 6 4 s1 o3 | / entry 0 0 1 +y exit 5 5 1 -y";
     let rules = |extra: &str| -> Vec<String> { field_problems(&format!("{OPEN} {extra}")) };
-    // A fizzler and a laser field stacked in one plane (the game passed both it saw), and
-    // two fizzlers in different planes of the same cells.
-    let p = rules("fizzler 2 5 1 -y +z 3 on laserfield 2 5 1 -y +z 3 on");
+    // A fizzler and a laser field on the two sides of one voxel, or of one face, and two
+    // fizzlers in different planes of the same cells (in-game checks, 2026-10-24).
+    let p = rules("fizzler 2 5 1 -y +z 3 on laserfield 2 5 3 -y -z 3 on");
+    assert!(!p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
+    let p = rules("fizzler 2 5 1 -y +z 3 on laserfield 3 5 3 -y -z 3 on");
     assert!(!p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
     let p = rules("fizzler 2 5 1 -y +z 3 on fizzler 2 5 3 -y -z 3 on");
     assert!(!p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
-    // Two fizzlers in one plane still collide (2 of 2 in the game).
+    // But a fizzler and a laser field on the same side of a cell collide, all of it or one
+    // cell of it (3 of 3 in the game), and so do two fizzlers in one plane (2 of 2).
+    let p = rules("fizzler 2 5 1 -y +z 3 on laserfield 2 5 1 -y +z 3 on");
+    assert!(p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
+    let p = rules("fizzler 2 5 1 -y +z 2 on laserfield 2 5 2 -y +z 2 on");
+    assert!(p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
     let p = rules("fizzler 2 5 1 -y +z 3 on fizzler 2 5 2 -y +z 2 on");
     assert!(p.iter().any(|m| m.contains("fields-overlap")), "{p:?}");
     // Turrets and gel splats in a field's sweep.

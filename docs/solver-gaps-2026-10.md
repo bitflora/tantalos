@@ -329,6 +329,59 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   - Liberal rules solve it in 11 actions (the play-tester's route, with the cube carried
     through the first loop); conservative rules don't trust the 4-voxel fling out of the tilted
     panel (its trials land in different places), so it is uncertain.
+- **2026-10-24 batch** (`glados-ws5-unsolv-00004`, `glados-ws5b-unsolv-00004..05`). Two the
+  editor rejects, so they are converter problems, not solver gaps. `train/portal2.py check`
+  names the items:
+  - **3093140791 "Easy chamber"** (ws5b-00004), invalid: `barrierhazard (13,9,2)` twice. The
+    converter puts a fizzler and a laser field on the same mounting face (`fizzler 13 9 2 +x +z
+    1` and `laserfield 13 9 2 +x +z 1`). In the map they are 48 units apart in that voxel
+    (laser at y=1168, fizzler at y=1216, both instances facing `0 90 90`), with a third field,
+    a laser at y=1136 facing the other way, in the voxel before. The fizzler is in the
+    middle of its voxel (LocalPos 0), which tokens can't say; our builder always puts fields
+    0.375 voxel toward their N × A side.
+  - **3784503220 "Replica. (vertical fix)"** (ws5-00004), invalid: `target (8,12,5)`. The
+    plate at 8 12 3 throws straight up: its trigger launches at a helper `trigger_catapult`
+    (`launchDirection -90 90 0`, playerSpeed 493, apex about 2 voxels above the plate's floor),
+    so the map has no target entity. The converter puts the target in mid-air at the apex. 38c8db4
+    wrote that target with `VERTICAL_ALIGNMENT 1` on plate and target, assuming the editor then
+    accepts it, and `editor.rs` exempts such targets from `target-not-on-surface`. The game
+    still rejects it, so that assumption is wrong.
+  - **3722716739 "2026 9"** (ws5b-00005): the editor accepts it, but the play-tester couldn't
+    solve it, and the solver calls it unsolvable even under liberal rules. No lead.
+  - The same check flags "Flying a Timing" (ws5-00001, reported earlier): `button (25,0,1)`
+    twice and `target (14,4,2)`. Not looked at yet.
+  - **In-game tests** (33 test chambers, `train/portal2.py check --keep-vmf` keeps each valid
+    level's export):
+    - Fields: a fizzler and a laser field on the same side of one voxel are rejected, all of
+      it or one overlapping cell (3 of 3). Accepted: one in the middle of the voxel and one on
+      a side, of any kinds; fields on the two sides of a voxel; a fizzler and a laser field on
+      the two sides of one face. (Same-kind cases kept hanging the editor's check: untested.)
+    - Faith plates: `VERTICAL_ALIGNMENT 1` on the plate makes the export throw straight up,
+      through a helper `trigger_catapult`, wherever the target is: on the plate, on the
+      ceiling, or on a floor 3 voxels away. Only a target in the air is rejected. A plate
+      with no target exports no launcher at all. The throw speed is √(76800 h) for
+      `CatapultHeight` h (h = 1..8, any room height): it rises 64 h units over a trigger
+      56 units above the floor.
+  - **Fixed:**
+    - `editor.rs`: parallel fields on one side of a cell collide whatever their kinds; the
+      vertical exemption from `target-not-on-surface` is gone. On 2,000 sampled v5b levels,
+      3 become invalid (a fizzler and a laser field on one face), the rest are unchanged.
+    - `tools/workshop/convert.py`: a field in the middle of its voxel moves to the voxel's
+      other side when a side field already holds its own side. With side fields on both
+      sides (a laser-fizzler-laser sandwich) the map is unsupported. Of the 377 converted
+      Workshop levels with two fields on one face, 302 re-convert, 74 become unsupported and
+      1 keeps a pair (a floor-mounted fizzler). Under the new rule, `fields-overlap` flags all
+      302 old conversions and 2 new ones. In game, 20 sampled old conversions were all
+      flagged for fields, the new ones once (a field across a bridge), and 16 of 20 pass.
+    - `builder.rs`: a floor target straight over a floor plate writes the target on the plate,
+      `VERTICAL_ALIGNMENT` 1 and `CatapultHeight` = twice the voxels up. `Level` reads such a
+      plate's height back from `CatapultHeight` (`level::vertical_reach`), so the tokens don't
+      change: 9,557 Workshop and v5b levels with one re-encode the same as before. In game,
+      21 Workshop levels with one (Replica among them) have no target flagged; 17 pass.
+    - "Easy chamber" and "Replica" are staged again under the same names; both pass the
+      editor now, and the solver calls both unsolvable.
+    - Not done: `out/workshop/levels.jsonl` and data/ws5 still hold the old conversions of
+      the 377 levels (fields stacked; 74 now unsupported).
 - **3543260079 "My First Test Chamber"** (`glados-ws5b-unsolv-00003`, 2026-10-24): a turret in
   an alcove behind a laser field (with a button) sees the entrance; a piston, up until its
   button is pressed, stands below a ledge with the second cube. Play-tester: portal behind the

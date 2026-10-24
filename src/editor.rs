@@ -306,11 +306,11 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
         // A faith plate's target lies on a surface: the game flagged all 43 targets with open
         // space behind them, and none with a solid voxel there (in-game checks of
         // v5-fresh-10h-e and v5-cont-10h-d, 2026-10-22). Workshop levels have many in the air,
-        // but their targets are placed by the map converter, not the editor. A vertical one
-        // (straight over its plate) hangs in the air.
+        // but their targets are placed by the map converter, not the editor. One in the air is
+        // flagged with VERTICAL_ALIGNMENT 1 too ("Replica" and a test chamber, 2026-10-24);
+        // a vertical plate's target lies on the plate.
         if let (ItemKind::PlateTarget, Some(n)) = (&it.kind, it.normal) {
-            let vertical = it.props.get_i32("ITEM_PROPERTY_VERTICAL_ALIGNMENT") == Some(1);
-            if !vertical && !level.solid(step(it.cell, n.opposite())) {
+            if !level.solid(step(it.cell, n.opposite())) {
                 flags.add(it, "target-not-on-surface");
             }
         }
@@ -565,14 +565,19 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                 continue;
             }
             let parallel = f2 == f || f2 == f.opposite();
-            // Parallel ones collide only if they're the same kind in the same plane: a
-            // fizzler and a laser field stacked in one plane are a common Workshop trick
-            // (120 levels; the game passed the pair it saw), and fields in different
-            // planes of the same cells don't touch.
+            // Parallel ones collide on the same side of one cell, whatever their kinds (in-game
+            // checks of 2026-10-24: a fizzler and a laser field there, all of it or one cell
+            // of it, 3 of 3 flagged), or if they're the same kind in the same plane. A fizzler
+            // and a laser field on the two sides of one face pass (1 of 1), and fields in
+            // different planes of the same cells don't touch. (The Workshop's fizzler and
+            // laser field in one plane are one of them in the middle of the voxel, which
+            // tokens can't say; the converter puts it on the voxel's other side.)
+            let faces: HashSet<(Cell, Dir)> = h.faces.iter().copied().collect();
+            let same_side = h2.faces.iter().any(|f| faces.contains(f));
             let planes: HashSet<(Cell, Dir)> = h.faces.iter().map(|&f| face_key(f)).collect();
             let same_plane = h2.faces.iter().any(|&f| planes.contains(&face_key(f)));
             let collide = if parallel {
-                h.kind == h2.kind && same_plane
+                same_side || (h.kind == h2.kind && same_plane)
             } else {
                 h.kind != h2.kind
             };

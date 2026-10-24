@@ -29,6 +29,7 @@ tools/workshop/README.md.
 """
 import argparse
 import collections
+import itertools
 import json
 import math
 import re
@@ -364,7 +365,7 @@ def convert(bsp):
 
     # Items. Each returns its cell(s) so their rooms get flooded too.
     item_cells = []
-    toks_fields, field_index = [], {}
+    toks_fields, field_index, field_planes = [], {}, []
     for inst in by_kind["barrierhazard"]:
         brushes = inst.direct(("trigger_portal_cleanser", "trigger_hurt"), "_brush")
         kinds = {e.cls for e in brushes}
@@ -393,9 +394,26 @@ def convert(bsp):
         anchor[aa] = span[0] if along[aa] > 0 else span[-1]
         anchor[fa] = math.floor((lo[fa] + hi[fa]) / 2 / CELL)
         on = all(e.d.get("StartDisabled", "0") == "0" for e in brushes)
+        # The editor puts a field 0.375 voxel toward its N x A side, or in the middle of its
+        # voxel (LocalPos 0), which tokens can't say: a middle one goes on a side.
+        mid = abs((lo[fa] + hi[fa]) / 2 / CELL % 1 - 0.5) < 0.01
+        planes = {(c, f[fa]) for c in itertools.product(*[
+            cells_in(lo, hi, a) if a != fa else [anchor[fa]] for a in range(3)])}
         field_index[inst.index] = len(toks_fields)
         toks_fields.append((kind, tuple(anchor), n, along, len(span), on))
+        field_planes.append((planes, mid))
         item_cells.append(tuple(anchor))
+    # A middle field shares its voxel with one on a side (a common Workshop trick). Two on one
+    # side of a voxel the editor rejects (in-game checks, 2026-10-24), so a middle one that
+    # would land on a side field's faces goes on the other side: the far end, along reversed.
+    for i, (planes, mid) in enumerate(field_planes):
+        sides = [p for j, (p, m) in enumerate(field_planes) if j != i and not m]
+        if mid and any(planes & p for p in sides):
+            if any({(c, -s) for c, s in planes} & p for p in sides):
+                raise Unsupported("a field in the middle of a voxel with fields on both sides")
+            kind, anchor, n, along, ln, on = toks_fields[i]
+            far = add(anchor, along, ln - 1)
+            toks_fields[i] = (kind, far, n, tuple(-v for v in along), ln, on)
 
     toks_gels, gel_index = [], {}
     for inst in by_kind["paintdropper"]:

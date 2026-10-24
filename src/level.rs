@@ -402,10 +402,18 @@ pub struct Plate {
     pub cell: Cell,
     pub normal: Dir,
     /// The target item: its index, its cell (whatever is launched comes down from there) and
-    /// its surface's normal.
+    /// its surface's normal. For a plate throwing straight up, the cell the throw reaches
+    /// (the target item itself lies on the plate).
     pub target: (i32, Cell, Dir),
     /// Whether a simple arc from the plate to the target misses solid voxels (`clear_arc`).
     pub clear: bool,
+}
+
+/// How many voxels up a floor plate throwing straight up with `CatapultHeight` `h` reaches:
+/// the game throws from a trigger 56 units over the floor at √(76800 h) units/s, rising 64 h
+/// units (in-game exports of 2026-10-24, h = 1..8).
+pub fn vertical_reach(h: f64) -> i32 {
+    ((56.0 + 64.0 * h) / 128.0).floor() as i32
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -799,12 +807,28 @@ impl Level {
                         self.decode_problems.push(problem("target isn't in an open cell"));
                         continue;
                     }
-                    let clear = self.clear_arc(it.cell, t.cell);
+                    // A floor plate marked vertical throws straight up wherever its target is
+                    // (in-game checks, 2026-10-24), as high as `CatapultHeight` says. Like any
+                    // target, that cell may be over an obstacle (`clear` says).
+                    let vertical = it.props.get_i32("ITEM_PROPERTY_VERTICAL_ALIGNMENT") == Some(1);
+                    let height = it.props.get_f64s::<1>("CatapultHeight").map(|[h]| h);
+                    let apex = height.map(|h| {
+                        let mut c = it.cell;
+                        c[2] += vertical_reach(h);
+                        c
+                    });
+                    let (tc, tn) = match apex {
+                        Some(c) if vertical && n == Dir::PosZ && c != it.cell && !self.solid(c) => {
+                            (c, Dir::PosZ)
+                        }
+                        _ => (t.cell, tn),
+                    };
+                    let clear = self.clear_arc(it.cell, tc);
                     self.plates.push(Plate {
                         item: it.index,
                         cell: it.cell,
                         normal: n,
-                        target: (t.index, t.cell, tn),
+                        target: (t.index, tc, tn),
                         clear,
                     });
                 }

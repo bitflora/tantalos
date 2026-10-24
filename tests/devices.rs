@@ -3,9 +3,10 @@
 //! away (or switching it off) makes the level unsolvable.
 
 use glados::builder::Builder;
+use glados::editor::editor_problems;
 use glados::fixtures;
 use glados::geom::Dir;
-use glados::level::{Level, LaserKind};
+use glados::level::{ItemKind, Level, LaserKind};
 use glados::p2c::Puzzle;
 use glados::regions::Move;
 use glados::solver::{judge, Action, CubeLoc, Judgement, Mode, Model, Verdict};
@@ -56,6 +57,25 @@ fn faith_plate_launches_to_its_target() {
             ..
         }]
     ));
+}
+
+/// A plate throwing straight up (target over it) is written as the editor takes it: the
+/// target on the plate, VERTICAL_ALIGNMENT 1 and a CatapultHeight that reaches the height,
+/// and reads back as the same tokens ("Replica", in-game checks of 2026-10-24).
+#[test]
+fn a_vertical_plate_keeps_its_target_on_the_plate() {
+    let tokens = "size 6 6 8 open 0 0 1 5 5 6 entry 0 2 1 +x exit 5 2 1 -x plate 2 2 1 +z 2 2 4 +z";
+    let p = decode(tokens).unwrap();
+    let level = Level::from_puzzle(&p);
+    let target = level.items.iter().find(|i| i.kind == ItemKind::PlateTarget).unwrap();
+    assert_eq!(target.cell, [2, 2, 1]);
+    let plate = level.items.iter().find(|i| i.kind == ItemKind::FaithPlate).unwrap();
+    assert_eq!(plate.props.get_i32("ITEM_PROPERTY_VERTICAL_ALIGNMENT"), Some(1));
+    assert_eq!(plate.props.get_f64s::<1>("CatapultHeight"), Some([6.0]));
+    assert_eq!(level.plates[0].target.1, [2, 2, 4]);
+    assert_eq!(encode(&p).unwrap().join(" "), tokens);
+    let problems = editor_problems(&level);
+    assert!(!problems.iter().any(|m| m.contains("target")), "{problems:?}");
 }
 
 #[test]
