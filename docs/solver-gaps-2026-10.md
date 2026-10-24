@@ -398,27 +398,35 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   - Conservative rules solve it in 18 actions, the play-tester's second route (they never
     need to knock the turret over); liberal ones also by a portal loop.
 
-- **2026-10-24 batch 2** (`glados-ws5b-unsolv-00006`, `-00009`, `-00010`): solved by the
-  play-tester, not fixed in the solver yet.
-  - **68651531 "Mari0 - Test chamber 04 (Update 1)"** (00006): drop to the bottom of the room.
-    Put a portal under the repulsion gel dispenser, then portals all over the ceiling to spread
-    gel over the floor. Use a ceiling portal to bounce off the gel back to where you started.
-    Then take a running start, jump into the abyss, and bounce off the gel to the exit. So: gel
-    painted by dropping it through a portal onto many floor cells, and a bounce used as a long
-    horizontal launch across a gap.
-  - **68655995 "The Grate Escape"** (00009): funnel climbing. Put a portal at the top of the
-    excursion funnel and the other end on the wall across from you; keep moving the other end
-    about half a panel higher and the funnel keeps drawing you up. At the top, move sideways by
-    placing the other end half a panel to the side. The funnel carries the player through a
-    portal, so the portal's exit position (not just its face) steers the beam.
-  - **1498933548 "Laser Management"** (00010; saved as `favorites/ws5-laser-management.p2c`):
-    the prism turns the laser onto a white wall near the start. Stand on the button and portal
-    the beam into the receptacle on your side (this switches the fizzler off while the button is
-    held). Portal across the fizzler and walk through. Put the prism (reflection cube) on the
-    button, pointing at the ground-level receptacle. Put portals on both sides so the laser
-    reaches the cube and is redirected to the receptacle (a few trips between the portals). The
-    exit opens; leave by the portals, not the fizzler. Gaps: a beam portalled to a receptacle
-    while the player holds a button, and a cube redirecting a portalled beam.
+- **2026-10-24 batch 2** (`glados-ws5b-unsolv-00006`, `-00009`, `-00010`), all solved by the
+  play-tester and **fixed (2026-10-24)**; each is in `tests/playtested.rs`.
+  - **1498933548 "Laser Management"** (00010; `favorites/ws5-laser-management.p2c`): the prism
+    turns the laser onto a white wall near the start. Stand on the button and portal the beam
+    into the receptacle on your side (the fizzler goes off only while the button is held and
+    the receptacle lit). Portal across the fizzler and walk through. Put the prism on the
+    button, pointing at the ground-level receptacle, and portal both sides so the laser
+    reaches it. Gap: a reflection cube lying on a floor button did not press it. **Fixed:**
+    a reflection cube put down in a button's cell (`button_spot`, `Model::pressed`) holds the
+    button down and redirects the beam. Conservative-solvable, routable.
+  - **68655995 "The Grate Escape"** (00009): put a portal at the top of the funnel and the other
+    on the wall across; the funnel beam out of it crosses the player's column, and moving
+    that portal about half a panel higher draws them up; at the top, step out sideways.
+    Gaps: funnel beams stopped at grating (they pass it; glass still stops them), and no
+    rise. **Fixed:** `dynamics::funnel_path` (grating passes; a ride along a beam stops at a
+    grating), and `climb_moves`: from a cell of the beam out of a portal, up the column
+    through cells some other portal's beam crosses, stepping out sideways anywhere. Conservative-
+    solvable; `glados route` can't ground the lift yet.
+  - **68651531 "Mari0 - Test chamber 04 (Update 1)"** (00006): gel dropped through the floor
+    portal under the dispenser and ceiling portals paints the floor; bounces off it, fed
+    back in through ceiling portals, carry the player up to the exit ledge (running jump
+    from the start ledge at the end). **Fixed, liberal rules only:** with two or more white
+    ceiling faces and bounce gel, a bounce off painted floor reaches `size_z - 1` voxels up
+    and 4 cells sideways (a guess; the ratchet's real limits are unmeasured). Conservative
+    rules stay uncertain. Not routed.
+  - Old vs. new binary on unsolved Workshop levels (`score --editor-rules off`): 1,200 with a
+    funnel, 3 unsolvable → solvable, 1 uncertain → solvable, 6 unsolvable → uncertain; 1,200
+    with lasers, 5 + 2 → solvable; 1,200 with bounce gel, 1 → solvable, 8 unsolvable →
+    uncertain; 1,500 random, 10 unsolvable → solvable. No verdict got worse.
 
 ## Recommended order
 
