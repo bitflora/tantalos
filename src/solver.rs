@@ -28,7 +28,9 @@
 //!   enters one half a voxel sooner still; picking one up takes 0.25 s (`DashTimes`). Liberal
 //!   rules also ride oscillating rail platforms in a dash, as fast as they move (the press
 //!   timed for the platform to be there), and fetch an auto-drop's cube (below) from the
-//!   device floor the timer puts under its dropper.
+//!   device floor the timer puts under its dropper. A second timed pedestal pressed during a
+//!   dash (`Action::DoubleDash`; pressing takes `PRESS_TIME` once its cell is entered) holds
+//!   both on until the first of the two runs out; that dash goes on empty-handed.
 //! - Fizzlers: walking or falling through an active one clears both portals and destroys a
 //!   held cube, which respawns where it started. A cube falling through one respawns too.
 //!   Active fizzlers stop portal shots. Laser fields: the player can't pass an active one;
@@ -113,6 +115,8 @@ pub const DEFAULT_MAX_STATES: usize = 1_000_000;
 const MAX_PEDESTALS: usize = 32;
 /// Seconds to pick up a cube, in a timed dash (`Action::Fetch`).
 const PICKUP_TIME: f64 = 0.25;
+/// Seconds to press a second pedestal button, in a timed dash (`Action::DoubleDash`).
+const PRESS_TIME: f64 = 0.25;
 /// Most cells a cube's region may have for conservative rules to fetch it in a timed dash.
 const MAX_FETCH_CELLS: usize = 8;
 const GRAVITY: f64 = 600.0;
@@ -266,6 +270,14 @@ pub enum Action {
     /// Press a timed pedestal and walk to `to` (or out of the exit) before it runs out.
     Dash {
         pedestal: usize,
+        to: usize,
+        escaped: bool,
+    },
+    /// Press timed pedestal `first`, then timed pedestal `second` before `first` runs out, and
+    /// walk to `to` (or out of the exit) while both are still on.
+    DoubleDash {
+        first: usize,
+        second: usize,
         to: usize,
         escaped: bool,
     },
@@ -694,7 +706,10 @@ impl StateSpace {
     /// Whether a goal can be reached without pressing pedestal `p`: on a complete space,
     /// whether the level is solvable with that pedestal switched off.
     pub fn solvable_without_pedestal(&self, p: usize) -> bool {
-        self.reaches_goal(USES_PEDESTAL | p as u32)
+        let p = p as u32;
+        self.reaches_goal_unless(|u| {
+            u & (3 << 30) == USES_PEDESTAL && (u & 0xff == p || (u >> 8) & 0xff == p + 1)
+        })
     }
 
     /// Whether a goal can be reached without firing a portal at all: on a complete space,
@@ -729,6 +744,8 @@ impl StateSpace {
 
 /// `StateSpace::uses` of an action: the face class it fires at or the pedestal it presses.
 const USES_CLASS: u32 = 1 << 30;
+/// A pedestal use: the pedestal in the low byte, and a second one pressed after it (plus one,
+/// 0 = none) in the next.
 const USES_PEDESTAL: u32 = 2 << 30;
 
 fn uses(a: &Action) -> u32 {
@@ -741,6 +758,9 @@ fn uses(a: &Action) -> u32 {
         Action::Press { pedestal }
         | Action::Dash { pedestal, .. }
         | Action::Fetch { pedestal, .. } => USES_PEDESTAL | pedestal as u32,
+        Action::DoubleDash { first, second, .. } => {
+            USES_PEDESTAL | first as u32 | (second as u32 + 1) << 8
+        }
         _ => 0,
     }
 }
@@ -3448,6 +3468,7 @@ impl Model {
                 done(&mut sc.n, a, false);
             }
         }
+        self.double_dash(cx, s, p, &walked, &t, sc, done);
 
         let cubes = lay.cubes(s);
         if !cubes.contains(&HELD) {
@@ -3499,6 +3520,102 @@ impl Model {
         sc.dist = walked;
     }
 
+    /// From a dash of timed pedestal `p` that walked `walked` (as `walk_times` leaves it, with
+    /// its ends in `sc.ends`): press each other timed pedestal reached in time, and walk on
+    /// with both on until the first runs out (`Action::DoubleDash`), escaping or to the
+    /// regions the single dash doesn't reach.
+    #[allow(clippy::too_many_arguments)]
+    fn double_dash(
+        &self,
+        cx: &Ctx<'_>,
+        s: &[u32],
+        p: usize,
+        walked: &[u64],
+        t: &DashTimes,
+        sc: &mut Scratch,
+        done: &mut impl FnMut(&mut Vec<u32>, Action, bool),
+    ) {
+        let lay = cx.lay;
+        let alive = cx.turrets & !s[DOWN];
+        let key = |node: usize, fizzled: bool| 2 * node + fizzled as usize;
+        let exit = self.walk.node.get(&self.exit_cell).copied();
+        let single = std::mem::take(&mut sc.ends);
+        let mut both = s.to_vec();
+        let mut times = Vec::new();
+        let mut ends = Vec::new();
+        for (q, ped) in self.pedestals.iter().enumerate() {
+            let Some(seconds) = ped.timer else { continue };
+            if q == p || !self.pedestal_enabled[q] {
+                continue;
+            }
+            let Some(&at) = self.walk.node.get(&ped.cell) else {
+                continue;
+            };
+            let sources: Vec<(usize, bool, u64)> = [false, true]
+                .into_iter()
+                .filter(|&f| walked[key(at, f)] <= t.enter)
+                .map(|f| (at, f, walked[key(at, f)].saturating_sub(t.half) + t.press))
+                .collect();
+            let Some(pressed) = sources.iter().map(|&(_, _, at)| at).min() else {
+                continue;
+            };
+            // `p`'s latched bit stands in for its running timer.
+            both[LATCHED] = s[LATCHED] | 1 << p;
+            let held = Some(Signal::Pedestal(q));
+            let on = self.hazards_on(lay, &both, held);
+            let dev = if self.devices.is_empty() {
+                0
+            } else {
+                self.device_bits(lay, &both, held)
+            };
+            let limit = t.limit.min(pressed + self.dash_times(seconds).limit);
+            self.walk_times(&sources, on, dev, alive, false, limit + t.half, &mut times, sc);
+
+            let escapes = exit.is_some_and(|x| times[key(x, false)].min(times[key(x, true)]) <= limit);
+            if escapes && self.exit_open_with(lay, &both, held) {
+                sc.n.clear();
+                sc.n.extend_from_slice(s);
+                sc.n[0] = self.exit_region as u32 | ESCAPED;
+                let a = Action::DoubleDash {
+                    first: p,
+                    second: q,
+                    to: self.exit_region,
+                    escaped: true,
+                };
+                done(&mut sc.n, a, false);
+            }
+            ends.clear();
+            for node in 0..self.walk.region.len() {
+                for fizzled in [false, true] {
+                    let end = (self.walk.region[node], fizzled);
+                    if times[key(node, fizzled)] < u64::MAX && !single.contains(&end) {
+                        ends.push(end);
+                    }
+                }
+            }
+            ends.sort();
+            ends.dedup();
+            for &(region, fizzled) in &ends {
+                sc.n.clear();
+                sc.n.extend_from_slice(s);
+                sc.n[0] = region as u32;
+                if fizzled {
+                    lay.fizzle(&mut sc.n);
+                }
+                if sc.n[..] != *s {
+                    let a = Action::DoubleDash {
+                        first: p,
+                        second: q,
+                        to: region,
+                        escaped: false,
+                    };
+                    done(&mut sc.n, a, false);
+                }
+            }
+        }
+        sc.ends = single;
+    }
+
     /// Times for a timed dash of `seconds`, in µs (see `DashTimes`).
     pub(crate) fn dash_times(&self, seconds: f64) -> DashTimes {
         let half = VOXEL / 2.0 / self.rules.walk_speed;
@@ -3509,6 +3626,7 @@ impl Model {
             carry: us(seconds + 2.0 * half),
             half: us(half),
             pickup: us(PICKUP_TIME),
+            press: us(PRESS_TIME),
         }
     }
 
@@ -3747,6 +3865,24 @@ impl Model {
                         label(to)
                     )
                 }
+            }
+            Action::DoubleDash {
+                first,
+                second,
+                to,
+                escaped,
+            } => {
+                let (p, q) = (&self.pedestals[first], &self.pedestals[second]);
+                let (tp, tq) = (p.timer.unwrap_or(0.0), q.timer.unwrap_or(0.0));
+                let then = if escaped {
+                    "run out of the exit".to_string()
+                } else {
+                    format!("run to region {}", label(to))
+                };
+                format!(
+                    "press pedestal button {} ({tp} s), then pedestal button {} ({tq} s), and {then} while both are on",
+                    p.index, q.index
+                )
             }
             Action::Fetch {
                 pedestal,
@@ -4132,13 +4268,14 @@ struct Scratch {
 /// half a voxel's walk before its middle (`enter`); out through the exit door takes its
 /// middle by `limit`. A carried cube, held ahead, enters a cell half a voxel before the
 /// player does (`carry`). Picking a cube up takes `pickup` once the player enters its cell
-/// (`half` before its middle).
+/// (`half` before its middle); pressing a second pedestal takes `press` the same way.
 pub(crate) struct DashTimes {
     pub limit: u64,
     pub enter: u64,
     pub carry: u64,
     pub half: u64,
     pub pickup: u64,
+    pub press: u64,
 }
 
 /// The packed states of a search, each stored once, in the order found, with an

@@ -468,6 +468,19 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     platform a voxel lower than the game puts it. **data/v5b's rail levels (~120k) are not
     re-scored.**
 
+- **3372907955 "SUPER SIMPLE #2"** (`glados-ws5b-unsolv-00012`, 2026-10-24). A corridor with
+  two 3 s pedestals side by side, both wired to the exit. Play-tester: press both quickly one
+  after the other, then walk out before the timers run out. Gap: a timed dash held only its
+  own pedestal on, so the exit (AND of both) never opened; a timed pedestal pressed during
+  another's dash was not modelled. **Fixed (2026-10-24), conservative-solvable in 1 action**
+  (`tests/playtested.rs`): `Action::DoubleDash` presses a second timed pedestal reached in
+  time (0.25 s to press once its cell is entered, `PRESS_TIME`) and walks on with both on
+  until the first of the two runs out, out of the exit or to regions the single dash
+  doesn't reach. No cube fetch during it, no third pedestal. Not routed (no plan word).
+  - Old vs. new binary (`score --budget 50000 --editor-rules off`) on all 1,366 Workshop
+    levels with two or more timed pedestals: 2 unsolvable and 1 uncertain → solvable, 3
+    unsolvable → uncertain (liberal-solvable), none worse; scoring took ~7% longer.
+
 ## Recommended order
 
 1. ~~**Angled laser beams**~~: done (above), ~5% of unsolvable levels rather than the 9% the

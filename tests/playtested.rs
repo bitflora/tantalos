@@ -170,3 +170,21 @@ fn stairs_onto_a_plate_and_a_timed_lift_to_a_respawning_cube() {
     let plan = solved(&open_exit);
     assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: Move::Plate, .. })), "{plan:?}");
 }
+
+/// 3372907955 "SUPER SIMPLE #2": two 3 s pedestals side by side both open the exit. Press one,
+/// then the other, and walk out while both are on.
+const SUPER_SIMPLE_2: &str = "size 3 6 2 s2 | o2 | s2 | / s2 | o2 | s2 | / s2 | o2 | s1 o1 | / s2 | o2 | s1 o1 | / o1 s1 | o2 | s2 | / s2 | o2 | s2 | / entry 1 0 0 +y exit 1 5 0 -y pedestal 0 4 0 3 > exit pedestal 1 4 0 3 > exit";
+
+#[test]
+fn press_two_timed_pedestals_and_run_out() {
+    // Not routed yet (the play harness has no leg for a second press).
+    let model = Model::new(&level(SUPER_SIMPLE_2), Mode::Conservative).unwrap();
+    let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+        panic!("not solved");
+    };
+    assert!(matches!(plan.as_slice(), [Action::DoubleDash { escaped: true, .. }]), "{plan:?}");
+    // Not if the second pedestal is too far to reach in time.
+    let far = SUPER_SIMPLE_2.replace("pedestal 1 4 0 3", "pedestal 1 0 0 3");
+    let model = Model::new(&level(&far), Mode::Liberal).unwrap();
+    assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable);
+}

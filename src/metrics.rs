@@ -174,7 +174,10 @@ pub fn effort(plan: &[Action]) -> f64 {
                 kind: Move::Bounce | Move::Leap | Move::Plate | Move::Funnel,
                 ..
             } => 1.0,
-            Action::Enter { .. } | Action::Throw { .. } | Action::Dive { .. } => 2.0,
+            Action::Enter { .. }
+            | Action::Throw { .. }
+            | Action::Dive { .. }
+            | Action::DoubleDash { .. } => 2.0,
             Action::Press { .. } => 0.0,
             _ => 0.5,
         })
@@ -308,6 +311,7 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
         plan.iter().any(|a| {
             matches!(*a, Action::Press { pedestal } | Action::Dash { pedestal, .. }
                 | Action::Fetch { pedestal, .. } if pedestal == p)
+                || matches!(*a, Action::DoubleDash { first, second, .. } if first == p || second == p)
         })
     };
     let mut pedestal_needed = vec![false; model.pedestals.len()];
@@ -430,7 +434,7 @@ pub fn measure(model: &mut Model, space: &StateSpace, budget: usize, seed: u64) 
                 }
             }
             Action::Press { .. } => set(5),
-            Action::Dash { .. } | Action::Fetch { .. } => set(6),
+            Action::Dash { .. } | Action::DoubleDash { .. } | Action::Fetch { .. } => set(6),
             Action::Move {
                 kind: Move::Bounce, ..
             } => set(10),
