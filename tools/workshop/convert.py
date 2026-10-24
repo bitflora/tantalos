@@ -835,6 +835,12 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
         section(word, rows, "laser" if word == "laser" else None)
 
     rows, vertical = [], []
+    # Each plate's arm origin: a target there lies on that plate (a wall plate's voxel is hollow,
+    # so the surface test below can't find it).
+    plates_at = {}
+    for inst in by_kind["catapult"]:
+        arm = inst.one("prop_dynamic", "-catapult_arm")
+        plates_at[tuple(round(v) for v in arm.origin())] = (inst.anchor_cell(arm, inst.up()), inst.up())
     for inst in by_kind["catapult"]:
         arm = inst.one("prop_dynamic", "-catapult_arm")
         n = inst.up()
@@ -854,13 +860,16 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
             # The target lies on a surface: the cell on its open side, against the surface.
             o = tgt.origin()
             t, tn = cell_of(add(o, UP)), UP
-            for a in range(3):
+            on_plate = plates_at.get(tuple(round(v) for v in o))
+            for a in range(3) if on_plate is None else []:
                 if abs(o[a] / CELL - round(o[a] / CELL)) < 0.01:
                     for sgn in (1, -1):
                         d = tuple(sgn if i == a else 0 for i in range(3))
                         c2 = cell_of(add(o, d))
                         if is_open(c2) and not is_open(cell_of(add(o, d, -1))):
                             t, tn = c2, d
+            if on_plate is not None:
+                t, tn = on_plate
         rows.append(([c, DIR_TOKEN[n], t, DIR_TOKEN[tn]], inst, False))
         cells += [c, t]
         embed(c, tuple(-v for v in n))

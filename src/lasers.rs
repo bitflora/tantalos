@@ -16,8 +16,8 @@
 //!   turret or portal, perhaps through more spots) are kept.
 //!   A floor button's cell is a spot too: the reflection cube stacked on a cube holding the
 //!   button down (or set down beside one) catches the beam passing over it; it doesn't press
-//!   the button itself. Beams out of portals have spots as well, kept only where the beam out
-//!   of the cube powers a receiver or hits a turret.
+//!   the button itself. Beams out of portals have spots as well (straight, and angled at a
+//!   receiver), kept only where the beam out of the cube powers a receiver or hits a turret.
 //! - Angled beams: a cube can also be set down anywhere along a beam crossing its cell, turned
 //!   to aim at a receiver, turret or portal surface on the same level (`aim_targets`, from
 //!   three points along the beam). The beam out of it runs at that angle through the grid
@@ -317,6 +317,37 @@ impl Beams {
             let mut exit_rays: Vec<usize> = exits.values().copied().collect();
             exit_rays.sort_unstable();
             for r in exit_rays {
+                // Angled: a cube on the beam turned to aim at a receiver.
+                let on_beam = if angled_spots { segs[r].clone() } else { Vec::new() };
+                for (sc, p0, p1) in on_beam {
+                    let cell = tracer.spot_cells[sc];
+                    for f in [0.25, 0.5, 0.75] {
+                        let o = [p0[0] + f * (p1[0] - p0[0]), p0[1] + f * (p1[1] - p0[1])];
+                        for &(tz, tp, want) in &targets {
+                            let Want::Receiver(k) = want else { continue };
+                            let v = [tp[0] - o[0], tp[1] - o[1]];
+                            let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                            if tz != cell[2] || n < 0.5 || rays.len() >= 4096 {
+                                continue;
+                            }
+                            let v = [v[0] / n, v[1] / n];
+                            if v[0].abs() > 0.999 || v[1].abs() > 0.999 {
+                                continue;
+                            }
+                            let (ray, ray_segs) = tracer.trace_line(o, cell, v);
+                            if !ray.events.contains(&Event::Receiver(k))
+                                || !angled_id.insert((r, sc, ray.clone()))
+                            {
+                                continue;
+                            }
+                            rays.push(ray);
+                            segs.push(ray_segs);
+                            depth.push(2);
+                            let yaw = v[1].atan2(v[0]).to_degrees();
+                            angled.push((sc, nearest_dir(v), rays.len() - 1, r, o, yaw));
+                        }
+                    }
+                }
                 for ev in rays[r].events.clone() {
                     let Event::Cube(sc) = ev else { continue };
                     if !seen_cells.insert(sc) {

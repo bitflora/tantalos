@@ -343,7 +343,8 @@ impl Portals {
                 };
                 (p.bit, b)
             });
-            let useful = |b: &Behavior| b.entry.is_some() || !b.landings.is_empty();
+            let useful =
+                |b: &Behavior| b.entry.is_some() || !b.landings.is_empty() || !b.flings.is_empty();
             if !useful(&flat) && !deployed.as_ref().is_some_and(|(_, b)| useful(b)) {
                 return;
             }
@@ -447,7 +448,10 @@ pub const MIN_DIVE: i32 = 2;
 
 /// Drops onto white floor faces: for each, the regions a ledge of which drops onto it, and
 /// how far (voxels, at least `MIN_DIVE`). Off a ledge the player can fall straight down or
-/// jump out up to `reach` cells (over open air at the ledge's height). Without devices.
+/// jump out up to `reach` cells (over open air at the ledge's height). A faith plate throwing
+/// onto a white floor counts as a dive from the plate's region, as high as a fall gives the
+/// speed it comes down at (from the top of its arc, with its sideways speed; rounded down).
+/// Without devices.
 pub fn dives(level: &Level, graph: &RegionGraph, reach: i32) -> HashMap<Face, Vec<(usize, i32)>> {
     let mut out: HashMap<Face, Vec<(usize, i32)>> = HashMap::new();
     for r in &graph.regions {
@@ -472,10 +476,42 @@ pub fn dives(level: &Level, graph: &RegionGraph, reach: i32) -> HashMap<Face, Ve
             }
         }
     }
+    for p in &level.plates {
+        let Some((f, _, Some(last))) = level.fall_route(p.cell) else { continue };
+        let h = plate_dive_height(&level.plates[last]);
+        if h < MIN_DIVE || !level.portal_surface(f, Dir::NegZ) {
+            continue;
+        }
+        // The regions that walk onto the plate.
+        for d in Dir::HORIZONTAL {
+            let from = step(p.cell, d);
+            let Some(r) = graph.region_of(from) else { continue };
+            if level.face(from, d.opposite()).barrier.is_some() {
+                continue;
+            }
+            let v = out.entry((f, Dir::NegZ)).or_default();
+            if !v.contains(&(r, h)) {
+                v.push((r, h));
+            }
+        }
+    }
     for v in out.values_mut() {
         v.sort();
     }
     out
+}
+
+/// The drop (voxels, rounded down) that gives the speed plate `p` throws onto its target at:
+/// the lob `Builder::faith_plate` aims, over the higher end by two voxels.
+fn plate_dive_height(p: &crate::level::Plate) -> i32 {
+    const G: f64 = 600.0;
+    let (c, t) = (p.cell, p.target.1);
+    let dz = (t[2] - c[2]) as f64 * 128.0;
+    let flat = (((t[0] - c[0]).pow(2) + (t[1] - c[1]).pow(2)) as f64).sqrt() * 128.0;
+    let rise = dz.max(0.0) + 256.0;
+    let time = (2.0 * rise / G).sqrt() + (2.0 * (rise - dz) / G).sqrt();
+    let side = flat / time;
+    (((rise - dz) + side * side / (2.0 * G)) / 128.0).floor() as i32
 }
 
 /// Where to aim at a deployed angled panel on face `(c, d)`: (the cell the shot ends in, the

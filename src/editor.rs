@@ -306,9 +306,11 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
         // A faith plate's target lies on a surface: the game flagged all 43 targets with open
         // space behind them, and none with a solid voxel there (in-game checks of
         // v5-fresh-10h-e and v5-cont-10h-d, 2026-10-22). Workshop levels have many in the air,
-        // but their targets are placed by the map converter, not the editor.
+        // but their targets are placed by the map converter, not the editor. A vertical one
+        // (straight over its plate) hangs in the air.
         if let (ItemKind::PlateTarget, Some(n)) = (&it.kind, it.normal) {
-            if !level.solid(step(it.cell, n.opposite())) {
+            let vertical = it.props.get_i32("ITEM_PROPERTY_VERTICAL_ALIGNMENT") == Some(1);
+            if !vertical && !level.solid(step(it.cell, n.opposite())) {
                 flags.add(it, "target-not-on-surface");
             }
         }

@@ -506,7 +506,10 @@ impl Builder {
     /// A faith plate in open `cell` on the surface against `normal`, launching to a target in
     /// open `target` on the surface against `target_normal`. Its speed is what a lob over the
     /// higher of the two by two voxels needs (ASSUMPTION: the compiled trigger aims at the
-    /// target with this speed). Returns (plate, target).
+    /// target with this speed). A target straight over a floor plate hangs in the air there,
+    /// marked `VERTICAL_ALIGNMENT` on both (ASSUMPTION: as the editor marks a plate throwing
+    /// straight up; Workshop maps have them, and a 0 there makes the editor reject the level).
+    /// Returns (plate, target).
     pub fn faith_plate(
         &mut self,
         cell: Cell,
@@ -522,6 +525,11 @@ impl Builder {
         let t = vz / GRAVITY + (2.0 * (rise - dz) / GRAVITY).sqrt();
         let speed = (vz * vz + (flat / t).powi(2)).sqrt();
         let height = (rise / 128.0).round();
+        let vertical = if normal == Dir::PosZ && target[..2] == cell[..2] && target[2] > cell[2] {
+            "1"
+        } else {
+            "0"
+        };
         let plate = self.add(
             "ITEM_CATAPULT",
             cell,
@@ -532,7 +540,7 @@ impl Builder {
                 ("ITEM_PROPERTY_START_REVERSED", "0".into()),
                 ("ITEM_PROPERTY_CATAPULT_SPEED", format!("{speed:.6}")),
                 ("ITEM_PROPERTY_TARGET_NAME", "target".into()),
-                ("ITEM_PROPERTY_VERTICAL_ALIGNMENT", "0".into()),
+                ("ITEM_PROPERTY_VERTICAL_ALIGNMENT", vertical.into()),
             ],
             &[("CatapultHeight", format!("{height:.6}"))],
         );
@@ -540,7 +548,7 @@ impl Builder {
             "ITEM_CATAPULT_TARGET",
             target,
             target_normal,
-            &[("ITEM_PROPERTY_VERTICAL_ALIGNMENT", "0".into())],
+            &[("ITEM_PROPERTY_VERTICAL_ALIGNMENT", vertical.into())],
             &[],
         );
         self.link(plate, t, "CONNECTION_CATAPULT_TARGET");
