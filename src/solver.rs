@@ -591,6 +591,9 @@ pub struct Model {
     /// Per spot: a cube other than a reflection cube may be set down here, as a stand for one
     /// (the first spot of a cell whose spots reach a wall receiver).
     stand_spot: Vec<bool>,
+    /// Per button: the spot cell (`Beams::spot_cells`) over it, if beams cross it. A reflection
+    /// cube set down there lies on the button and holds it down.
+    button_spot: Vec<Option<usize>>,
     /// Per beam end face (a class of its own), its class.
     beam_end_class: HashMap<Face, usize>,
     /// Per panel (`Level::panels`), the class of its face, if it takes portals.
@@ -1612,6 +1615,10 @@ impl Model {
                 any_high && (0..beams.spots.len()).find(|&o| beams.spots[o].cell == cell) == Some(k)
             })
             .collect();
+        let button_spot: Vec<Option<usize>> = buttons
+            .iter()
+            .map(|b| beams.spot_cells.iter().position(|&c| c == b.cell))
+            .collect();
         let mut spots_in = vec![Vec::new(); regions_n];
         for (k, sp) in beams.spots.iter().enumerate() {
             if let Some(r) = graph.region_of(beams.spot_cells[sp.cell]) {
@@ -1844,6 +1851,7 @@ impl Model {
             emitter_switch,
             spots_in,
             stand_spot,
+            button_spot,
             beam_end_class,
             panel_class,
             held_back,
@@ -2460,10 +2468,23 @@ impl Model {
         enabled
             && (held == Some(sig)
                 || match sig {
-                    Signal::Floor(b) => lay.cubes(s).contains(&self.button_code(b)),
+                    Signal::Floor(b) => self.pressed(lay, lay.cubes(s), b),
                     Signal::Pedestal(p) => s[LATCHED] & (1 << p) != 0,
                     Signal::Laser(k) => s[LIT] & (1 << k) != 0,
                 })
+    }
+
+    /// Whether a cube holds floor button `b` down: one on it, or a reflection cube set down
+    /// in its cell facing a way the beams use.
+    fn pressed(&self, lay: &Layout, cubes: &[u32], b: usize) -> bool {
+        cubes.contains(&self.button_code(b))
+            || self.button_spot[b].is_some_and(|cell| {
+                self.buttons[b].kind.accepts(CubeKind::Reflection)
+                    && cubes.iter().zip(&lay.kinds).any(|(&c, &kind)| {
+                        kind == CubeKind::Reflection
+                            && matches!(self.code_loc(c), CubeLoc::Spot(k) if self.beams.spots[k].cell == cell)
+                    })
+            })
     }
 
     fn all_on(&self, lay: &Layout, s: &[u32], inputs: &[Signal], held: Option<Signal>) -> bool {
@@ -2824,7 +2845,7 @@ impl Model {
         {
             Some(b)
                 if self.buttons[b].kind.accepts(lay.kinds[slot])
-                    && !lay.cubes(s).contains(&self.button_code(b)) =>
+                    && !self.pressed(lay, lay.cubes(s), b) =>
             {
                 CubeLoc::OnButton(b)
             }
@@ -3009,7 +3030,7 @@ impl Model {
         // Free weighted buttons here the player could stand on, and the hazards on meanwhile.
         sc.foot.clear();
         for &b in &self.footholds[r] {
-            if !cubes.contains(&self.button_code(b)) {
+            if !self.pressed(lay, cubes, b) {
                 sc.foot.push((b, self.shot_stops(lay, s, Some(Signal::Floor(b)))));
             }
         }
@@ -3154,7 +3175,7 @@ impl Model {
                         .iter()
                         .filter(|&&b| {
                             self.buttons[b].kind.accepts(kind)
-                                && !cubes.contains(&self.button_code(b))
+                                && !self.pressed(lay, cubes, b)
                         })
                         .map(|&b| CubeLoc::OnButton(b)),
                 )
@@ -3239,7 +3260,7 @@ impl Model {
             for reach in &self.reaches[r] {
                 let b = reach.button;
                 if reach.hazards & on == 0
-                    || cubes.contains(&self.button_code(b))
+                    || self.pressed(lay, cubes, b)
                     || reach.hazards & self.hazards_on(lay, s, Some(Signal::Floor(b))) != 0
                 {
                     continue;

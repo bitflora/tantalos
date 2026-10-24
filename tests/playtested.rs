@@ -26,6 +26,10 @@ const SIMPLE_TEST_01: &str = "size 10 11 11 open 6 0 1 6 6 4 2 1 1 9 6 10 1 3 1 
 /// reach through a portal from it and take the cube off that button.
 const MY_FIRST: &str = "size 10 10 4 open 0 0 0 8 6 3 0 7 0 4 7 3 8 7 0 8 9 3 6 7 1 6 8 3 9 3 3 9 4 3 white +x 8 0 0 8 9 3 4 7 0 4 9 3 black -x 6 7 1 7 9 3 white +y 0 7 0 9 7 3 8 9 0 9 9 3 white -y 0 0 0 9 2 3 black -z 6 6 0 6 9 3 9 3 3 9 9 3 entry 1 0 0 +y exit 2 7 0 -y laserfield 8 6 0 +z +x 1 on dropper 1 3 3 standard dropper 6 8 3 companion button 0 7 0 weighted > exit button 4 7 0 weighted > exit button 8 9 0 weighted > piston 0 turret 8 7 0 2 piston 6 6 0 +z 0 1 off";
 
+/// 1498933548 "Laser Management": a reflection cube set down on the floor button holds it and
+/// sends the beam (through portals) to the exit's receptacle.
+const LASER_MANAGEMENT: &str = "size 8 6 3 open 1 0 0 7 5 1 0 2 1 7 3 1 1 0 2 3 5 2 5 0 2 7 5 2 white +x 7 0 0 7 5 2 white -x 1 0 0 3 1 2 1 4 0 3 5 2 white +y 5 5 0 7 5 2 white -y 1 0 0 3 5 2 entry 2 5 0 -y exit 7 4 0 -x fizzler 4 0 0 +y +z 2 on dropper 6 1 2 reflection button 2 2 0 weighted > exit > field 0 pedestal 5 1 0 inf > dropper 0 laser 6 0 0 +y -z on catcher 2 5 2 -y -z > field 0 catcher 7 2 0 -x -z > exit";
+
 fn level(tokens: &str) -> Level {
     Level::from_puzzle(&glados::tokens::decode(tokens).unwrap())
 }
@@ -101,4 +105,10 @@ fn step_out_of_a_turret_and_reach_through_a_portal() {
         panic!("not solved");
     };
     assert!(plan.iter().any(|a| matches!(a, Action::PortalReach { .. })), "{plan:?}");
+}
+
+#[test]
+fn reflection_cube_on_a_button_holds_it_and_redirects() {
+    let plan = solved(LASER_MANAGEMENT);
+    assert!(plan.iter().any(|a| matches!(a, Action::PutDown { at: glados::solver::CubeLoc::Spot(_) })), "{plan:?}");
 }
