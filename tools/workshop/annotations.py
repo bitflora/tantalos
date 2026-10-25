@@ -13,10 +13,10 @@ the browser:
 
 The file is the canonical store: `train/workshop-annotations.jsonl`, one object per line:
 
-    {"workshop_id":"100091397","staged":true,"rating":4,"notes":"...","excluded":true,
+    {"workshop_id":"100091397","staged":true,"rating":4,"complexity":3,"human_solved":true,"notes":"...","excluded":true,
      "updated":1792888260}
 
-`rating` is 0 (unrated) or 1-5. `excluded` means "leave this level out of the ws5 test split";
+`rating` is 0 (unrated) or 1-5; `complexity` is the same scale for how complex the level is; `human_solved` means the user solved it by hand. `excluded` means "leave this level out of the ws5 test split";
 `tools/workshop/ws3.py` moves it to train when rebuilding the split, and `train/plans.py`
 leaves it out of `test-ws.jsonl`.
 """
@@ -31,13 +31,15 @@ DEFAULT = ROOT / "train" / "workshop-annotations.jsonl"
 
 
 def empty():
-    return {"staged": False, "rating": 0, "notes": "", "excluded": False, "updated": 0}
+    return {"staged": False, "rating": 0, "complexity": 0, "human_solved": False, "notes": "", "excluded": False, "updated": 0}
 
 
 def normalize(a):
     out = empty()
     out["staged"] = bool(a.get("staged", False))
     out["rating"] = max(0, min(5, int(a.get("rating", 0) or 0)))
+    out["complexity"] = max(0, min(5, int(a.get("complexity", 0) or 0)))
+    out["human_solved"] = bool(a.get("human_solved", False))
     out["notes"] = str(a.get("notes", "") or "")
     out["excluded"] = bool(a.get("excluded", False))
     out["updated"] = int(a.get("updated", 0) or 0)
@@ -86,7 +88,7 @@ def update(wid, path=DEFAULT, **changes):
     """Set fields on one level and save; returns its annotation."""
     records = load(path)
     a = normalize(records.get(str(wid), empty()))
-    for key in ("staged", "rating", "notes", "excluded"):
+    for key in ("staged", "rating", "complexity", "human_solved", "notes", "excluded"):
         if key in changes and changes[key] is not None:
             a[key] = changes[key]
     a = normalize(a)
@@ -106,6 +108,9 @@ def main():
     ap.add_argument("--staged", action="store_true", help="with --set: staged for manual playtesting")
     ap.add_argument("--no-staged", action="store_true", help="with --set: not staged")
     ap.add_argument("--rating", type=int, choices=range(0, 6), metavar="0-5", help="with --set: my rating")
+    ap.add_argument("--complexity", type=int, choices=range(0, 6), metavar="0-5", help="with --set: my complexity rating")
+    ap.add_argument("--human-solved", action="store_true", help="with --set: I solved it by hand in Portal 2")
+    ap.add_argument("--no-human-solved", action="store_true", help="with --set: not human-solved")
     ap.add_argument("--notes", help="with --set: replace the notes")
     ap.add_argument("--clear-notes", action="store_true", help="with --set: clear the notes")
     ap.add_argument("--exclude", action="store_true", help="with --set: exclude from test data")
@@ -121,6 +126,8 @@ def main():
         changes = {
             "staged": True if a.staged else False if a.no_staged else None,
             "rating": a.rating,
+            "complexity": a.complexity,
+            "human_solved": True if a.human_solved else False if a.no_human_solved else None,
             "notes": "" if a.clear_notes else a.notes,
             "excluded": True if a.exclude else False if a.no_exclude else None,
         }

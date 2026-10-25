@@ -102,6 +102,10 @@ struct Record {
 pub struct Annotation {
     pub staged: bool,
     pub rating: i64,
+    /// How complex the level is, 0 (unset) to 5; set by the user.
+    pub complexity: i64,
+    /// The user solved it by hand in Portal 2.
+    pub human_solved: bool,
     pub notes: String,
     pub excluded: bool,
     pub updated: i64,
@@ -109,7 +113,7 @@ pub struct Annotation {
 
 impl Annotation {
     fn is_empty(&self) -> bool {
-        !self.staged && self.rating == 0 && self.notes.is_empty() && !self.excluded
+        !self.staged && self.rating == 0 && self.complexity == 0 && !self.human_solved && self.notes.is_empty() && !self.excluded
     }
 }
 
@@ -450,6 +454,10 @@ fn load_annotations(path: &Path) -> Result<HashMap<String, Annotation>, String> 
                 rating: field(&fields, "rating")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
+                complexity: field(&fields, "complexity")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                human_solved: field(&fields, "human_solved").map_or(false, |v| v == "true"),
                 notes,
                 excluded: field(&fields, "excluded").map_or(false, |v| v == "true"),
                 updated: field(&fields, "updated")
@@ -477,10 +485,12 @@ fn save_annotations(path: &Path, map: &HashMap<String, Annotation>) -> Result<()
             continue;
         }
         text.push_str(&format!(
-            "{{\"workshop_id\":{},\"staged\":{},\"rating\":{},\"notes\":{},\"excluded\":{},\"updated\":{}}}\n",
+            "{{\"workshop_id\":{},\"staged\":{},\"rating\":{},\"complexity\":{},\"human_solved\":{},\"notes\":{},\"excluded\":{},\"updated\":{}}}\n",
             json_str(id),
             a.staged,
             a.rating.clamp(0, 5),
+            a.complexity.clamp(0, 5),
+            a.human_solved,
             json_str(&a.notes),
             a.excluded,
             a.updated
@@ -494,10 +504,12 @@ fn save_annotations(path: &Path, map: &HashMap<String, Annotation>) -> Result<()
 
 fn annotation_json(id: &str, a: &Annotation) -> String {
     format!(
-        "{{\"workshop_id\":{},\"staged\":{},\"rating\":{},\"notes\":{},\"excluded\":{},\"updated\":{}}}",
+        "{{\"workshop_id\":{},\"staged\":{},\"rating\":{},\"complexity\":{},\"human_solved\":{},\"notes\":{},\"excluded\":{},\"updated\":{}}}",
         json_str(id),
         a.staged,
         a.rating.clamp(0, 5),
+        a.complexity.clamp(0, 5),
+        a.human_solved,
         json_str(&a.notes),
         a.excluded,
         a.updated
@@ -691,6 +703,11 @@ fn annotate(state: &Mutex<State>, body: &str) -> Result<String, String> {
         .map(|v| v.parse::<i64>().unwrap_or(old.rating))
         .unwrap_or(old.rating)
         .clamp(0, 5);
+    let complexity = param(body, "complexity")
+        .map(|v| v.parse::<i64>().unwrap_or(old.complexity))
+        .unwrap_or(old.complexity)
+        .clamp(0, 5);
+    let human_solved = param(body, "human_solved").map_or(old.human_solved, |v| v == "1");
     let notes = param(body, "notes").unwrap_or(old.notes);
     if notes.len() > 100_000 {
         return Err("notes are limited to 100,000 characters".into());
@@ -699,6 +716,8 @@ fn annotate(state: &Mutex<State>, body: &str) -> Result<String, String> {
     let a = Annotation {
         staged,
         rating,
+        complexity,
+        human_solved,
         notes,
         excluded,
         updated: now_secs(),
@@ -1083,6 +1102,8 @@ mod tests {
             Annotation {
                 staged: true,
                 rating: 4,
+                complexity: 3,
+                human_solved: true,
                 notes: "a \"note\"\nwith a newline".into(),
                 excluded: true,
                 updated: 7,
@@ -1095,6 +1116,8 @@ mod tests {
         assert_eq!(back["42"].notes, "a \"note\"\nwith a newline");
         assert!(back["42"].staged && back["42"].excluded);
         assert_eq!(back["42"].rating, 4);
+        assert_eq!(back["42"].complexity, 3);
+        assert!(back["42"].human_solved);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
