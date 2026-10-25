@@ -494,13 +494,17 @@ def convert(bsp):
             if rotate(p.angles(), (0, 0, 1)) != UP:
                 raise Unsupported(f"{inst.name}: pedestal not on a floor")
             cell = cell_of(add(p.origin(), UP))
-            if p.d.get("istimer", "0") == "1":
-                t = round(float(p.d.get("Delay", "3")))
+            # Infinite is Delay 99999999999. `istimer` is only the ticking sound: the compiler
+            # turns it off for buttons that drive only droppers, which still pop back out after
+            # their Delay (a cube reset button).
+            delay = float(p.d.get("Delay", "3"))
+            if delay >= 1e9:
+                timer = "inf"
+            else:
+                t = round(delay)
                 if not 3 <= t <= 30:
                     raise Unsupported(f"{inst.name}: timer {t}")
                 timer = str(t)
-            else:
-                timer = "inf"
             toks_pedestals.append((cell, timer, targets(inst), p.origin()))
         else:
             raise Unsupported(f"{inst.name}: unknown button")

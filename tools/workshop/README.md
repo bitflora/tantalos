@@ -93,7 +93,8 @@ from training.
   - item instances are named `<kind><p2c index>` (`button23-proxy`, `barrierhazard8_brush`);
     logic entities keep the instance's angles; an item's cell is floor((anchor + up) / 128);
   - wires are the outputs of each button's `func_instance_io_proxy`;
-  - cube type: `counter_cube_type` startvalue; pedestal: `prop_button` `istimer`/`Delay`;
+  - cube type: `counter_cube_type` startvalue; pedestal: `prop_button` `Delay` (99999999999 =
+    infinite; `istimer` is only the ticking sound, off for buttons that drive only droppers);
     two pedestal buttons in one cell (a map can place them inside the editor's 128-unit voxel)
     can't both be placed, so the later one moves to the nearest free neighbouring cell with a
     floor under it;
