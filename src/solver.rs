@@ -30,7 +30,12 @@
 //!   timed for the platform to be there), and fetch an auto-drop's cube (below) from the
 //!   device floor the timer puts under its dropper. A second timed pedestal pressed during a
 //!   dash (`Action::DoubleDash`; pressing takes `PRESS_TIME` once its cell is entered) holds
-//!   both on until the first of the two runs out; that dash goes on empty-handed.
+//!   both on until the first of the two runs out; that dash goes on empty-handed. A pedestal
+//!   stays on `RESET_LAG` past its timer, while the button pops back out (liberal: twice that).
+//! - Funnel sweeps (`Action::Sweep`, `lasers::Sweep`): a reflection cube put into a funnel
+//!   redirects each beam it crosses for a moment. If that opens the exit, the player escapes
+//!   when they reach the exit cell's middle before the cube reaches the beam, at `FUNNEL_SPEED`
+//!   (the door doesn't close on a player in its doorway).
 //! - Fizzlers: walking or falling through an active one clears both portals and destroys a
 //!   held cube, which respawns where it started. A cube falling through one respawns too.
 //!   Active fizzlers stop portal shots. Laser fields: the player can't pass an active one;
@@ -119,6 +124,13 @@ const PICKUP_TIME: f64 = 0.25;
 const PRESS_TIME: f64 = 0.25;
 /// Most cells a cube's region may have for conservative rules to fetch it in a timed dash.
 const MAX_FETCH_CELLS: usize = 8;
+/// Seconds a timed pedestal's outputs stay on past its timer: `OnButtonReset` fires once the
+/// button has popped back out (portal2.fgd), and switch001.mdl's `up` takes 0.13 s (its `down`
+/// as long).
+const RESET_LAG: f64 = 0.13;
+/// Units per second a funnel carries a cube (`Action::Sweep`): the editor's funnel instance
+/// sets `linearForce` 250, assumed to be the speed.
+const FUNNEL_SPEED: f64 = 250.0;
 const GRAVITY: f64 = 600.0;
 const VOXEL: f64 = 128.0;
 
@@ -135,6 +147,8 @@ pub struct Rules {
     pub fire_while_holding: bool,
     /// Units per second, for timed dashes.
     pub walk_speed: f64,
+    /// Seconds a timed pedestal stays on past its timer (`RESET_LAG`).
+    pub reset_lag: f64,
     pub sight: Sight,
     pub turret_sight: TurretSight,
     /// Run through places a live turret can shoot (doing nothing else there).
@@ -322,6 +336,11 @@ pub enum Action {
         height: i32,
         refire: Option<usize>,
         to: usize,
+    },
+    /// Put the held reflection cube into a funnel (sweep `sweep`, index into `Beams::sweeps`)
+    /// and run out of the exit, open for the moment the cube riding it redirects a beam.
+    Sweep {
+        sweep: usize,
     },
 }
 
@@ -614,6 +633,8 @@ pub struct Model {
     emitter_switch: Vec<usize>,
     /// Per region, the laser spots (`Beams::spots`) in it.
     spots_in: Vec<Vec<usize>>,
+    /// Per region, the funnel sweeps (`Beams::sweeps`) a cube can be put in for from it.
+    sweeps_in: Vec<Vec<usize>>,
     /// Per spot: a cube other than a reflection cube may be set down here, as a stand for one
     /// (the first spot of a cell whose spots reach a wall receiver).
     stand_spot: Vec<bool>,
@@ -1328,6 +1349,7 @@ impl Model {
                 cube_steps: false,
                 fire_while_holding: false,
                 walk_speed: 140.0,
+                reset_lag: RESET_LAG,
                 sight: Sight {
                     blocking_hazards,
                     switchable_hazards,
@@ -1343,6 +1365,8 @@ impl Model {
                 cube_steps: true,
                 fire_while_holding: true,
                 walk_speed: 190.0,
+                // The timer may start once the button is fully down.
+                reset_lag: 2.0 * RESET_LAG,
                 sight: Sight {
                     blocking_hazards,
                     switchable_hazards,
@@ -1603,7 +1627,8 @@ impl Model {
                 }
             })
             .collect();
-        let walk = if pedestals.iter().any(|p| p.timer.is_some()) {
+        // Timed dashes and funnel sweeps time walks.
+        let walk = if pedestals.iter().any(|p| p.timer.is_some()) || !beams.sweeps.is_empty() {
             let rides = (mode == Mode::Liberal).then_some(rules.walk_speed);
             walk_graph(geo, &graph, rides)
         } else {
@@ -1690,6 +1715,12 @@ impl Model {
         for (k, sp) in beams.spots.iter().enumerate() {
             if let Some(r) = graph.region_of(beams.spot_cells[sp.cell]) {
                 spots_in[r].push(k);
+            }
+        }
+        let mut sweeps_in = vec![Vec::new(); regions_n];
+        for (k, sw) in beams.sweeps.iter().enumerate() {
+            if let Some(r) = graph.region_of(sw.from) {
+                sweeps_in[r].push(k);
             }
         }
         let complete = !devices.incomplete && !beams.incomplete;
@@ -1918,6 +1949,7 @@ impl Model {
             beams,
             emitter_switch,
             spots_in,
+            sweeps_in,
             stand_spot,
             button_spot,
             beam_end_class,
@@ -2606,6 +2638,12 @@ impl Model {
     /// The laser receivers powered and the turrets beams hit: every beam from an emitter that
     /// is on, through reflection cubes at spots and through portals.
     fn beam_hits(&self, lay: &Layout, s: &[u32]) -> (u32, u32) {
+        self.beam_hits_with(lay, s, None)
+    }
+
+    /// `beam_hits`, at the moment the cube of funnel sweep `sweep` (`Beams::sweeps`) crosses
+    /// its beam.
+    fn beam_hits_with(&self, lay: &Layout, s: &[u32], sweep: Option<usize>) -> (u32, u32) {
         let (mut lit, mut hit) = (0u32, 0u32);
         // The spot whose cell is `cell`, if a reflection cube is there.
         let cube_at = |cell: usize| {
@@ -2677,6 +2715,17 @@ impl Model {
                             let class = self.panel_class[p].filter(|_| front);
                             next = class.and_then(|c| through(c));
                             stopped = next.is_none();
+                            break;
+                        }
+                        Event::Funnel(fc) => {
+                            let Some(sw) = sweep.map(|k| &self.beams.sweeps[k]) else { continue };
+                            if sw.cell != fc || !(sw.any_height || high != Some(false)) {
+                                continue;
+                            }
+                            next = Some(sw.ray);
+                            if !sw.any_height {
+                                high = Some(true);
+                            }
                             break;
                         }
                         Event::Cube(sc) => {
@@ -3255,6 +3304,9 @@ impl Model {
         if let Some(i) = held {
             let kind = lay.kinds[i];
             let reflects = kind == CubeKind::Reflection;
+            if reflects {
+                self.sweep(cx, s, r, sc, &mut done);
+            }
             let spots = std::iter::once(CubeLoc::Loose(r))
                 .chain(
                     self.buttons_in[r]
@@ -3393,6 +3445,58 @@ impl Model {
                 copy(&mut sc.n);
                 sc.n[DOWN] |= 1 << t;
                 done(&mut sc.n, Action::Knock { turret: t }, true);
+            }
+        }
+    }
+
+    /// From region `r` holding a reflection cube: put it into a funnel for each sweep, and run
+    /// out of the exit if the beam out of the cube opens it for the moment the cube crosses
+    /// its beam, the player reaching the exit cell's middle before the cube gets there
+    /// (`Action::Sweep`). The door stays open while the player is in its doorway (the exit
+    /// door instance's `door_clear` trigger reaches about that far into the room).
+    fn sweep(
+        &self,
+        cx: &Ctx<'_>,
+        s: &[u32],
+        r: usize,
+        sc: &mut Scratch,
+        done: &mut impl FnMut(&mut Vec<u32>, Action, bool),
+    ) {
+        let lay = cx.lay;
+        let Some(exit) = self.walk.node.get(&self.exit_cell).copied() else {
+            return;
+        };
+        if self.sweeps_in[r].is_empty() || self.exit_open_with(lay, s, None) {
+            return;
+        }
+        let dev = dev_of(s);
+        let on = self.hazards_on(lay, s, None);
+        let alive = cx.turrets & !s[DOWN];
+        let key = |node: usize, fizzled: bool| 2 * node + fizzled as usize;
+        for &k in &self.sweeps_in[r] {
+            let sw = &self.beams.sweeps[k];
+            let set = |bit: Option<usize>| bit.is_some_and(|b| dev & (1 << b) != 0);
+            let i = sw.projector;
+            if !set(Some(self.devices.projector_bit[i])) || set(self.devices.reversed_bit[i]) != sw.reversed {
+                continue;
+            }
+            let Some(&start) = self.walk.node.get(&sw.from) else {
+                continue;
+            };
+            sc.n.clear();
+            sc.n.extend_from_slice(s);
+            sc.n[LIT] = self.beam_hits_with(lay, s, Some(k)).0;
+            if !self.exit_open_with(lay, &sc.n, None) {
+                continue;
+            }
+            let limit = (sw.dist as f64 * VOXEL / FUNNEL_SPEED * 1e6) as u64;
+            let mut walked = std::mem::take(&mut sc.dist);
+            self.walk_times(&[(start, false, 0)], on, dev, alive, false, limit, &mut walked, sc);
+            let escapes = walked[key(exit, false)].min(walked[key(exit, true)]) <= limit;
+            sc.dist = walked;
+            if escapes {
+                sc.n[0] = self.exit_region as u32 | ESCAPED;
+                done(&mut sc.n, Action::Sweep { sweep: k }, false);
             }
         }
     }
@@ -3620,6 +3724,7 @@ impl Model {
     pub(crate) fn dash_times(&self, seconds: f64) -> DashTimes {
         let half = VOXEL / 2.0 / self.rules.walk_speed;
         let us = |x: f64| (x * 1e6) as u64;
+        let seconds = seconds + self.rules.reset_lag;
         DashTimes {
             limit: us(seconds),
             enter: us(seconds + half),
@@ -3882,6 +3987,17 @@ impl Model {
                 format!(
                     "press pedestal button {} ({tp} s), then pedestal button {} ({tq} s), and {then} while both are on",
                     p.index, q.index
+                )
+            }
+            Action::Sweep { sweep } => {
+                let sw = &self.beams.sweeps[sweep];
+                format!(
+                    "from {:?}, put the reflection cube into funnel {} facing {:?}; run out of the exit while it crosses the beam at {:?}, {:.1} s later",
+                    sw.from,
+                    sw.projector,
+                    sw.dir,
+                    self.beams.funnel_cells[sw.cell],
+                    sw.dist as f64 * VOXEL / FUNNEL_SPEED
                 )
             }
             Action::Fetch {

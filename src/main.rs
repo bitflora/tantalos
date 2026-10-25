@@ -219,6 +219,15 @@ fn solve(path: &Path) -> Result<()> {
             model.beams.rays.len(),
             spots.join(", ")
         );
+        if !model.beams.sweeps.is_empty() {
+            let sweeps: Vec<String> = model
+                .beams
+                .sweeps
+                .iter()
+                .map(|s| format!("{:?} {:?} -> {:?}", s.from, s.dir, model.beams.funnel_cells[s.cell]))
+                .collect();
+            println!("  funnel sweeps: {}", sweeps.join(", "));
+        }
     }
     if !model.devices.is_empty() {
         println!("  device bits: {:?}", model.devices.bits);

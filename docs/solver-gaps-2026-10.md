@@ -481,6 +481,36 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     levels with two or more timed pedestals: 2 unsolvable and 1 uncertain → solvable, 3
     unsolvable → uncertain (liberal-solvable), none worse; scoring took ~7% longer.
 
+- **3817082781 "sp_timed_lazer_change"** (`glados-ws5b-unsolv-00014`, 2026-10-24). The laser
+  crosses the funnel's column in mid-air; nothing else takes portals. Play-tester: put the
+  reflection cube into the funnel facing the catcher and go to the exit while it rises; it
+  turns the beam onto the catcher for a moment, and you must leave in that window. Gap: cubes
+  never rode funnels. **Fixed (2026-10-24), liberal rules only** (`tests/playtested.rs`):
+  `Action::Sweep` (`lasers::Sweep`, `Event::Funnel`): a reflection cube put into a funnel from
+  the cell behind it redirects each beam it crosses (both heights in a vertical funnel, high
+  in a level one); if that opens the exit, the player escapes on reaching the exit cell's
+  middle before the cube reaches the beam, at an assumed 250 u/s (`FUNNEL_SPEED`, the
+  instance's `linearForce`). The compiled map's exit door doesn't close while the player is in
+  its `door_clear` trigger (64 units each side of the door), so being there in time is enough.
+  The cube needs 1.0 s here, the walk 0.94 s at liberal speed, 1.28 s at conservative speed, so
+  the level is uncertain. Not routed (no plan word).
+- **3495602854 "Mini Puzzle"** (`glados-ws5b-unsolv-00015`): play-tester: aim the prism so
+  the beam passes the relay and hits the catcher, then press the 3 s pedestal and run out. The
+  laser part already solved (an angled spot at the emitter); the dash doesn't: the pedestal is
+  at the far wall (its prop at x=16 in a cell 0..128), and the exit cell's middle is 5.4 voxels
+  of walk (about 640 units in a straight line) away, 3.4 s even at 190 u/s. **Still
+  unsolvable**. Found: portal2.fgd says `OnButtonReset` fires once the button is back out,
+  and switch001.mdl's `up` and `down` take 0.13 s each, so timers now run 0.13 s longer
+  (liberal 0.26 s, `RESET_LAG`). That isn't enough. A likely explanation, unmeasured:
+  `cl_forwardspeed` and `cl_sidespeed` are both 175, so running diagonally (W+A) may reach
+  about 247 u/s if the engine doesn't clamp the sum. Measure it in game before changing
+  `walk_speed`.
+  - Old vs. new binary (`score --budget 50000 --editor-rules off`): 1,200 Workshop levels with
+    a timed pedestal, 1 uncertain → solvable; 1,500 random v5b levels, no verdict changed, 2
+    shorter plans; 1,216 of the 1,848 Workshop levels with a funnel, a reflection cube and a
+    laser (stopped early), none changed. Nothing got worse. `tests/tier1.rs`
+    `timed_field(4)` is now conservative-solvable (it was uncertain).
+
 ## Recommended order
 
 1. ~~**Angled laser beams**~~: done (above), ~5% of unsolvable levels rather than the 9% the

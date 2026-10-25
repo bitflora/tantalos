@@ -42,11 +42,17 @@
 //!   cell's middle. Angled beams pass panels.
 //! - Beams don't stop the player or cubes. (In-game a beam burns and pushes back a player who
 //!   walks into it: crossing one takes a running jump over it, which play.py does.)
+//! - Funnels (play-tested, "sp_timed_lazer_change"): a reflection cube put into a funnel from
+//!   the cell behind it, facing the way the player looks, rides along the flow keeping that
+//!   facing, and redirects each beam crossing its way for the moment it passes (`Sweep`). A
+//!   funnel going up or down carries it through both heights; along a level one it floats at
+//!   the middle of its cells (high). Only sweeps whose beam powers a receiver are kept.
 
 use std::collections::{HashMap, HashSet};
 
+use crate::dynamics::funnel_path;
 use crate::geom::{step, Cell, Dir};
-use crate::level::{ItemKind, LaserKind, Level, PanelKind};
+use crate::level::{ItemKind, LaserKind, Level, PanelKind, ProjectorKind};
 use crate::portals::Face;
 
 /// Most spots kept: each is a place a cube can be, so they multiply states.
@@ -63,6 +69,8 @@ const NEAR_CATCHER: f64 = 0.4;
 const CATCHER_CONE: f64 = 70.0;
 /// Shortest stretch (voxels) of a beam in a cell that a cube there can be set down on.
 const MIN_SEG: f64 = 0.2;
+/// Most funnel sweeps kept.
+pub const MAX_SWEEPS: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Event {
@@ -77,6 +85,9 @@ pub enum Event {
     /// panel stops it, and a portal on its face takes it on if `front` (the beam hits the
     /// white face).
     Panel { p: usize, front: bool },
+    /// It crosses funnel cell `fc` (index into `Beams::funnel_cells`): a reflection cube riding
+    /// the funnel redirects it there for a moment (`Beams::sweeps`).
+    Funnel(usize),
 }
 
 /// A straight beam.
@@ -102,6 +113,27 @@ pub struct Spot {
     pub aim: Option<([f64; 2], f64)>,
 }
 
+/// A reflection cube put into a funnel, crossing a beam on its way.
+#[derive(Clone, Debug)]
+pub struct Sweep {
+    /// Index into `Level::projectors`.
+    pub projector: usize,
+    /// The flow runs toward the projector.
+    pub reversed: bool,
+    /// The cell the player stands in, putting the cube into the funnel's cell beside it,
+    /// facing `dir`.
+    pub from: Cell,
+    pub dir: Dir,
+    /// Where it crosses the beam (index into `Beams::funnel_cells`).
+    pub cell: usize,
+    /// Voxels along the funnel from where it goes in to there.
+    pub dist: usize,
+    /// The beam out of the cube there.
+    pub ray: usize,
+    /// The funnel goes up or down: the cube catches beams at both heights.
+    pub any_height: bool,
+}
+
 /// A beam's stretch through a spot cell: (spot cell, entry point, exit point), x and y in
 /// voxels.
 type Seg = (usize, [f64; 2], [f64; 2]);
@@ -119,6 +151,8 @@ pub struct Beams {
     pub rays: Vec<Ray>,
     pub spot_cells: Vec<Cell>,
     pub spots: Vec<Spot>,
+    pub funnel_cells: Vec<Cell>,
+    pub sweeps: Vec<Sweep>,
     /// Per white face, the beam out of a portal there (only when some beam can go into a
     /// portal).
     pub exits: HashMap<Face, usize>,
@@ -195,12 +229,51 @@ impl Beams {
                     .map(|l| l.cell),
             )
             .collect();
+        // Funnel sweeps that could be: (projector, reversed, from, dir, cell, dist, any
+        // height), for every cell of a funnel's flow after one a cube can be put into.
+        let mut templates: Vec<(usize, bool, Cell, Dir, Cell, usize, bool)> = Vec::new();
+        let mut funnel: HashMap<Cell, (usize, usize)> = HashMap::new();
+        let mut funnel_cells = Vec::new();
+        if reflectors > 0 {
+            for (i, p) in level.projectors.iter().enumerate() {
+                if p.kind != ProjectorKind::Funnel {
+                    continue;
+                }
+                let path = funnel_path(level, p.cell, p.normal);
+                for reversed in [false, true] {
+                    let mut cells = path.cells.clone();
+                    if reversed {
+                        cells.reverse();
+                    }
+                    for (a, &into) in cells.iter().enumerate() {
+                        for d in Dir::HORIZONTAL {
+                            let from = step(into, d.opposite());
+                            if !level.standable(from) || level.face(into, d.opposite()).barrier.is_some() {
+                                continue;
+                            }
+                            for (b, &cell) in cells.iter().enumerate().skip(a + 1) {
+                                let vertical = path.dir.axis() == 2;
+                                templates.push((i, reversed, from, d, cell, b - a, vertical));
+                            }
+                        }
+                    }
+                }
+                for &c in &path.cells {
+                    funnel.entry(c).or_insert_with(|| {
+                        funnel_cells.push(c);
+                        (funnel_cells.len() - 1, path.dir.axis())
+                    });
+                }
+            }
+        }
+        templates.sort_by_key(|t| t.5);
         let mut tracer = Tracer {
             level,
             taken,
             spot_id: HashMap::new(),
             spot_cells: Vec::new(),
             on_emitters: angled_spots,
+            funnel,
         };
         // Every ray we might need, breadth first by how many cubes redirect into it.
         let mut rays: Vec<Ray> = Vec::new();
@@ -392,6 +465,35 @@ impl Beams {
                 }
             }
         }
+        // Sweeps through a cell some beam crosses, whose beam out powers a receiver.
+        let crossed: HashSet<usize> = rays
+            .iter()
+            .flat_map(|r| &r.events)
+            .filter_map(|e| match *e {
+                Event::Funnel(fc) => Some(fc),
+                _ => None,
+            })
+            .collect();
+        let mut sweeps = Vec::new();
+        for &(projector, reversed, from, dir, cell, dist, any_height) in &templates {
+            let fc = tracer.funnel[&cell].0;
+            if !crossed.contains(&fc) || sweeps.len() >= MAX_SWEEPS || rays.len() >= 4096 {
+                continue;
+            }
+            let ray = get(&mut tracer, &mut rays, &mut segs, &mut depth, cell, dir, false, reflectors);
+            if rays[ray].events.iter().any(|e| matches!(e, Event::Receiver(_))) {
+                sweeps.push(Sweep {
+                    projector,
+                    reversed,
+                    from,
+                    dir,
+                    cell: fc,
+                    dist,
+                    ray,
+                    any_height,
+                });
+            }
+        }
         // Keep what can lead somewhere: rays that power or destroy something, end where a
         // portal could take them on, or cross a useful spot.
         let mut useful_ray = vec![false; rays.len()];
@@ -407,6 +509,7 @@ impl Beams {
                     Event::Receiver(_) | Event::Turret(_) => true,
                     Event::Cube(sc) => useful_cell[sc],
                     Event::Panel { front, .. } => portals_help && front,
+                    Event::Funnel(_) => false,
                 });
                 if hit || (portals_help && ray.end.is_some()) {
                     useful_ray[r] = true;
@@ -439,11 +542,18 @@ impl Beams {
         keep_angled.truncate(MAX_ANGLED);
         let kept_cells: HashSet<usize> =
             keep.iter().map(|k| k.0).chain(keep_angled.iter().map(|a| a.0)).collect();
-        // Spot cells with no spot left don't stop beams.
+        // Spot cells with no spot left don't stop beams, and funnel cells with no sweep don't
+        // matter.
+        let swept: HashSet<usize> = sweeps.iter().map(|s| s.cell).collect();
         for ray in &mut rays {
-            ray.events
-                .retain(|e| !matches!(e, Event::Cube(sc) if !kept_cells.contains(sc)));
+            ray.events.retain(|e| match e {
+                Event::Cube(sc) => kept_cells.contains(sc),
+                Event::Funnel(fc) => swept.contains(fc),
+                _ => true,
+            });
         }
+        b.funnel_cells = funnel_cells;
+        b.sweeps = sweeps;
         b.spot_cells = tracer.spot_cells;
         b.spots = keep
             .into_iter()
@@ -593,6 +703,8 @@ struct Tracer<'a> {
     spot_cells: Vec<Cell>,
     /// A cube can sit on a floor emitter (its beam going up into the cube).
     on_emitters: bool,
+    /// Funnel cells: (index into `funnel_cells`, the axis of the flow).
+    funnel: HashMap<Cell, (usize, usize)>,
 }
 
 impl Tracer<'_> {
@@ -636,6 +748,12 @@ impl Tracer<'_> {
                 }
                 if let Some(t) = level.turrets.iter().position(|t| t.cell == cur) {
                     events.push(Event::Turret(t));
+                }
+                // A cube riding the funnel crosses a beam across its flow.
+                if let Some(&(fc, axis)) = self.funnel.get(&cur) {
+                    if axis != d.axis() {
+                        events.push(Event::Funnel(fc));
+                    }
                 }
                 let up_from_floor = own && cur == c && self.on_emitters;
                 let restable = (d != Dir::PosZ || up_from_floor)

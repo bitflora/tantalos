@@ -188,3 +188,27 @@ fn press_two_timed_pedestals_and_run_out() {
     let model = Model::new(&level(&far), Mode::Liberal).unwrap();
     assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable);
 }
+
+/// 3817082781 "sp_timed_lazer_change": the laser crosses the funnel's column in mid-air. Put the
+/// reflection cube into the funnel facing the catcher and walk to the exit while it rises: it
+/// turns the beam onto the catcher for the moment it passes.
+const TIMED_LAZER_CHANGE: &str = "size 4 6 4 o3 s1 | o4 | o4 | s4 | / o4 | o4 | o4 | s4 | / o4 | o4 | o4 | s3 o1 | / o4 | o4 | o4 | s3 o1 | / o4 | o4 | o4 | s4 | / o4 | o4 | o4 | s4 | / entry 1 0 0 +y exit 2 5 0 -y cube 0 0 0 reflection laser 0 3 2 +x center on catcher 1 0 2 +y center > exit funnel 1 3 0 +z on";
+
+#[test]
+fn reflection_cube_rising_in_a_funnel_sweeps_the_beam_onto_the_catcher() {
+    // Liberal rules only: the cube reaches the beam 1 s after it goes in (at the funnel's
+    // assumed 250 u/s), which a conservative walk to the exit doesn't beat. Not routed yet.
+    let model = Model::new(&level(TIMED_LAZER_CHANGE), Mode::Liberal).unwrap();
+    let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+        panic!("not solved");
+    };
+    assert!(matches!(plan.as_slice(), [Action::PickUp { .. }, Action::Sweep { .. }]), "{plan:?}");
+    let model = Model::new(&level(TIMED_LAZER_CHANGE), Mode::Conservative).unwrap();
+    assert!(!matches!(model.solve(BUDGET).verdict, Verdict::Solved(_)));
+    // Not with the funnel off, nor pulling down.
+    for other in ["funnel 1 3 0 +z off", "funnel 1 3 0 +z on rev"] {
+        let tokens = TIMED_LAZER_CHANGE.replace("funnel 1 3 0 +z on", other);
+        let model = Model::new(&level(&tokens), Mode::Liberal).unwrap();
+        assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable, "{other}");
+    }
+}

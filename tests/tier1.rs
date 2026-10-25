@@ -246,12 +246,13 @@ fn standing_on_a_button_holds_it_for_a_shot() {
 fn timed_pedestal_races_the_clock() {
     let plan = solvable_in(&fixtures::timed_field(6));
     assert!(matches!(plan.as_slice(), [Action::Dash { .. }]));
-    // 5 voxels take 4.6 s at 140 u/s but 3.4 s at 190 u/s.
+    // 4.5 voxels to the cell past the field take 4.1 s at 140 u/s but 3.0 s at 190 u/s; the
+    // button stays on 0.13 s (liberal: 0.26 s) past its timer, popping back out.
+    assert!(matches!(solvable_in(&fixtures::timed_field(4)).as_slice(), [Action::Dash { .. }]));
     assert!(matches!(
-        verdict(&fixtures::timed_field(4)),
+        verdict(&fixtures::timed_field(3)),
         Judgement::Uncertain(Some(_))
     ));
-    assert_eq!(verdict(&fixtures::timed_field(3)), Judgement::Unsolvable);
 }
 
 #[test]
