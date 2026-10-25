@@ -23,7 +23,8 @@ Puzzle Maker's compiler leaves the puzzle readable in the map:
   track's func_movelinear (movedir, movedistance) from its own cell. Loose cubes: `cube<N>`
   instances' prop_weighted_cube (CubeType).
 
-Only what the token format can say is recovered: BEEmod items and the like make the map
+BEEmod maps are read too where their items are vanilla ones (`BEE_ITEMS`, `bee_kind`). Only
+what the token format can say is recovered: BEEmod's own items and the like make the map
 unsupported, with the reason. Checked against compiled maps of known .p2c files: see
 tools/workshop/README.md.
 """
@@ -60,6 +61,37 @@ DECOR = {
     "target",  # a faith plate target's marker; the plate's trigger names the real one
 }
 INSTANCE = re.compile(r"@?([A-Za-z_]+?)(\d+)(?=[-_]|$)")
+# BEEmod (BEE2) compiles the editor's items as its own instances under short names. A name
+# can stand for more than one item (`fp`: faith plate or flip panel; `ap`: angled panel, or
+# a mod's autoportal), so the vanilla kind comes from the entities that make the item
+# (`bee_kind`); a BEE instance that holds none of them stays unsupported, as do BEE's own items
+# (`dr` door, `tr` trigger, `lg` logic gate, `pgun`, ...). Pistons are BEE's own build (no
+# -lift_platform) and gel droppers pick their gel at run time: those end up unsupported too.
+BEE_ITEMS = {
+    "bt": ("button",), "pro_ped": ("button",), "cd": ("cubedropper",), "cu": ("cube",),
+    "fiz": ("barrierhazard",), "le": ("laseremit",), "lc": ("lasercatch",), "lr": ("laserrelay",),
+    "fp": ("catapult", "flipPanel"), "lb": ("bridge",), "tb": ("tbeam",), "tu": ("turret",),
+    "pd": ("paintdropper",), "st": ("stairs",), "ap": ("angledPanel",), "cp": ("angledClearPanel",),
+    "pl": ("pistonlift",),
+}
+# BEE instances that only decorate: indicator lights and antlines (`ip`, `it`, `toggle_*`),
+# placement helpers, observation-room lights and windows, the compiler's helpers.
+BEE_DECOR = {"ip", "it", "orl", "ph", "targ", "half_obs", "observation", "screenshot",
+             "template_spawn_", "__pgun_port_detect_",
+             "or", "flicker_", "ls", "mon_cam", "exit_dest_",  # area portals, lights, sparks, ropes
+             "announcer_enter_", "jazz_",  # voice lines and music
+             "faith_target"}  # a plate's target marker; its trigger names the target
+# Entities that mean a mod's item even under a vanilla item's short name.
+BEE_FOREIGN = {"prop_portal", "linked_portal_door", "func_portal_detector"}
+# Newer BEE builds leave out an instance's logic entities. These carried exactly the instance's
+# angles in every BEE instance that had both (2026-10-25, ~200 maps)...
+BEE_ANGLED = {"func_brush", "trigger_multiple", "func_clip_vphysics", "logic_coop_manager"}
+# ...and with none of them, the item's prop, by the local axis that is the instance's up: 93%
+# of BEE floor buttons agreed, every plate arm and every gel sprayer (its forward).
+BEE_UP_FROM = [(c, "", (0, 0, 1)) for c in ("prop_floor_button", "prop_floor_cube_button",
+                                             "prop_floor_ball_button", "prop_under_floor_button",
+                                             "prop_button", "prop_under_button")]
+BEE_UP_FROM += [("prop_dynamic", "-arm", (0, 0, 1)), ("info_paint_sprayer", "", (1, 0, 0))]
 LOGIC = {"logic_relay", "logic_branch", "logic_auto", "logic_case", "math_counter", "func_instance_io_proxy",
          "func_areaportal", "point_template", "env_entity_maker", "logic_branch_listener"}
 CUBE_KINDS = ["standard", "companion", "reflection", "sphere", "franken"]
@@ -137,10 +169,8 @@ class Instance:
     def __init__(self, kind, index):
         self.kind, self.index = kind, index
         self.ents = []
-
-    @property
-    def name(self):
-        return f"{self.kind}{self.index}"
+        # The name its entities carry: a BEE instance keeps it when it gets a vanilla kind.
+        self.name = f"{kind}{index}"
 
     def direct(self, cls=None, suffix=None):
         """Entities of the instance itself, not of an instance nested in it."""
@@ -156,14 +186,36 @@ class Instance:
             out.append(e)
         return out
 
+    def oriented(self):
+        """The entities that carry the instance's angles: its logic (in vanilla maps an unset
+        angles key means 0 0 0, e.g. a floor plate's), or, for a BEE instance, its logic with
+        angles set or else its brushes (BEE leaves the logic out, or its angles unset on a field
+        that isn't at 0 0 0)."""
+        if self.name == f"{self.kind}{self.index}":
+            return self.direct(LOGIC)
+        return ([e for e in self.direct(LOGIC) if "angles" in e.d]
+                or [e for e in self.direct(BEE_ANGLED) if "angles" in e.d])
+
     def angles(self):
-        votes = collections.Counter(tuple(round(a) % 360 for a in e.angles()) for e in self.direct(LOGIC))
+        votes = collections.Counter(tuple(round(a) % 360 for a in e.angles()) for e in self.oriented())
         if not votes:
             raise Unsupported(f"{self.name}: no entity to read its rotation from")
         return votes.most_common(1)[0][0]
 
     def up(self):
-        u = rotate(self.angles(), (0, 0, 1))
+        try:
+            angles = self.angles()
+        except Unsupported:
+            # BEEmod, with nothing else to go by: the item's own prop says which way is up.
+            props = [(e, v) for c, suffix, v in BEE_UP_FROM for e in self.direct(c, suffix or None)]
+            if not props:
+                raise
+            e, v = props[0]
+            u = rotate(e.angles(), v)
+            if u is None:
+                raise Unsupported(f"{self.name}: rotation isn't axis-aligned")
+            return u
+        u = rotate(angles, (0, 0, 1))
         if u is None:
             raise Unsupported(f"{self.name}: rotation isn't axis-aligned")
         return u
@@ -299,11 +351,28 @@ def screen(entities):
         if m:
             kind, idx = m.group(1), int(m.group(2))
             instances.setdefault((kind, idx), Instance(kind, idx)).ents.append(e)
+        elif (door := next((d for d in ("doorentry", "doorexit")
+                             if e.name.lstrip("@").startswith(d + "-")), None)):
+            # BEEmod's doors (newer builds) have no index.
+            if (door, -1) not in instances:
+                instances[(door, -1)] = Instance(door, -1)
+                instances[(door, -1)].name = door
+            instances[(door, -1)].ents.append(e)
     # 2012-era maps wrap glass in `target<N>` instances of paint-bomb filters; the glass itself
     # is found from its brushes like any other.
     for key, inst in list(instances.items()):
         if key[0] == "target" and all(e.cls == "filter_activator_class" for e in inst.ents):
             del instances[key]
+    # BEEmod: decoration out, vanilla items under their vanilla kinds (keeping their names).
+    for (kind, idx), inst in list(instances.items()):
+        if kind in BEE_DECOR or kind.startswith("toggle_"):
+            del instances[(kind, idx)]
+        elif kind in BEE_ITEMS and (vanilla := bee_kind(inst, BEE_ITEMS[kind])):
+            if (vanilla, idx) in instances:
+                raise Unsupported(f"{inst.name}: its index clashes with {vanilla}{idx}")
+            del instances[(kind, idx)]
+            inst.kind = vanilla
+            instances[(vanilla, idx)] = inst
     other = sorted({k for k, _ in instances} - ITEMS - DECOR)
     if other:
         raise Unsupported("items: " + ", ".join(other))
@@ -315,16 +384,113 @@ def screen(entities):
     return ents, by_kind
 
 
+def bee_kind(inst, options):
+    """Which of `options` (vanilla kinds) a BEE instance is, from the entities that make each
+    item; None if none fits or it holds a mod's entities."""
+    es = inst.direct()
+    cls = {e.cls for e in es}
+    if cls & BEE_FOREIGN:
+        return None
+
+    def named(suffix, c=None):
+        return any(e.name.endswith(suffix) and (c is None or e.cls == c) for e in es)
+
+    dropper = named("-cube_dropper_model")
+    signs = {
+        "button": bool(cls & (set(FLOOR_BUTTONS) | PEDESTALS)),
+        "cubedropper": dropper,
+        "cube": bool(cls & {"prop_weighted_cube", "prop_monster_box"}) and not dropper,
+        # A laser field is its trigger_hurt alone; with a trigger_catapult it's a mod's field.
+        "barrierhazard": bool(cls & {"trigger_portal_cleanser", "trigger_hurt"}) and "trigger_catapult" not in cls,
+        "laseremit": "env_portal_laser" in cls,
+        "lasercatch": "prop_laser_catcher" in cls,
+        "laserrelay": "prop_laser_relay" in cls,
+        "catapult": "trigger_catapult" in cls,
+        "flipPanel": named("-flipping_panel", "func_door_rotating"),
+        "bridge": "prop_wall_projector" in cls,
+        "tbeam": "prop_tractor_beam" in cls,
+        "turret": "npc_portal_turret_floor" in cls,
+        "paintdropper": bool(cls & {"info_paint_sprayer", "prop_paint_bomb"}),
+        "stairs": named("-brush_step_1", "func_brush"),
+        "angledPanel": named("-model_arms", "prop_dynamic"),
+        "angledClearPanel": named("-model_arms", "prop_dynamic"),
+        "pistonlift": "func_movelinear" in cls,
+    }
+    return next((k for k in options if signs[k]), None)
+
+
+def bee_field_axes(inst, lo, hi, is_open):
+    """(N, A) of a BEE field with no entity to read its rotation from. Its triggers' box is thin
+    across the field's plane; the field spans from wall to wall along N, where its emitter
+    models sit in pairs at the box's two ends (one pair per cell along A; so in every Workshop
+    field, vanilla or BEE, 2026-10-25). Either wall can be the one it's mounted on: N points
+    away from a solid one. A's sign puts N x A on the side of the voxel the plane is on."""
+    models = inst.direct("prop_dynamic", "-mdl")
+    fa = min(range(3), key=lambda a: hi[a] - lo[a])
+    plane = [a for a in range(3) if a != fa]
+    ends = [a for a in plane if models and all(
+        min(abs(m.origin()[a] - lo[a]), abs(m.origin()[a] - hi[a])) <= 24 for m in models)]
+    if len(ends) != 1:
+        raise Unsupported(f"{inst.name}: no entity to read its rotation from")
+    na = ends[0]
+    aa = next(a for a in plane if a != na)
+    mid = [(lo[a] + hi[a]) / 2 for a in range(3)]
+    below = list(mid)
+    below[na] = lo[na] - CELL / 2
+    n = tuple((1 if not is_open(cell_of(below)) else -1) if a == na else 0 for a in range(3))
+    side = 1 if (mid[fa] / CELL) % 1 >= 0.5 else -1
+    for sign in (1, -1):
+        along = tuple(sign if a == aa else 0 for a in range(3))
+        f = tuple(n[(i + 1) % 3] * along[(i + 2) % 3] - n[(i + 2) % 3] * along[(i + 1) % 3] for i in range(3))
+        if f[fa] == side:
+            return n, along
+    raise AssertionError("one of the signs gives f either way")
+
+
+def bee_door_normal(inst, back, front):
+    """A BEE door's normal (into the room), or None for a vanilla one. BEE's doors don't carry
+    the instance's angles (their area portals say 0 90 0 on a door facing +y), but they have an
+    entity behind the door (`back`) and one at the door cell's centre (`front`), as vanilla
+    doors have their elevator's cleanser behind and their area portal or counter in front."""
+    b, f = inst.direct(None, back), inst.direct(None, front)
+    if not b or not f:
+        return None
+    off = [f[0].origin()[a] - b[0].origin()[a] for a in range(3)]
+    a = max(range(3), key=lambda i: abs(off[i]))
+    return tuple((1 if off[a] > 0 else -1) if i == a else 0 for i in range(3))
+
+
+def bee_cube_type(e):
+    """Index in CUBE_KINDS of a BEE cube entity: a prop_monster_box is a Franken cube;
+    CubeType 4 is the antique cube, which plays as a standard one."""
+    if e.cls == "prop_monster_box":
+        return CUBE_KINDS.index("franken")
+    kind = int(e.d.get("CubeType", "0"))
+    return 0 if kind == 4 else kind if kind < 4 else -1
+
+
 def convert(bsp):
     """Tokens for the puzzle in `bsp`, or raise Unsupported."""
     ents, by_kind = screen(bsp.entities())
+    # A BEE instance's targets name it as it is in the map: its kind there, the index it kept.
+    alias = {(m.group(1), i.index): (i.kind, i.index)
+             for insts in by_kind.values() for i in insts
+             if i.name != f"{i.kind}{i.index}" and (m := INSTANCE.fullmatch(i.name))}
 
     # Doors: the entry's area portal and the exit's logic sit in the door's cell.
     entry_i, exit_i = by_kind["doorentry"][0], by_kind["doorexit"][0]
-    entry_n = entry_i.up()
+    entry_n = bee_door_normal(entry_i, "-door_reenter_trig", "-entrance_door_areaportal") or entry_i.up()
     entry = entry_i.anchor_cell(entry_i.one("func_areaportal"), entry_n)
-    exit_n = exit_i.up()
-    exit_c = exit_i.anchor_cell(exit_i.one("math_counter", "-counter"), exit_n)
+    exit_n = bee_door_normal(exit_i, "-fizz", "-close_man") or exit_i.up()
+    # Doors are in walls (every one of 22k Workshop levels); one facing up or down is a BEE door
+    # whose angles we misread.
+    if entry_n[2] or exit_n[2]:
+        raise Unsupported("a door that isn't in a wall")
+    # BEEmod's exit has no counter; its coop manager sits at the cell's centre, as the counter does.
+    exit_logic = exit_i.direct("math_counter", "-counter") or exit_i.direct("logic_coop_manager", "-close_man")
+    if not exit_logic:
+        raise Unsupported(f"{exit_i.name}: no math_counter-counter entity")
+    exit_c = exit_i.anchor_cell(exit_logic[0], exit_n)
 
     # Open cells: flood from the doors and every item, through empty leaves, not out the doors.
     world = World(bsp)
@@ -367,7 +533,9 @@ def convert(bsp):
     item_cells = []
     toks_fields, field_index, field_planes = [], {}, []
     for inst in by_kind["barrierhazard"]:
-        brushes = inst.direct(("trigger_portal_cleanser", "trigger_hurt"), "_brush")
+        # BEEmod's are -brush, -br_fizz and -br_hurt.
+        brushes = inst.direct(("trigger_portal_cleanser", "trigger_hurt"),
+                              ("_brush", "-brush", "-br_fizz", "-br_hurt"))
         kinds = {e.cls for e in brushes}
         if "trigger_portal_cleanser" in kinds:
             kind, cls = "fizzler", "trigger_portal_cleanser"
@@ -376,14 +544,17 @@ def convert(bsp):
         else:
             raise Unsupported(f"{inst.name}: field with no trigger")
         brushes = [e for e in brushes if e.cls == cls]
-        ang = inst.angles()
-        n, along = rotate(ang, (0, 0, 1)), rotate(ang, (0, 1, 0))
-        if n is None or along is None:
-            raise Unsupported(f"{inst.name}: rotation isn't axis-aligned")
-        f = tuple(n[(i + 1) % 3] * along[(i + 2) % 3] - n[(i + 2) % 3] * along[(i + 1) % 3] for i in range(3))
         boxes = [model_box(bsp, e) for e in brushes]
         lo = [min(b[0][a] for b in boxes) for a in range(3)]
         hi = [max(b[1][a] for b in boxes) for a in range(3)]
+        if inst.oriented():
+            ang = inst.angles()
+            n, along = rotate(ang, (0, 0, 1)), rotate(ang, (0, 1, 0))
+            if n is None or along is None:
+                raise Unsupported(f"{inst.name}: rotation isn't axis-aligned")
+        else:
+            n, along = bee_field_axes(inst, lo, hi, is_open)
+        f = tuple(n[(i + 1) % 3] * along[(i + 2) % 3] - n[(i + 2) % 3] * along[(i + 1) % 3] for i in range(3))
         na, aa, fa = axis_of(n), axis_of(along), axis_of(f)
         span = cells_in(lo, hi, aa)
         if not span:
@@ -435,8 +606,25 @@ def convert(bsp):
     for inst in by_kind["cubedropper"]:
         if inst.up() != DOWN:
             raise Unsupported(f"{inst.name}: cube dropper not on a ceiling")
-        cell = inst.anchor_cell(inst.one("env_entity_maker", "-cube_dropper_box_spawner"), DOWN)
-        kind = int(inst.one("math_counter", "-counter_cube_type").d.get("startvalue", "0"))
+        spawner = inst.direct("env_entity_maker", "-cube_dropper_box_spawner")
+        if spawner:
+            cell = inst.anchor_cell(spawner[0], DOWN)
+        else:
+            # BEEmod: no spawner. Older builds hang the same model 38 units under where it
+            # would be; newer ones put the model one or four cells lower, and the cube in the
+            # open cell under the ceiling (143 of 145 droppers, 2026-10-25): that cell, then.
+            model = inst.one("prop_dynamic", "-cube_dropper_model")
+            cell = cell_of(add(model.origin(), UP, 37))
+            for _ in range(MAX_NUM):
+                if not is_open(add(cell, UP)):
+                    break
+                cell = add(cell, UP)
+        counter = inst.direct("math_counter", "-counter_cube_type")
+        if counter:
+            kind = int(counter[0].d.get("startvalue", "0"))
+        else:  # BEEmod: only the cube it drops says
+            boxes = inst.direct("prop_weighted_cube")
+            kind = bee_cube_type(boxes[0]) if boxes else CUBE_KINDS.index("franken")
         if not 0 <= kind < len(CUBE_KINDS):
             raise Unsupported(f"{inst.name}: cube type {kind}")
         # Auto drop off: the dropper only drops when its inputs first come on.
@@ -454,10 +642,16 @@ def convert(bsp):
         for proxy in inst.direct("func_instance_io_proxy", "-proxy"):
             for _, target, input_ in proxy.connections():
                 m = INSTANCE.match(target)
+                if not m and target.startswith("doorexit-"):  # BEEmod's unnumbered exit
+                    m = INSTANCE.match("doorexit0" + target[len("doorexit"):])
                 if not m:
                     raise Unsupported(f"{inst.name}: wired to {target}")
                 kind, idx = m.group(1), int(m.group(2))
-                if kind in ("indicator_panel", "indicator_toggle"):
+                if kind in ("indicator_panel", "indicator_toggle") or kind in BEE_DECOR \
+                        or kind.startswith("toggle_"):
+                    continue
+                kind, idx = alias.get((kind, idx), (kind, idx))
+                if (kind, idx) == (inst.kind, inst.index):  # BEEmod: a pedestal resetting itself
                     continue
                 if kind == "doorexit":
                     t = ("exit",)
@@ -482,8 +676,9 @@ def convert(bsp):
 
     toks_buttons, toks_pedestals = [], []
     for inst in by_kind["button"]:
-        floor = [e for e in inst.direct(set(FLOOR_BUTTONS)) if e.name.endswith("-button")]
-        peds = [e for e in inst.direct(PEDESTALS) if e.name.endswith("-button")]
+        # BEEmod names them -btn (floor) and -output (pedestal) too.
+        floor = [e for e in inst.direct(set(FLOOR_BUTTONS)) if e.name.endswith(("-button", "-btn"))]
+        peds = [e for e in inst.direct(PEDESTALS) if e.name.endswith(("-button", "-output"))]
         if inst.up() != UP and not peds:
             raise Unsupported(f"{inst.name}: button not on a floor")
         if floor:
@@ -852,8 +1047,15 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
 
     rows = []
     for inst in by_kind["cube"]:
-        e = inst.one("prop_weighted_cube", "-cube")
-        kind = int(e.d.get("CubeType", "0"))
+        if inst.name != f"{inst.kind}{inst.index}":  # BEEmod
+            ws = inst.direct(("prop_weighted_cube", "prop_monster_box"), ("-cube", "-box"))
+            if not ws:
+                raise Unsupported(f"{inst.name}: no cube entity")
+            e = ws[0]
+            kind = bee_cube_type(e)
+        else:
+            e = inst.one("prop_weighted_cube", "-cube")
+            kind = int(e.d.get("CubeType", "0"))
         if not 0 <= kind < len(CUBE_KINDS):
             raise Unsupported(f"{inst.name}: cube type {kind}")
         c = cell_of(e.origin())
@@ -862,7 +1064,7 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
     section("cube", rows)
 
     for word, kind, cls, suffix in [("laser", "laseremit", "env_portal_laser", "-laser"),
-                                    ("catcher", "lasercatch", "prop_laser_catcher", "-laser_catcher"),
+                                    ("catcher", "lasercatch", "prop_laser_catcher", ("-laser_catcher", "-catcher")),
                                     ("relay", "laserrelay", "prop_laser_relay", "-relay")]:
         rows = []
         for inst in by_kind[kind]:
@@ -888,10 +1090,10 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
     # so the surface test below can't find it).
     plates_at = {}
     for inst in by_kind["catapult"]:
-        arm = inst.one("prop_dynamic", "-catapult_arm")
+        arm = inst.one("prop_dynamic", ("-catapult_arm", "-arm"))  # BEEmod: -arm
         plates_at[tuple(round(v) for v in arm.origin())] = (inst.anchor_cell(arm, inst.up()), inst.up())
     for inst in by_kind["catapult"]:
-        arm = inst.one("prop_dynamic", "-catapult_arm")
+        arm = inst.one("prop_dynamic", ("-catapult_arm", "-arm"))
         n = inst.up()
         c = inst.anchor_cell(arm, n)
         trig = inst.one("trigger_catapult", "-trigger")

@@ -150,8 +150,18 @@ dropper, glass over a wall, an empty sealed pocket.
 ## What's left out
 
 Rejected with a reason in `fetched.jsonl` / `report.jsonl`:
-- **BEEmod maps** (instance names like `bt`, `cd`, `ip`, `orl`): most recent uploads. BEE2's
-  compiler names things differently and adds its own items; not attempted.
+- **BEEmod maps with BEE's own items** (most recent uploads). Since 2026-10-25 a BEE map of
+  vanilla items converts: its short instance names (`bt`, `cd`, `le`, `fp`, ...) map to
+  vanilla kinds by the entities each holds (`convert.py` `BEE_ITEMS`, `bee_kind`; `ap` can be
+  BEE's autoportal, `fp` a plate or a flip panel), its decoration is dropped (`BEE_DECOR`), and
+  where newer BEE builds leave out an item's logic its rotation comes from its brushes or
+  props, a field's from its triggers and emitters, a door's from the entity behind it, a
+  dropper's cell from the ceiling over its model. Still rejected: BEE's own items (`tr`
+  trigger, `dr` door, `lg` logic gate, `chdr`, `pgun`, autoportals, custom fizzlers, its
+  pistons), 1-second pedestal timers, BEE gel droppers (gel picked at run time), custom
+  entrances. Of the ~20k BEE maps `download` ruled out, only ~830 have nothing but vanilla
+  item names; `download --rescreen` fetches those. A sample of 150 of them: 34 converted, 13%
+  of those `invalid` with editor rules off (vanilla Workshop: 16%).
 - Items the tokens can't express: pedestal and floor buttons off the floor, wall-mounted gel
   droppers and stairs, cube types past franken. (Turrets facing between multiples of 45° are
   rounded to the nearest.)

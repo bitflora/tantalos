@@ -355,7 +355,15 @@ def cmd_download(a):
         for l in open(log_path, encoding="utf-8"):
             r = json.loads(l)
             done[r["id"]] = r["status"]
-    todo = [it for it in items if it["id"] not in done or (a.retry_errors and done[it["id"]] == "error")]
+    reasons = {}
+    if a.rescreen and log_path.exists():
+        for l in open(log_path, encoding="utf-8"):
+            r = json.loads(l)
+            reasons[r["id"]] = r.get("reason", "")
+    todo = [it for it in items if it["id"] not in done or (a.retry_errors and done[it["id"]] == "error")
+            # --rescreen: maps the entity lump ruled out by their items, which the converter may
+            # read now (BEEmod maps of vanilla items, since 2026-10-25)
+            or (a.rescreen and done[it["id"]] == "unsupported" and reasons[it["id"]].startswith("items: "))]
     todo = list({it["id"]: it for it in todo}.values())[:a.max or None]
     print(f"{len(todo)} to fetch ({len(done)} already done)", file=sys.stderr)
     counts, total_bytes = {}, 0
@@ -541,6 +549,8 @@ def main():
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--max", type=int, default=0)
     p.add_argument("--retry-errors", action="store_true")
+    p.add_argument("--rescreen", action="store_true",
+                   help="also retry maps ruled out by their items (screen-time 'items: ...')")
     p = sub.add_parser("build", help="convert and score the downloaded maps")
     p.add_argument("--glados", default=str(ROOT / "target" / "release" / ("glados-score.exe" if sys.platform == "win32" else "glados-score")))
     p.add_argument("--budget", type=int, default=50_000)
