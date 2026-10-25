@@ -15,6 +15,7 @@
 //! A local browser viewer for the solutions you have saved (`view`), and one for triaging the
 //! downloaded Workshop levels (`workbench`).
 
+pub mod augment;
 pub mod builder;
 pub mod cli;
 pub mod dataset;

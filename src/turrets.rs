@@ -70,6 +70,13 @@ fn clear_line(level: &Level, a: [f64; 3], b: [f64; 3], grating_blocks: bool) -> 
     for k in 1..=n {
         let t = k as f64 / n as f64;
         let p: [f64; 3] = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
+        // A sample on a cell boundary (or within rounding of one) is in the cell above it,
+        // so a line through a corner was checked through one side cell or the other depending
+        // on which way round the level was built. Skip it: the crossing is then taken between
+        // the samples either side, and either order of its steps counts.
+        if k < n && p.iter().any(|&x| (x - x.round()).abs() < 1e-9) {
+            continue;
+        }
         let next = cell_of(p);
         if next == cur {
             continue;

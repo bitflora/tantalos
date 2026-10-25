@@ -220,6 +220,8 @@ def start(a):
         train += ["--init", str(init)]
     if solve:
         train += ["--task", "solve"]
+    else:
+        train += holdout_args(data)
     train += a.extra
     if solve:
         tests = data[0].parent if (data[0].parent / "test-gen.jsonl").exists() else PLANS.parent
@@ -273,6 +275,16 @@ SOLVE_STEPS = ("training", "evaluating")  # a solver-net run's
 PLANS = ROOT / "data" / "plans" / "train.jsonl"  # its training data (train/plans.py)
 INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
 HUMAN = ROOT / "data" / "ingame" / "human-unsolvable.jsonl"  # passed our solver, unsolvable in play
+# Workshop levels no level run trains on: their loss (train.py --holdout) shows overfitting to
+# the Workshop part, which the val loss can't (its x20 copies fall in both train and val).
+WS_TEST = ROOT / "data" / "ws5" / "test.jsonl"
+
+
+def holdout_args(data):
+    """train.py's --holdout for a level run on `data` (none if the file is missing or trained on)."""
+    if not WS_TEST.exists() or WS_TEST.resolve() in {Path(p).resolve() for p in data}:
+        return []
+    return ["--holdout", str(WS_TEST)]
 AWAY_MINUTES, AWAY_REPEAT, AWAY_WORSE = 15, 5, 0.03  # as runs/v5-away-invalid
 QUICK_LR = ("1e-4", "1e-5", "100")  # --quick: 30-minute warm starts at 1e-4 matched; 2e-4 diverged
 QUICK_WORSE = {"levels": 0.03, "solve": 0.05}  # --quick's guard against its parent
@@ -324,6 +336,7 @@ def away_train(d, s):
         "--out", str(d / "away"), "--init", str(d / "best.pt"), "--block", "1024", "--batch", "16",
         "--eval-every", "1000", "--score-n", "64", "--lr", "2e-4", "--min-lr", "2e-5", "--warmup", "200",
         "--note", f"{name} trained away from the levels Portal 2 rejected or play-testers couldn't solve ({AWAY_MINUTES} min, x{AWAY_REPEAT})",
+        *holdout_args(s["data"]),
         *s.get("extra", []),
     ]
 
@@ -507,6 +520,10 @@ def describe(d):
         e = entries[-1]
         best = min(x["val_loss"] for x in entries)
         line = f"  step {e['step']}: val loss {e['val_loss']:.4f} (best {best:.4f}, lower is better)"
+        held = [x["holdout_loss"] for x in entries if "holdout_loss" in x]
+        if held:
+            line += (f"; Workshop test loss {held[-1]:.4f} (best {min(held):.4f}; held-out Workshop "
+                     f"levels, lower is better; rising while val falls = memorizing)")
         if e.get("samples"):
             line += f"; samples {e['samples']['parsed']:.0%} parse, {e['samples']['solvable']:.0%} solvable"
         if e.get("solve"):
@@ -661,7 +678,7 @@ def list_runs(a):
     if solve:  # solved%: EVAL solved % (greedy, test-gen), the main score; pass: pass@8
         print(f"{'run':32} {'started':16} {'min':>4} {'solved%':>7} {'pass':>5} {'ws%':>5} {'val':>6}  from / notes")
     else:
-        print(f"{'run':32} {'started':16} {'min':>4} {'solv%':>5} {'val':>6}  from / notes")
+        print(f"{'run':32} {'started':16} {'min':>4} {'solv%':>5} {'val':>6} {'ws':>6}  from / notes")
     for r in rows:
         notes = (r["init"] + " | " if r["init"] else "") + r["notes"]
         if solve:
@@ -669,7 +686,7 @@ def list_runs(a):
                   f"{r['eval_pass_at_k'] or '-':>5} {r['ws_solved'] or '-':>5} {r['best_val'] or '-':>6}  {notes[:80]}")
         else:
             print(f"{r['run'][:32]:32} {r['started']:16} {r['minutes']:>4} {r['eval_solvable'] or '-':>5} "
-                  f"{r['best_val'] or '-':>6}  {notes[:90]}")
+                  f"{r['best_val'] or '-':>6} {r.get('holdout_final') or '-':>6}  {notes[:82]}")
     live = running()
     if live:
         print(f"\nrunning now: runs/{name_of(live[0][0])}")

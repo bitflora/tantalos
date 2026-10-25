@@ -65,6 +65,10 @@ pub enum Bit {
     /// `Level::projectors[i]` on, a portal on the face its path ends at, and the other on a
     /// face of route `route` (index into `Devices::routes[i]`).
     Routed { projector: usize, route: usize },
+    /// Any of the bits in `on` on, or any in `off` off: the condition of a cell or face two
+    /// devices (or two routes of a bridge) make a floor or a wall, which a conjunction can't
+    /// write (`Cond` is one).
+    Any { on: u64, off: u64 },
 }
 
 /// A projection's straight path.
@@ -157,22 +161,30 @@ impl Devices {
         let mut rides: HashMap<Cell, Cell> = HashMap::new();
         let mut pushes: HashMap<Cell, Cell> = HashMap::new();
         let mut incomplete = false;
-        // Two devices making one cell standable under different conditions can't be written
-        // as one condition: the first wins.
-        fn claim(stand: &mut HashMap<Cell, Cond>, incomplete: &mut bool, c: Cell, cond: Cond) {
-            match stand.entry(c) {
-                std::collections::hash_map::Entry::Occupied(_) => *incomplete = true,
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(cond);
-                }
-            }
+        // Every device's claim to make a cell standable, or a face a wall, under a condition.
+        // Until they're settled at the end (`settle`), the first counts (the funnels below see
+        // that).
+        let mut stand_claims: Vec<(Cell, Cond)> = Vec::new();
+        let mut block_claims: Vec<((Cell, usize), Cond)> = Vec::new();
+        fn claim(stand: &mut HashMap<Cell, Cond>, claims: &mut Vec<(Cell, Cond)>, c: Cell, cond: Cond) {
+            claims.push((c, cond));
+            stand.entry(c).or_insert(cond);
+        }
+        fn block(
+            blocks: &mut HashMap<(Cell, usize), Cond>,
+            claims: &mut Vec<((Cell, usize), Cond)>,
+            k: (Cell, usize),
+            cond: Cond,
+        ) {
+            claims.push((k, cond));
+            blocks.entry(k).or_insert(cond);
         }
 
         for (s, &b) in level.stairs.iter().zip(&d.stairs_bit) {
             for c in [s.cell, step(s.cell, s.dir)] {
                 for side in Dir::HORIZONTAL {
                     if side.axis() != s.dir.axis() {
-                        blocks.entry(face_key(c, side)).or_insert(Cond::on(b));
+                        block(&mut blocks, &mut block_claims, face_key(c, side), Cond::on(b));
                     }
                 }
             }
@@ -202,7 +214,7 @@ impl Devices {
             let (c, h) = (p.cell, p.hinge());
             match (p.normal, p.angle) {
                 (Dir::PosZ, 45 | 60) if level.standable(c) => {
-                    claim(&mut stand, &mut incomplete, c, Cond::off(b));
+                    claim(&mut stand, &mut stand_claims, c, Cond::off(b));
                     let away = [p.tilt, h]
                         .into_iter()
                         .chain(Dir::HORIZONTAL)
@@ -216,11 +228,11 @@ impl Devices {
                     // Lying flat on its hinge edge: a floor, for this cell or the one above.
                     let f = if h == Dir::NegZ { c } else { step(c, Dir::PosZ) };
                     if !level.standable(f) && !level.solid(f) && !level.goo(f) {
-                        claim(&mut stand, &mut incomplete, f, Cond::on(b));
+                        claim(&mut stand, &mut stand_claims, f, Cond::on(b));
                     }
                 }
                 (_, 90) => {
-                    blocks.insert(face_key(c, h), Cond::on(b));
+                    block(&mut blocks, &mut block_claims, face_key(c, h), Cond::on(b));
                 }
                 _ => {}
             }
@@ -228,8 +240,8 @@ impl Devices {
         for (p, &b) in level.pistons.iter().zip(&d.piston_bit) {
             if p.normal == Dir::PosZ {
                 let (lo, hi) = (p.stand(false), p.stand(true));
-                claim(&mut stand, &mut incomplete, lo, Cond::off(b));
-                claim(&mut stand, &mut incomplete, hi, Cond::on(b));
+                claim(&mut stand, &mut stand_claims, lo, Cond::off(b));
+                claim(&mut stand, &mut stand_claims, hi, Cond::on(b));
                 rides.insert(lo, hi);
                 rides.insert(hi, lo);
                 continue;
@@ -242,11 +254,11 @@ impl Devices {
                     pushes.insert(c, past);
                 }
                 if level.standable(c) {
-                    claim(&mut stand, &mut incomplete, c, Cond::off(b));
+                    claim(&mut stand, &mut stand_claims, c, Cond::off(b));
                 }
                 let over = step(c, Dir::PosZ);
                 if p.normal.axis() != 2 && !level.solid(over) && !level.standable(over) {
-                    claim(&mut stand, &mut incomplete, over, Cond::on(b));
+                    claim(&mut stand, &mut stand_claims, over, Cond::on(b));
                 }
             }
             if p.bottom > 0 {
@@ -263,7 +275,7 @@ impl Devices {
                     }
                     for (c, cond) in [(first, Cond::off(b)), (last, Cond::on(b))] {
                         if !level.solid(c) && !level.standable(c) {
-                            claim(&mut stand, &mut incomplete, c, cond);
+                            claim(&mut stand, &mut stand_claims, c, cond);
                         }
                     }
                     rides.insert(first, last);
@@ -272,7 +284,7 @@ impl Devices {
                 None => {
                     for &c in &track {
                         if !level.solid(c) && !level.standable(c) && !level.goo(c) {
-                            claim(&mut stand, &mut incomplete, c, Cond::ALWAYS);
+                            claim(&mut stand, &mut stand_claims, c, Cond::ALWAYS);
                         }
                     }
                     for w in track.windows(2) {
@@ -299,13 +311,13 @@ impl Devices {
                     for &c in &path.cells {
                         let f = bridge_floor(c, p.side);
                         if !level.solid(f) && !level.standable(f) && !level.goo(f) {
-                            claim(&mut stand, &mut incomplete, f, Cond::on(b));
+                            claim(&mut stand, &mut stand_claims, f, Cond::on(b));
                         }
                     }
                 }
                 ProjectorKind::Bridge => {
                     for &c in &path.cells {
-                        blocks.insert(face_key(c, p.side), Cond::on(b));
+                        block(&mut blocks, &mut block_claims, face_key(c, p.side), Cond::on(b));
                     }
                 }
                 ProjectorKind::Funnel => {
@@ -324,7 +336,17 @@ impl Devices {
                 }
             }
         }
-        // Bridges through portals.
+        // Bridges through portals: each portal face a bridge can come out of, grouped into
+        // routes by the cells it is the floor of. Nothing here may depend on which way round the
+        // level was built (claimed route by route in coordinate order, the first route took a
+        // shared cell; with bits short, the first routes, or the first bridge's, got them):
+        // routes of all bridges go in one order by how many faces and cells they have and how
+        // far those are from their projector, routes alike in all of that get bits together or
+        // not at all, and so do the cells several routes cross (`RoutedAny`, a floor while any
+        // of them is on). A cell routes of two bridges cross isn't claimed: no one condition says
+        // which bridge is there.
+        type Group = (usize, Vec<Cell>, Vec<Face>);
+        let mut all: Vec<Group> = Vec::new();
         for (i, p) in level.projectors.iter().enumerate() {
             let Some(end) = d.paths[i].end else { continue };
             if p.kind != ProjectorKind::Bridge {
@@ -350,22 +372,142 @@ impl Devices {
                     groups.entry(new).or_default().push(f);
                 }
             }
-            for (cells, faces) in groups {
-                if d.bits.len() == MAX_BITS {
-                    incomplete = true;
-                    break;
+            all.extend(groups.into_iter().map(|(cells, faces)| (i, cells, faces)));
+        }
+        let key = |(i, cells, faces): &Group| {
+            let origin = level.projectors[*i].cell;
+            let dist = |c: &Cell| (0..3).map(|a| (c[a] - origin[a]).abs()).sum::<i32>();
+            (
+                std::cmp::Reverse(faces.len()),
+                std::cmp::Reverse(cells.len()),
+                cells.iter().map(dist).sum::<i32>(),
+                faces.iter().map(|f| dist(&f.0)).sum::<i32>(),
+            )
+        };
+        all.sort_by_key(key);
+        // Per cell: the projector whose routes (of `chosen`, by position) cross it, or `None`
+        // if two projectors' do.
+        fn cover(all: &[Group], chosen: &[usize]) -> BTreeMap<Cell, Option<(usize, u64)>> {
+            let mut covered: BTreeMap<Cell, Option<(usize, u64)>> = BTreeMap::new();
+            for (k, &g) in chosen.iter().enumerate() {
+                let (i, cells, _) = &all[g];
+                for &c in cells {
+                    let e = covered.entry(c).or_insert(Some((*i, 0)));
+                    *e = match *e {
+                        Some((j, m)) if j == *i => Some((j, m | 1 << k)),
+                        _ => None,
+                    };
                 }
-                let route = d.routes[i].len();
+            }
+            covered
+        }
+        let shared = |covered: &BTreeMap<Cell, Option<(usize, u64)>>| {
+            let sets: std::collections::BTreeSet<u64> = covered
+                .values()
+                .flatten()
+                .map(|&(_, m)| m)
+                .filter(|m| m.count_ones() > 1)
+                .collect();
+            sets
+        };
+        // Routes alike go in together, if their bits and the shared cells' fit; else on to the
+        // next.
+        let mut chosen: Vec<usize> = Vec::new();
+        let mut k = 0;
+        while k < all.len() {
+            let tied = all[k..].iter().take_while(|g| key(g) == key(&all[k])).count();
+            let with: Vec<usize> = chosen.iter().copied().chain(k..k + tied).collect();
+            if d.bits.len() + with.len() + shared(&cover(&all, &with)).len() <= MAX_BITS {
+                chosen = with;
+            } else {
+                incomplete = true;
+            }
+            k += tied;
+        }
+        let covered = cover(&all, &chosen);
+        // Each chosen route's bit.
+        let route_bit: Vec<usize> = chosen
+            .iter()
+            .map(|&g| {
+                let (i, _, faces) = &all[g];
+                let route = d.routes[*i].len();
                 let b = d.bit(Bit::Routed {
-                    projector: i,
+                    projector: *i,
                     route,
                 });
-                for c in cells {
-                    claim(&mut stand, &mut incomplete, c, Cond::on(b));
+                d.routes[*i].push(Route {
+                    bit: b,
+                    faces: faces.clone(),
+                });
+                b
+            })
+            .collect();
+        let mut any_bit: BTreeMap<u64, usize> = BTreeMap::new();
+        for m in shared(&covered) {
+            let on = (0..chosen.len()).filter(|&k| m >> k & 1 == 1).fold(0, |a, k| a | 1 << route_bit[k]);
+            let b = d.bit(Bit::Any { on, off: 0 });
+            any_bit.insert(m, b);
+        }
+        for (c, cover) in covered {
+            let b = match cover {
+                None => {
+                    incomplete = true;
+                    continue;
                 }
-                d.routes[i].push(Route { bit: b, faces });
+                Some((_, m)) if m.count_ones() == 1 => route_bit[m.trailing_zeros() as usize],
+                Some((_, m)) => any_bit[&m],
+            };
+            claim(&mut stand, &mut stand_claims, c, Cond::on(b));
+        }
+        // Settle the claims: a cell or face more than one device claims is a floor or wall while
+        // any of them makes it one (a new bit, `Bit::Any`), and the same for all of them (the
+        // first claim used to win, so the item order, which is coordinate order, decided it).
+        // Claims that aren't one bit on or off each, or bits short for all the new ones: the
+        // first claim, and the model is incomplete.
+        let any_of = |conds: &[Cond]| -> Option<(u64, u64)> {
+            let literal = |c: &Cond| c.on.count_ones() + c.off.count_ones() == 1;
+            conds.iter().all(literal).then(|| conds.iter().fold((0, 0), |(on, off), c| (on | c.on, off | c.off)))
+        };
+        fn grouped<K: Ord + Copy>(claims: &[(K, Cond)]) -> BTreeMap<K, Vec<Cond>> {
+            let mut out: BTreeMap<K, Vec<Cond>> = BTreeMap::new();
+            for &(k, c) in claims {
+                let v = out.entry(k).or_default();
+                if !v.contains(&c) {
+                    v.push(c);
+                }
+            }
+            out
+        }
+        let (stands, walls) = (grouped(&stand_claims), grouped(&block_claims));
+        let needed: std::collections::BTreeSet<(u64, u64)> = stands
+            .values()
+            .chain(walls.values())
+            .filter(|v| v.len() > 1 && !v.contains(&Cond::ALWAYS))
+            .filter_map(|v| any_of(v))
+            .collect();
+        let mut any_bit: BTreeMap<(u64, u64), usize> = BTreeMap::new();
+        if d.bits.len() + needed.len() <= MAX_BITS {
+            for (on, off) in needed {
+                any_bit.insert((on, off), d.bit(Bit::Any { on, off }));
             }
         }
+        let mut settle = |v: &Vec<Cond>| -> Cond {
+            if v.len() == 1 {
+                return v[0];
+            }
+            if v.contains(&Cond::ALWAYS) {
+                return Cond::ALWAYS;
+            }
+            match any_of(v).and_then(|m| any_bit.get(&m)) {
+                Some(&b) => Cond::on(b),
+                None => {
+                    incomplete = true;
+                    v[0]
+                }
+            }
+        };
+        let stand: HashMap<Cell, Cond> = stands.iter().map(|(&c, v)| (c, settle(v))).collect();
+        let blocks: HashMap<(Cell, usize), Cond> = walls.iter().map(|(&k, v)| (k, settle(v))).collect();
         d.dyn_ = Dyn {
             stand,
             blocks,

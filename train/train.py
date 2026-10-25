@@ -97,6 +97,15 @@ def main():
         help="levels sampled and scored per eval; with --task solve, validation levels whose "
         "greedy plans `glados-score check` replays (0: off)",
     )
+    ap.add_argument(
+        "--holdout",
+        default=None,
+        help="levels never trained on (run.py: data/ws5/test.jsonl, the held-out Workshop levels): "
+        "each eval logs their loss as holdout_loss. The val split can't show overfitting to the "
+        "Workshop part, whose x20 copies fall in both train and val",
+    )
+    ap.add_argument("--holdout-n", type=int, default=256,
+                    help="how many of them, the same ones at every eval, under their full conditions")
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
     ap.add_argument(
         "--gpu-mem",
@@ -172,6 +181,13 @@ def main():
             f"data: {len(train)} train, {len(val)} val, {skipped} too long for block {args.block}; "
             f"vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s"
         )
+    holdout = None
+    if args.holdout and not solve:
+        if Path(args.holdout).resolve() in {Path(p).resolve() for p in args.data}:
+            sys.exit(f"--holdout {args.holdout} is also in --data: it wouldn't be held out")
+        _, holdout, _ = load([args.holdout], vocab, args.block, val_share=1.0)
+        holdout_picks = random.Random(args.seed).sample(range(len(holdout)), min(args.holdout_n, len(holdout)))
+        print(f"holdout: {len(holdout_picks)} of the {len(holdout)} levels in {args.holdout}")
 
     away = Away(args.away, vocab, args.block) if args.away else None
     if away is not None:
@@ -258,6 +274,19 @@ def main():
         model.train()
         return sum(losses) / len(losses)
 
+    @torch.no_grad()
+    def holdout_loss():
+        """Mean loss per target over the held-out picks, every condition given (drop 0)."""
+        model.eval()
+        total = count = 0
+        for i in range(0, len(holdout_picks), args.batch):
+            x, y, n = holdout.batch(holdout_picks[i : i + args.batch], 0.0, device)
+            with amp:
+                total += model(x, y)[1].item() * n
+            count += n
+        model.train()
+        return total / max(count, 1)
+
     def checkpoint(path, val_loss):
         torch.save(
             {
@@ -324,6 +353,8 @@ def main():
         if step % args.eval_every == 0 or done:
             val_loss = evaluate()
             entry = {"step": step, "train_loss": loss.item(), "val_loss": val_loss}
+            if holdout is not None:
+                entry["holdout_loss"] = holdout_loss()
             if args.score_n and solve:
                 model.eval()
                 levels = [" ".join(vocab.decode(val.level(i))) for i in solve_picks]
@@ -370,6 +401,8 @@ def main():
                           f"{v['parsed']:.0%} parse")
             if "gpu_gb" in entry:
                 extra += f"  gpu {entry['gpu_gb']:.1f} GB"
+            if "holdout_loss" in entry:
+                extra = f"  holdout {entry['holdout_loss']:.4f}" + extra
             print(f"== step {step}: val {val_loss:.4f}{' (best)' if improved else ''}{extra}")
             t0, tokens = time.time(), 0
         if done:

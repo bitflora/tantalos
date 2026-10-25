@@ -54,6 +54,8 @@ FIELDS = [
     "eval_parsed",
     "eval_solvable",
     "eval_invalid",
+    "holdout_best",
+    "holdout_final",
     "ingame_checked",
     "game_valid_of_passed",
     "game_valid_of_solvable",
@@ -201,6 +203,10 @@ def measure(run):
         row["steps"] = entries[-1]["step"]
         row["best_val"] = f"{min(e['val_loss'] for e in entries):.4f}"
         row["final_val"] = f"{entries[-1]['val_loss']:.4f}"
+        held = [e["holdout_loss"] for e in entries if "holdout_loss" in e]
+        if held:  # loss on held-out Workshop levels (train.py --holdout)
+            row["holdout_best"] = f"{min(held):.4f}"
+            row["holdout_final"] = f"{held[-1]:.4f}"
         s = entries[-1].get("samples")
         if s:
             row["train_parsed"] = pct(s["parsed"])

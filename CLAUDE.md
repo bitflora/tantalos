@@ -61,8 +61,13 @@ There is no `glados.exe` any more.
 
 Reading results: the main score is **EVAL solvable %** (share of sampled levels our solver can
 solve; higher is better). Differences under about 10 points are noise. Val loss: lower is
-better, but only comparable between runs on the same data. A run that FAILED or DIED shows the
-last lines of its log; report them, don't retry blindly.
+better, but only comparable between runs on the same data. **Workshop test loss** (`ws` in
+`list`, `holdout_*` in runs.csv): loss on 256 held-out Workshop levels (data/ws5/test.jsonl);
+lower is better. Val loss can't show overfitting to the Workshop part (its x20 copies are in both
+train and val); this can. If it rises while val loss falls, the model is memorizing Workshop
+levels: report that. (2026-10-25: v5-cont-10h-d scored ~1.59 here against 0.24 on the Workshop
+levels it trained on.) A run that FAILED or DIED shows the last lines of its log; report them,
+don't retry blindly.
 
 Self-training: `train/harvest.py CHECKPOINT --n N` samples levels and keeps the solvable,
 portal-requiring, novel ones in `data/harvest/RUN.jsonl`; train on them by adding that file to

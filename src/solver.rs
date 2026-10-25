@@ -462,6 +462,9 @@ enum BitRule {
         projector: usize,
         route: usize,
     },
+    /// Any of the bits in `on` is on or any in `off` is off (`dynamics::Bit::Any`): worked out
+    /// after the others, in bit order.
+    Any { on: u64, off: u64 },
 }
 
 /// A cube that waits in its dropper until the dropper's inputs are first on, or (`redrops`)
@@ -620,6 +623,8 @@ pub struct Model {
     pub devices: Devices,
     /// Per switch, the device bits that are on only while it is (`BitRule`).
     switch_bits: Vec<u64>,
+    /// The bits of `BitRule::Any` (bit, on, off), in bit order.
+    any_bits: Vec<(usize, u64, u64)>,
     /// The bits of `BitRule::Routed`, on only while the portals carry their route too.
     routed: u64,
     /// Per face class, the routed bits whose projector's path ends there (`FaceClass::ends`)
@@ -931,7 +936,19 @@ impl Model {
                     None
                 }
                 Some(d) => {
-                    let r = graph.region_of(d.cell);
+                    // An entry door onto a faith plate: whoever comes in is launched at once,
+                    // so they start where it lands them (Workshop 2026-10-25, ws5 sample 341).
+                    let launched = || {
+                        geo.falls(d.cell)
+                            .into_iter()
+                            .find(|f| f.plate.is_some() && f.cond.is_always())
+                            .and_then(|f| graph.region_of(f.cell))
+                    };
+                    let r = graph.region_of(d.cell).or_else(|| {
+                        (kind == ItemKind::EntryDoor && level.plate_at(d.cell).is_some())
+                            .then(launched)
+                            .flatten()
+                    });
                     if r.is_none() {
                         problems.push(Problem::Invalid(format!(
                             "{name} door at {:?} has no floor to stand on",
@@ -1065,12 +1082,16 @@ impl Model {
             }
         }
         for (b, bit) in devices.bits.iter().enumerate() {
-            if let Bit::Routed { projector, route } = *bit {
-                bit_rules[b] = BitRule::Routed {
-                    switch: projector_switch[projector],
-                    projector,
-                    route,
-                };
+            match *bit {
+                Bit::Routed { projector, route } => {
+                    bit_rules[b] = BitRule::Routed {
+                        switch: projector_switch[projector],
+                        projector,
+                        route,
+                    };
+                }
+                Bit::Any { on, off } => bit_rules[b] = BitRule::Any { on, off },
+                _ => {}
             }
         }
         let mut emitter_switch = Vec::new();
@@ -1797,12 +1818,14 @@ impl Model {
             || !redrops.is_empty()
             || !auto_drops.is_empty();
         let mut switch_bits = vec![0u64; switches.len()];
+        let mut any_bits = Vec::new();
         let mut routed = 0u64;
         let mut class_ends = vec![0u64; portals.classes.len()];
         let mut class_routes = vec![0u64; portals.classes.len()];
         for (b, rule) in bit_rules.iter().enumerate() {
             match *rule {
                 BitRule::Switch(sw) => switch_bits[sw] |= 1 << b,
+                BitRule::Any { on, off } => any_bits.push((b, on, off)),
                 BitRule::Routed {
                     switch,
                     projector,
@@ -2005,6 +2028,7 @@ impl Model {
             button_sight,
             devices,
             switch_bits,
+            any_bits,
             routed,
             class_ends,
             class_routes,
@@ -2714,6 +2738,11 @@ impl Model {
                 _ => 0,
             };
             dev &= !self.routed | through;
+        }
+        for &(b, on, off) in &self.any_bits {
+            if dev & on != 0 || !dev & off != 0 {
+                dev |= 1 << b;
+            }
         }
         dev
     }

@@ -532,6 +532,47 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   voxel's floor at nominal speed, so close), and from there it lands on the floor in front of
   the player: a floor portal drops them out under the stream. Conservative-solvable.
 
+## Orientation: the same level turned or mirrored (2026-10-25)
+
+`glados-data augment --check` labels each of a level's 8 mirrored/turned versions
+(`src/augment.rs`, which checks that each is the level moved cell for cell). On 600 ws5 train
+levels 99.1% of versions got the original's verdict, plan length and editor flags; the rest
+showed the solver depending on which way round a level was built:
+
+- **Bridges through portals** (`dynamics.rs`, `Devices::build`). A light bridge coming out of
+  a portal gets a route (a device bit) per group of portal faces that put it over the same
+  cells. Routes claimed their cells one after another in coordinate order, and a cell two
+  routes cross went to the first: the others were short there. With more routes than device
+  bits, the first routes in coordinate order (and the first bridge's) got the bits. Sample line
+  221: 14 steps as built, 10 turned 90°, with a plan step that doesn't ground. Now routes of all
+  bridges go in an order that doesn't depend on orientation (faces, cells, distances to the
+  projector), a tie group at a time, a group only if its bits and its shared cells' fit; a cell
+  routes of one bridge cross is a floor while any of them is on; one two bridges' routes cross
+  isn't claimed.
+- **Any two devices on one cell or face** (same function). Every floor (`stand`) or wall
+  (`blocks`) a device made went to the first device in item order (coordinate order), or for
+  some walls the last. Now every claim is kept and settled at the end: one condition stays, an
+  always wins, and several one-bit conditions become a new bit that is on while any of them
+  holds (`Bit::Any`, worked out after the others in `device_bits`); only conditions of more than
+  one bit, or bits short for all of them, keep the first claim and mark the model incomplete.
+- **An entry door onto a faith plate** (`solver.rs`, `region_of_door`): the door's cell
+  launches whoever enters, so it is no region, and the level was "invalid" unless a bridge
+  route happened to claim the cell. Now the player starts where the plate lands them. (Sample
+  341 then solves in 4 steps whose last, a fall back into a portal moving the other one, doesn't
+  ground: the mid-fall portal move, not orientation.)
+- **Turret lines of sight through a voxel corner** (`turrets.rs`, `clear_line`): a sample landing
+  exactly on a corner (`floor`) was put in the cell above it on each axis, so the line was
+  checked past one side cell or the other depending on the orientation. Such samples are now
+  skipped, so the crossing is taken as one move on two axes, either order. Sample 582: 8 steps
+  in six orientations, 9 in two.
+
+On the 600: versions whose label differs from their level's 18 → 2 (one level, solved at 50k in
+some orientations and out of budget in others; all solve in 11 at 500k). 18 of the 600 levels'
+own labels changed: 4 uncertain → solvable, 14 uncertain → unsolvable (their models were
+incomplete only because of the first-wins claims, and an incomplete model never says
+unsolvable). Left: search order near the budget, and claims that stay first-wins as above.
+Tests: `tests/augment.rs` (`bridge_routes_and_doors_dont_depend_on_orientation`, `turret_sight_doesnt_depend_on_orientation`).
+
 ## Recommended order
 
 1. ~~**Angled laser beams**~~: done (above), ~5% of unsolvable levels rather than the 9% the
