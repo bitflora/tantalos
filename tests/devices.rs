@@ -109,6 +109,18 @@ fn funnel_lifts_to_the_ledge() {
 }
 
 #[test]
+fn reversed_funnel_pulls_up_to_the_ledge() {
+    let plan = plan(&fixtures::funnel_pull());
+    assert!(matches!(plan.first(), Some(Action::PickUp { .. })), "{plan:?}");
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: Move::Funnel, .. })), "{plan:?}");
+    // Without the polarity wire the funnel only pushes down.
+    let tokens = encode(&fixtures::funnel_pull()).unwrap().join(" ");
+    assert!(tokens.contains(" > polarity 0"), "{tokens}");
+    let tokens = tokens.replace(" > polarity 0", "");
+    unsolvable(&decode(&tokens).unwrap());
+}
+
+#[test]
 fn stairs_need_their_button() {
     let plan = plan(&fixtures::stairs_button());
     assert!(matches!(

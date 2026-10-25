@@ -430,6 +430,21 @@ pub fn funnel_lift() -> Puzzle {
     b.build()
 }
 
+/// The same ledge, but the funnel hangs from the ceiling pushing down; a cube on the button
+/// reverses it (a polarity wire), and pulling up it lifts you. As in Workshop "Traverse".
+pub fn funnel_pull() -> Puzzle {
+    let mut b = Builder::new("Funnel pull", [7, 3, 7]);
+    b.carve([0, 0, 1], [6, 2, 6]);
+    b.fill([4, 0, 1], [6, 2, 3]);
+    b.entry([0, 1, 1], Dir::PosX);
+    b.exit([6, 1, 4], Dir::NegX);
+    let funnel = b.funnel([3, 1, 6], Dir::NegZ, true, false);
+    let button = b.floor_button([1, 2, 1]);
+    b.connect_polarity(button, funnel);
+    b.cube_dropper([1, 0, 6]);
+    b.build()
+}
+
 /// A one-voxel ledge; stairs in front of it, retracted until a cube sits on the button.
 pub fn stairs_button() -> Puzzle {
     let mut b = Builder::new("Stairs button", [8, 4, 5]);
@@ -552,6 +567,7 @@ pub fn all() -> Vec<(&'static str, Puzzle)> {
         ("switched_bridge", light_bridge(true)),
         ("bridge_portal", bridge_portal()),
         ("funnel_lift", funnel_lift()),
+        ("funnel_pull", funnel_pull()),
         ("stairs_button", stairs_button()),
         ("piston_bridge", piston_bridge()),
         ("rail_ferry", rail_ferry()),

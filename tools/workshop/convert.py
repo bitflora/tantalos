@@ -467,7 +467,9 @@ def convert(bsp):
                     t = ("gel", gel_index[idx])
                 elif kind == "cubedropper" and idx in dropper_index:
                     t = ("dropper", dropper_index[idx])
-                elif kind == "tbeam" and input_ in ("ProxyRelay3", "ProxyRelay4") \
+                # A sender's proxy fires the funnel proxy's OnProxyRelayN, its inputs 3/4 the
+                # polarity counter (Traverse, 68461575: a button that pulls instead of pushes).
+                elif kind == "tbeam" and input_ in ("OnProxyRelay3", "OnProxyRelay4") \
                         and (kind, idx) in later["targets"]:
                     t = ("polarity", later["targets"][(kind, idx)][1])
                 elif (kind, idx) in later["targets"]:
