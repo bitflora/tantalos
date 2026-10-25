@@ -91,8 +91,14 @@
   .detail-head h2 { margin:0; font-size:17px; line-height:1.3; overflow-wrap:anywhere; }
   .detail-head .sub { color:var(--dim); font-size:11px; margin-top:3px; display:flex;
     flex-wrap:wrap; gap:5px 10px; align-items:center; }
-  .detail-head .nav { display:flex; gap:4px; flex:0 0 auto; }
+  .detail-head .nav { display:flex; gap:4px; flex:0 0 auto; align-items:center; }
   .detail-head .nav button { padding:4px 8px; }
+  .stagebtn { background:#2b3d55; border-color:#3c5a7d; font-weight:650; }
+  .stagebtn.on { background:#4a3b10; border-color:#8a7020; color:#ffe08a; }
+  .stagebtn:disabled { opacity:.45; }
+  #stage-status { min-height:16px; }
+  #stage-status.ok { color:var(--green); }
+  #stage-status.err { color:var(--red); }
   .detail-grid { display:grid; grid-template-columns:355px minmax(0,1fr); gap:12px;
     padding:12px 16px 26px; align-items:start; }
   .col { display:flex; flex-direction:column; gap:12px; min-width:0; }
@@ -550,6 +556,13 @@ function renderDetail(l) {
         </div>
       </div>
       <div class="nav">
+        <button id="stage-btn" class="stagebtn ${a.staged ? "on" : ""}"
+          ${l.has_tokens === false ? "disabled" : ""}
+          aria-pressed="${a.staged ? "true" : "false"}"
+          title="${l.has_tokens === false ? "No token sequence to stage"
+            : a.staged ? "Compile and copy this level into the Puzzle Maker again"
+            : "Compile and copy this level into the Puzzle Maker for playtesting"}"
+        >${a.staged ? "Restage" : "Stage"}</button>
         <button id="prev" title="Previous level (↑ or ←)">↑</button>
         <button id="next" title="Next level (↓ or →)">↓</button>
       </div>
@@ -573,6 +586,7 @@ function renderDetail(l) {
           <div style="margin-top:9px;color:var(--dim);font-size:12px">Notes</div>
           <textarea id="a-notes" placeholder="What is interesting, broken, or worth remembering?">${esc(a.notes)}</textarea>
           <p class="hint">Saved automatically. ${a.updated ? "Last edit " + date(a.updated) : ""}</p>
+          <p class="hint" id="stage-status"></p>
         </section>
         <section class="card">
           <h3>Facts</h3>
@@ -651,7 +665,7 @@ function renderDetail(l) {
     </div>`;
 
   // Annotation controls.
-  $("#a-staged").addEventListener("change", e => { a.staged = e.target.checked; persist(l); });
+  $("#a-staged").addEventListener("change", e => setStaged(l, e.target.checked));
   $("#a-excluded").addEventListener("change", e => { a.excluded = e.target.checked; persist(l); });
   $("#a-stars").addEventListener("click", e => {
     const b = e.target.closest("[data-star]"); if (!b) return;
@@ -668,6 +682,10 @@ function renderDetail(l) {
   });
   $("#a-notes").addEventListener("blur", () => { if (notesDirty) { notesDirty = false; persist(l); } });
   $("#a-notes").addEventListener("keydown", e => e.stopPropagation());
+
+  // Staging.
+  $("#stage-btn").addEventListener("click", () => stageLevel(l));
+  paintStageButton(l);
 
   // Stage controls.
   $("#rotl").addEventListener("click", () => { state.view.yaw -= Math.PI/2; buildBase(); });
@@ -690,6 +708,70 @@ function paintStars(n) {
   });
   const l = current();
   if (l) { l.ann.rating = n; renderList(); }
+}
+
+function paintStageButton(l) {
+  const btn = $("#stage-btn");
+  if (!btn) return;
+  const on = !!l.ann.staged;
+  const can = l.has_tokens !== false;
+  btn.classList.toggle("on", on);
+  btn.textContent = on ? "Restage" : "Stage";
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  btn.disabled = !can;
+  btn.title = !can ? "No token sequence to stage"
+    : on ? "Compile and copy this level into the Puzzle Maker again"
+    : "Compile and copy this level into the Puzzle Maker for playtesting";
+}
+
+function setStaged(l, staged) {
+  l.ann.staged = staged;
+  const cb = $("#a-staged"); if (cb) cb.checked = staged;
+  const head = $("#head-ann"); if (head) head.innerHTML = annotationBadges(l);
+  const status = $("#stage-status");
+  if (status) { status.className = "hint"; status.textContent = ""; status.title = ""; }
+  paintStageButton(l);
+  renderList();
+  persist(l);
+}
+
+async function stageLevel(l) {
+  const btn = $("#stage-btn");
+  const status = $("#stage-status");
+  if (l.has_tokens === false) {
+    if (status) { status.className = "hint err"; status.textContent = "This level has no token sequence to stage."; }
+    return;
+  }
+  const force = !!l.ann.staged;
+  if (btn) { btn.disabled = true; btn.textContent = "Staging…"; }
+  if (status) {
+    status.className = "hint";
+    status.textContent = "compiling and copying into the Puzzle Maker…";
+    status.title = "";
+  }
+  try {
+    const r = await fetch("/api/stage", {
+      method: "POST",
+      body: new URLSearchParams({ id: l.id, force: force ? "1" : "0" }),
+    });
+    const d = await r.json().catch(() => ({ ok: false, error: "bad response from the server" }));
+    if (!d.ok) throw new Error(d.error || "staging failed");
+    if (d.annotation) l.ann = Object.assign({}, d.annotation);
+    else l.ann.staged = true;
+    state.annotations[l.id] = l.ann;
+    const cb = $("#a-staged"); if (cb) cb.checked = true;
+    const head = $("#head-ann"); if (head) head.innerHTML = annotationBadges(l);
+    renderList();
+    if (status) {
+      status.className = "hint ok";
+      status.textContent = (d.already ? "Already staged as " : "Staged as ") + (d.file || "a new Puzzle Maker level");
+      status.title = d.path || "";
+    }
+  } catch (e) {
+    if (status) { status.className = "hint err"; status.textContent = "Staging failed: " + e.message; status.title = ""; }
+  } finally {
+    paintStageButton(l);
+  }
 }
 
 function persist(l) {
@@ -1116,7 +1198,7 @@ function wire() {
     if (e.key === "ArrowDown" || e.key === "ArrowRight" || e.key === "j") { e.preventDefault(); navStep(1); }
     else if (e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "k") { e.preventDefault(); navStep(-1); }
     else if (e.key === "s" || e.key === "S") {
-      const l = current(); if (l) { l.ann.staged = !l.ann.staged; persist(l); renderDetail(l); }
+      const l = current(); if (l) setStaged(l, !l.ann.staged);
     } else if (e.key === "e" || e.key === "E") {
       const l = current(); if (l) { l.ann.excluded = !l.ann.excluded; persist(l); renderDetail(l); }
     } else if (/^[0-5]$/.test(e.key)) {

@@ -72,8 +72,9 @@ const USAGE: &str = "usage:
                    [--port N] [--no-open] [--list]
                                 a browser app for the downloaded Workshop levels: every field
                                 we have, the solver's verdict, the Workshop rating and the
-                                level in 2.5D. Rate, note, mark playtest-staged or exclude
-                                from test data; saved in train/workshop-annotations.jsonl.";
+                                level in 2.5D. Rate, note, stage into the Puzzle Maker, or
+                                exclude from test data; saved in
+                                train/workshop-annotations.jsonl.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -20,6 +20,8 @@
 //! - `GET /api/level?id=ID`     one level's tokens and decoded geometry
 //! - `POST /api/annotate`       update one annotation (form fields: id, staged, rating,
 //!                              notes, excluded)
+//! - `POST /api/stage`          compile one level and copy it into the Puzzle Maker folder
+//!                              (form fields: id, force); marks it staged
 //! - `GET /api/rescan`          re-read the files, then return the levels
 //! - `GET /api/export`          the annotations as JSONL, for a backup
 
@@ -27,6 +29,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,8 +46,9 @@ const USAGE: &str = "usage:
                    [--port N] [--no-open] [--list]
                          a browser app for the downloaded Workshop levels: every field we
                          have, the solver's verdict, the Workshop rating and the level drawn
-                         in 2.5D. Rate, note, mark playtest-staged or exclude from test data;
-                         annotations are saved to train/workshop-annotations.jsonl.
+                         in 2.5D. Rate, note, stage into the Puzzle Maker, or exclude from
+                         test data; annotations are saved to
+                         train/workshop-annotations.jsonl.
                          (defaults: out/workshop/levels.jsonl, data/ws5/{train,test}.jsonl,
                          out/workshop/{ratings,items,fetched}.jsonl)";
 
@@ -118,6 +122,9 @@ struct State {
     fetched_json: String,
     annotations: HashMap<String, Annotation>,
     paths: Paths,
+    /// True while a `POST /api/stage` request is running, so a second click cannot make a
+    /// duplicate copy.
+    staging: bool,
 }
 
 /// `glados workbench`: parse the flags, then serve (or just print a summary).
@@ -270,6 +277,7 @@ impl State {
             fetched_json: load_map(&paths.fetched, "id"),
             annotations,
             paths: paths.clone(),
+            staging: false,
         })
     }
 
@@ -359,6 +367,7 @@ fn record_json(r: &Record) -> String {
         r.split.map_or("null".to_string(), json_str)
     ));
     parts.push(format!("\"in_ws5\":{}", r.split.is_some()));
+    parts.push(format!("\"has_tokens\":{}", !r.tokens.is_empty()));
     format!("{{{}}}", parts.join(","))
 }
 
@@ -614,6 +623,13 @@ fn handle(mut stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 Err(why) => reply(&mut stream, "text/plain", &why)?,
             }
         }
+        ("POST", "/api/stage") => {
+            let body = match stage_request(state, &body) {
+                Ok(body) => body,
+                Err(why) => format!("{{\"ok\":false,\"error\":{}}}", json_str(&why)),
+            };
+            reply(&mut stream, "application/json", &body)?;
+        }
         ("GET", "/api/rescan") => {
             let result = {
                 let mut guard = state.lock().unwrap();
@@ -696,6 +712,120 @@ fn annotate(state: &Mutex<State>, body: &str) -> Result<String, String> {
     save_annotations(&guard.paths.annotations, &next)?;
     guard.annotations = next;
     Ok(annotation_json(&id, &a))
+}
+
+/// Stage one level with `tools/workshop/stage.py`. The script does the p2c compile, the copy
+/// into the Puzzle Maker folder and the annotation update; this only serialises the call and
+/// reloads the annotation store afterwards.
+fn stage_request(state: &Mutex<State>, body: &str) -> Result<String, String> {
+    let id = param(body, "id").ok_or("missing id")?;
+    let force = param(body, "force").map_or(false, |v| v == "1");
+    let paths = {
+        let mut guard = state.lock().unwrap();
+        if guard.staging {
+            return Err("another level is being staged".into());
+        }
+        let i = *guard.index.get(&id).ok_or_else(|| format!("no level {id}"))?;
+        if guard.records.get(i).map_or(true, |r| r.tokens.is_empty()) {
+            return Err("this level has no token sequence to stage".into());
+        }
+        guard.staging = true;
+        guard.paths.clone()
+    };
+    let result = stage_level(&paths, &id, force);
+    let mut guard = state.lock().unwrap();
+    guard.staging = false;
+    if result.is_ok() {
+        let path = guard.paths.annotations.clone();
+        if let Ok(annotations) = load_annotations(&path) {
+            guard.annotations = annotations;
+        }
+    }
+    result
+}
+
+fn stage_level(paths: &Paths, id: &str, force: bool) -> Result<String, String> {
+    let root = repo_root()?;
+    let script = root.join("tools").join("workshop").join("stage.py");
+    if !script.is_file() {
+        return Err(format!("missing {}", script.display()));
+    }
+    let python = python_exe(&root);
+    let mut cmd = Command::new(&python);
+    cmd.arg(&script)
+        .arg("--id")
+        .arg(id)
+        .arg("--all")
+        .arg(&paths.all)
+        .arg("--train")
+        .arg(&paths.train)
+        .arg("--test")
+        .arg(&paths.test)
+        .arg("--annotations")
+        .arg(&paths.annotations);
+    if force {
+        cmd.arg("--force");
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("can't run {}: {e}", python.display()))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let json = stdout
+        .lines()
+        .rev()
+        .find(|line| line.trim_start().starts_with('{'))
+        .map(str::trim);
+    if !out.status.success() {
+        // stage.py prints a JSON error object on stdout even when it exits non-zero.
+        if let Some(json) = json {
+            return Ok(json.to_string());
+        }
+        return Err(format!("staging failed: {}", tail_chars(&stderr, 2000)));
+    }
+    json.map(str::to_string).ok_or_else(|| {
+        let detail = tail_chars(&stderr, 1000);
+        if detail.is_empty() {
+            "stage.py printed no result".into()
+        } else {
+            format!("stage.py printed no result: {detail}")
+        }
+    })
+}
+
+fn repo_root() -> Result<PathBuf, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    if cwd.join("tools").join("workshop").join("stage.py").is_file() {
+        return Ok(cwd);
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("current executable: {e}"))?;
+    let root = exe
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .ok_or("can't find the repo root from the glados executable")?;
+    if root.join("tools").join("workshop").join("stage.py").is_file() {
+        return Ok(root.to_path_buf());
+    }
+    Err("can't find tools/workshop/stage.py; run glados workbench from the repo root".into())
+}
+
+fn python_exe(root: &Path) -> PathBuf {
+    for path in [
+        root.join(".venv").join("Scripts").join("python.exe"),
+        root.join(".venv").join("bin").join("python"),
+    ] {
+        if path.is_file() {
+            return path;
+        }
+    }
+    PathBuf::from(if cfg!(windows) { "python" } else { "python3" })
+}
+
+fn tail_chars(s: &str, n: usize) -> String {
+    let mut chars: Vec<char> = s.trim().chars().rev().take(n).collect();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 fn now_secs() -> i64 {
@@ -1021,6 +1151,7 @@ mod tests {
             fetched_json: "{}".into(),
             annotations: HashMap::new(),
             paths: Paths::default(),
+            staging: false,
         });
         let out = level_detail(&state, "1").unwrap();
         assert!(out.contains("\"geometry\":{"), "{out}");
