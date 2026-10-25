@@ -641,8 +641,8 @@ pub struct Model {
     /// Per button: the spot cell (`Beams::spot_cells`) over it, if beams cross it. A reflection
     /// cube set down there lies on the button and holds it down.
     button_spot: Vec<Option<usize>>,
-    /// Per beam end face (a class of its own), its class.
-    beam_end_class: HashMap<Face, usize>,
+    /// Per ray (`Beams::rays`), the class of the face it ends on, if a portal can go there.
+    ray_end_class: Vec<Option<usize>>,
     /// Per panel (`Level::panels`), the class of its face, if it takes portals.
     panel_class: Vec<Option<usize>>,
     /// Cubes waiting in droppers.
@@ -654,8 +654,11 @@ pub struct Model {
     /// Devices, lasers or waiting cubes: `settle` has work after any action.
     dynamic: bool,
     /// Where the portals are can switch devices (a bridge or funnel through them) or carry a
-    /// laser.
+    /// laser. Per face class: a projection's path or a beam can go into a portal there (it ends
+    /// there, or crosses its panel), and one can come out of a portal there (`portal_quiet`).
     portals_drive: bool,
+    enters: Vec<bool>,
+    exits: Vec<bool>,
     /// Everything in the level was modelled: an exhausted search means unsolvable.
     pub complete: bool,
     projector_kinds: Vec<ProjectorKind>,
@@ -1732,6 +1735,11 @@ impl Model {
             .filter(|c| c.beam_end)
             .map(|c| (c.faces[0], c.id))
             .collect();
+        let ray_end_class: Vec<Option<usize>> = beams
+            .rays
+            .iter()
+            .map(|r| r.end.and_then(|end| beam_end_class.get(&end).copied()))
+            .collect();
         let panel_class: Vec<Option<usize>> = level
             .panels
             .iter()
@@ -1814,6 +1822,18 @@ impl Model {
             }
         }
         let portals_drive = !beams.is_empty() || routed != 0;
+        let enters: Vec<bool> = portals
+            .classes
+            .iter()
+            .map(|c| {
+                !c.ends.is_empty() || class_ends[c.id] != 0 || c.beam_end || panel_class.contains(&Some(c.id))
+            })
+            .collect();
+        let exits: Vec<bool> = portals
+            .classes
+            .iter()
+            .map(|c| !c.routes.is_empty() || class_routes[c.id] != 0 || c.beam_out.is_some())
+            .collect();
         let button_sight: Vec<Vec<Masks>> = buttons
             .iter()
             .map(|b| match b.region {
@@ -1914,7 +1934,8 @@ impl Model {
             special: portals
                 .classes
                 .iter()
-                .map(|c| c.turret.is_some() || c.stream.is_some() || !c.gel_cells.is_empty())
+                // Gel comes out of a portal on `gel_cells` only from one on the stream's class.
+                .map(|c| c.turret.is_some() || c.stream.is_some())
                 .collect(),
             inert: portals
                 .classes
@@ -1994,13 +2015,15 @@ impl Model {
             sweeps_in,
             stand_spot,
             button_spot,
-            beam_end_class,
+            ray_end_class,
             panel_class,
             held_back,
             redrops,
             auto_drops,
             dynamic,
             portals_drive,
+            enters,
+            exits,
             complete,
             projector_kinds: level.projectors.iter().map(|p| p.kind).collect(),
             on_platform,
@@ -2378,6 +2401,17 @@ impl Model {
     /// Explores every reachable state (up to `max_states`), past goals too: metrics need the
     /// whole graph to find dead ends.
     pub fn explore(&self, max_states: usize) -> StateSpace {
+        self.explore_with(max_states, false)
+    }
+
+    /// `explore`, but it stops where the budget runs out before any goal: the verdict is
+    /// `Unknown` then (`StateSpace::verdict`), whatever the states left would show, and
+    /// metrics have no use for the rest.
+    pub fn explore_to_verdict(&self, max_states: usize) -> StateSpace {
+        self.explore_with(max_states, true)
+    }
+
+    fn explore_with(&self, max_states: usize, give_up: bool) -> StateSpace {
         let cx = self.context();
         let mut table = Table::new(cx.lay.len);
         let start = self.initial_packed(&cx);
@@ -2394,11 +2428,14 @@ impl Model {
             regions: Vec::new(),
         };
         let (mut cur, mut sc) = (Vec::new(), Scratch::default());
+        let mut solved = false;
         let mut i = 0;
         while i < table.len() {
             cur.clear();
             cur.extend_from_slice(table.get(i));
-            space.goal.push(self.goal(&cx.lay, &cur));
+            let goal = self.goal(&cx.lay, &cur);
+            solved |= goal;
+            space.goal.push(goal);
             space.regions.push(if cur[0] & ESCAPED != 0 { u32::MAX } else { cur[0] });
             self.expand(&cx, &cur, true, &mut sc, &mut |a, n| {
                 let swapped = canonical(n);
@@ -2420,6 +2457,9 @@ impl Model {
                 space.uses.push(uses(&a));
             });
             space.offsets.push(space.targets.len() as u32);
+            if give_up && space.overflow.is_some() && !solved {
+                break;
+            }
             i += 1;
         }
         space
@@ -2453,6 +2493,7 @@ impl Model {
             homes: ids.iter().map(|&(_, home)| self.loc_code(home)).collect(),
             kinds: ids.iter().map(|&(kind, _)| kind).collect(),
             group,
+            reflection: (0..ids.len()).filter(|&i| ids[i].0 == CubeKind::Reflection).collect(),
             paint,
             redrop,
             len: end + redrop.is_some() as usize,
@@ -2688,18 +2729,12 @@ impl Model {
     fn beam_hits_with(&self, lay: &Layout, s: &[u32], sweep: Option<usize>) -> (u32, u32) {
         let (mut lit, mut hit) = (0u32, 0u32);
         // The spot whose cell is `cell`, if a reflection cube is there.
+        let first_spot = self.spot_code(0);
         let cube_at = |cell: usize| {
-            lay.cubes(s)
-                .iter()
-                .zip(&lay.kinds)
-                .find_map(|(&code, &kind)| match self.code_loc(code) {
-                    CubeLoc::Spot(k)
-                        if kind == CubeKind::Reflection && self.beams.spots[k].cell == cell =>
-                    {
-                        Some(k)
-                    }
-                    _ => None,
-                })
+            lay.reflection.iter().find_map(|&i| {
+                let k = s[CUBES + i].wrapping_sub(first_spot) as usize;
+                (k < self.beams.spots.len() && self.beams.spots[k].cell == cell).then_some(k)
+            })
         };
         let (blue, orange) = (portal(s, 0), portal(s, 1));
         // The beam out of the other portal, for one going into a portal on `class`. Not out
@@ -2794,10 +2829,7 @@ impl Model {
                 if stopped {
                     break;
                 }
-                let Some(end) = r.end else { break };
-                let Some(&class) = self.beam_end_class.get(&end) else {
-                    break;
-                };
+                let Some(class) = self.ray_end_class[ray] else { break };
                 next = through(class);
             }
         }
@@ -2905,12 +2937,28 @@ impl Model {
         let there = |r: u32| self.graph.regions[r as usize].cond.holds(dev);
         let loose = self.graph.regions.len() as u32;
         (n[0] == s[0] || there(n[0]))
-            && (!self.portals_drive || n[BLUE..LATCHED] == s[BLUE..LATCHED])
+            && (!self.portals_drive
+                || match (n[BLUE] == s[BLUE], n[BLUE + 1] == s[BLUE + 1]) {
+                    (true, true) => true,
+                    (false, true) => self.portal_quiet(s[BLUE], n[BLUE], s[BLUE + 1]),
+                    (true, false) => self.portal_quiet(s[BLUE + 1], n[BLUE + 1], s[BLUE]),
+                    (false, false) => false,
+                })
             && n[LATCHED] == s[LATCHED]
             && n[LIT..CUBES] == s[LIT..CUBES]
             && lay.cubes(s).iter().zip(lay.cubes(n)).all(|(&a, &b)| {
                 a == b || (a <= loose && b <= loose && (b == HELD || there(b - 1)))
             })
+    }
+
+    /// Whether moving a portal from class `from` to `to` while the other is on `other` (each a
+    /// class + 1, 0: none) leaves the devices and lasers as they are: nothing goes into a portal
+    /// on `from` or `to` (`enters`), and what goes into the one on `other` comes out of neither
+    /// (`exits`).
+    fn portal_quiet(&self, from: u32, to: u32, other: u32) -> bool {
+        let enters = |c: u32| c != 0 && self.enters[c as usize - 1];
+        let exits = |c: u32| c != 0 && self.exits[c as usize - 1];
+        !enters(from) && !enters(to) && !(enters(other) && (exits(from) || exits(to)))
     }
 
     /// One round of `settle` for devices and lasers.
@@ -3860,6 +3908,14 @@ impl Model {
         best: &mut Vec<u64>,
         sc: &mut Scratch,
     ) {
+        let memo: WalkKey = (sources.to_vec(), on, dev, alive, carrying, limit);
+        if let Some((b, p)) = sc.walks.get(&memo) {
+            best.clear();
+            best.extend_from_slice(b);
+            sc.parent.clear();
+            sc.parent.extend_from_slice(p);
+            return;
+        }
         let step_time = VOXEL / self.rules.walk_speed;
         let fall_time = |h: i32| (2.0 * h as f64 * VOXEL / GRAVITY).sqrt();
         let key = |node: usize, fizzled: bool| 2 * node + fizzled as usize;
@@ -3898,6 +3954,12 @@ impl Model {
                 }
             }
         }
+        if sc.walked > MAX_WALK_WORDS {
+            sc.walks.clear();
+            sc.walked = 0;
+        }
+        sc.walked += 3 * best.len();
+        sc.walks.insert(memo, (best.clone(), sc.parent.clone()));
     }
 
     fn loc_name(&self, l: CubeLoc) -> String {
@@ -4181,6 +4243,8 @@ struct Layout {
     homes: Vec<u32>,
     /// Per cube: the cubes `lo..hi` interchangeable with it.
     group: Vec<(usize, usize)>,
+    /// The reflection cubes.
+    reflection: Vec<usize>,
     /// Word where paint starts.
     paint: usize,
     /// Word of `State::redrop`, after the paint, if the model has wired droppers.
@@ -4196,6 +4260,7 @@ impl Layout {
             kinds: Vec::new(),
             homes: Vec::new(),
             group: Vec::new(),
+            reflection: Vec::new(),
             paint: CUBES,
             redrop: None,
             len: CUBES,
@@ -4421,7 +4486,18 @@ struct Scratch {
     heap: BinaryHeap<Reverse<(u64, usize, bool)>>,
     ends: Vec<(usize, bool)>,
     fetch: Vec<u8>,
+    /// `walk_times` results by their inputs: many states share a dash's fields, devices and
+    /// turrets, and the walk depends on nothing else. `walked` counts the words kept.
+    walks: HashMap<WalkKey, (Vec<u64>, Vec<u32>)>,
+    walked: usize,
 }
+
+/// The inputs of a `walk_times` call: sources, hazards on, device bits, live turrets,
+/// carrying, limit.
+type WalkKey = (Vec<(usize, bool, u64)>, u64, u64, u32, bool, u64);
+
+/// Words of `walk_times` results a `Scratch` keeps before it starts over.
+const MAX_WALK_WORDS: usize = 1 << 20;
 
 /// Limits of a timed dash, in µs from the press. A cell counts as reached on entering it,
 /// half a voxel's walk before its middle (`enter`); out through the exit door takes its

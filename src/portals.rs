@@ -384,14 +384,17 @@ impl Portals {
         for &(f, id) in &extras.paintable {
             add(f, Some(id), Cond::ALWAYS);
         }
+        // Per region, its cells' eye points: every class looks from them.
+        let eyes: Vec<Vec<(Cell, Vec<[f64; 3]>)>> = graph
+            .regions
+            .iter()
+            .map(|r| r.cells.iter().map(|&c| (c, eye_points(level, c))).collect())
+            .collect();
         let classes = groups
             .into_iter()
             .map(|(key, faces)| {
-                let visible_from: Vec<Masks> = graph
-                    .regions
-                    .iter()
-                    .map(|r| shot_masks(level, &r.cells, &faces, sight))
-                    .collect();
+                let visible_from: Vec<Masks> =
+                    eyes.iter().map(|e| shot_masks_from(level, e, &faces, sight)).collect();
                 (key, faces, visible_from)
             })
             .map(|(key, faces, visible_from)| {
@@ -400,10 +403,8 @@ impl Portals {
                     let p = extras.panels.get(&faces[0])?;
                     let (cell, point, back) = panel_aim(faces[0], p.hinge, p.angle);
                     Some(
-                        graph
-                            .regions
-                            .iter()
-                            .map(|r| point_masks(level, &r.cells, cell, point, back, sight))
+                        eyes.iter()
+                            .map(|e| point_masks_from(level, e, cell, point, back, sight))
                             .collect::<Vec<Masks>>(),
                     )
                 });
@@ -545,9 +546,22 @@ pub fn point_masks(
     facing: [f64; 3],
     sight: Sight,
 ) -> Masks {
+    let eyes: Vec<(Cell, Vec<[f64; 3]>)> = eyes.iter().map(|&c| (c, eye_points(level, c))).collect();
+    point_masks_from(level, &eyes, cell, point, facing, sight)
+}
+
+/// `point_masks`, given each eye cell's `eye_points`.
+fn point_masks_from(
+    level: &Level,
+    eyes: &[(Cell, Vec<[f64; 3]>)],
+    cell: Cell,
+    point: [f64; 3],
+    facing: [f64; 3],
+    sight: Sight,
+) -> Masks {
     let mut masks = Masks::new();
-    for &eye in eyes {
-        for p0 in eye_points(level, eye) {
+    for &(eye, ref points) in eyes {
+        for &p0 in points {
             if let Some(m) = point_shot(level, eye, p0, cell, point, facing, sight) {
                 add_mask(&mut masks, m);
                 if m == 0 {
@@ -578,13 +592,26 @@ pub fn point_shot(
 
 /// Masks of the clear shots from any of `eyes` at any of `faces` (empty: none is clear).
 pub fn shot_masks(level: &Level, eyes: &[Cell], faces: &[Face], sight: Sight) -> Masks {
+    let eyes: Vec<(Cell, Vec<[f64; 3]>)> = eyes.iter().map(|&c| (c, eye_points(level, c))).collect();
+    shot_masks_from(level, &eyes, faces, sight)
+}
+
+/// `shot_masks`, given each eye cell's `eye_points`.
+fn shot_masks_from(
+    level: &Level,
+    eyes: &[(Cell, Vec<[f64; 3]>)],
+    faces: &[Face],
+    sight: Sight,
+) -> Masks {
     let mut masks = Masks::new();
-    for &eye in eyes {
+    for &(eye, ref points) in eyes {
         for &face in faces {
-            for m in shots(level, eye, face, sight) {
-                add_mask(&mut masks, m);
-                if m == 0 {
-                    return masks;
+            for &p in points {
+                for m in shots_from(level, eye, p, face, sight) {
+                    add_mask(&mut masks, m);
+                    if m == 0 {
+                        return masks;
+                    }
                 }
             }
         }

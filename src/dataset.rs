@@ -276,10 +276,10 @@ fn label_full(
             return (label, None, false);
         }
     };
-    let mut space = model.explore(budget);
+    let mut space = model.explore_to_verdict(budget);
     if !matches!(space.verdict(), Verdict::Solved(_)) && model.could_angle() {
         model = Model::new_angled(&level, Mode::Conservative).expect("same problems");
-        space = model.explore(budget);
+        space = model.explore_to_verdict(budget);
     }
     let angled = model.beams.angled;
     let strict = match space.verdict() {

@@ -186,7 +186,7 @@ pub fn effort(plan: &[Action]) -> f64 {
 
 /// Solves `model` and measures it. `seed` drives the random players.
 pub fn assess(model: &mut Model, budget: usize, seed: u64) -> Assessment {
-    let space = model.explore(budget);
+    let space = model.explore_to_verdict(budget);
     measure(model, &space, budget, seed)
 }
 
