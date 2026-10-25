@@ -409,7 +409,7 @@ fn item_json(found: &Mutex<Vec<Found>>, path: &str) -> Result<String, String> {
     ))
 }
 
-fn geometry_json(level: &Level) -> String {
+pub(crate) fn geometry_json(level: &Level) -> String {
     let mut solid = Vec::new();
     let mut goo = Vec::new();
     for c in level.cells() {

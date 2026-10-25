@@ -54,6 +54,9 @@ PUZZLE_MAKER_FILE = re.compile(r"mymaps/\d+\.bsp")
 # empty body (IncompleteRead), which used to leave thousands of maps as "bytes 0+1036" errors.
 # The Steam client UA gets the same public bytes reliably; keep the request rate low instead.
 UA = {"User-Agent": "Valve/Steam HTTP Client 1.0", "Accept-Encoding": "identity", "Connection": "close"}
+RATING = re.compile(r'"star_rating":(-?\d+),"total_votes":(\d+)')
+# Level files that carry `stars`/`votes` (`ratings` updates them in place; ws3.py copies them on).
+RATED_FILES = ["out/workshop/levels.jsonl", "data/ws5/train.jsonl", "data/ws5/test.jsonl"]
 
 
 def fetch_url(url, data=None, headers=None, timeout=60):
@@ -70,6 +73,8 @@ def retrying(fn, tries=4, what="request"):
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as e:
             if attempt == tries - 1:
                 raise IOError(f"{what}: {e}") from e
+            if getattr(e, "code", None) == 429:  # steamcommunity.com rate limit: back off for a while
+                delay = max(delay, 60)
             time.sleep(delay)
             delay = min(delay * 2, 30)
 
@@ -106,16 +111,45 @@ def get_range(url, start, length):
 # ---- list ----
 
 def browse_page(sort, page, excluded):
+    """The page's item ids, in order, and the star ratings it shows ({id: {stars, votes}})."""
     q = [("appid", APP), ("browsesort", sort), ("actualsort", sort), ("section", "readytouseitems"),
          ("days", -1), ("numperpage", 30), ("p", page), ("requiredtags[]", "Singleplayer")]
     q += [("excludedtags[]", t) for t in excluded]
     _, body = retrying(lambda: fetch_url(BROWSE + "?" + urllib.parse.urlencode(q)), what=f"browse page {page}")
+    text = body.decode("utf-8", "replace")
     seen, ids = set(), []
-    for m in re.finditer(r"sharedfiles/filedetails/\?id=(\d+)", body.decode("utf-8", "replace")):
+    for m in re.finditer(r"sharedfiles/filedetails/\?id=(\d+)", text):
         if m.group(1) not in seen:
             seen.add(m.group(1))
             ids.append(m.group(1))
-    return ids
+    return ids, page_ratings(text)
+
+
+def page_ratings(text):
+    """The browse page embeds its items as JSON inside a JSON string: each one starts with
+    {"publishedfileid":...} and carries "star_rating" (1-5, the page's star image; -1 for "not
+    enough ratings yet", stored as 0) and "total_votes" (the item page's "N ratings")."""
+    text = text.replace('\\"', '"')
+    starts = [(m.start(), m[1]) for m in re.finditer(r'\{"publishedfileid":"(\d+)"', text)]
+    out = {}
+    for (s, wid), (e, _) in zip(starts, starts[1:] + [(len(text), None)]):
+        m = RATING.search(text, s, e)
+        if m:
+            out[wid] = {"stars": max(int(m[1]), 0), "votes": int(m[2])}
+    return out
+
+
+def detail_rating(wid):
+    """The star rating on an item's own page, for items no browse page showed."""
+    url = f"https://steamcommunity.com/sharedfiles/filedetails/?id={wid}"
+    # Item pages answer 429 to every request without an Accept header (browse pages don't).
+    _, body = retrying(lambda: fetch_url(url, headers={"Accept": "*/*"}), what=f"item {wid}")
+    text = body.decode("utf-8", "replace")
+    stars = re.search(r"/(\d)-star_large\.png|/(not-yet)_large\.png", text)
+    if not stars:
+        return None  # removed or hidden item
+    votes = re.search(r'numRatings">([\d,]+) ratings', text)
+    return {"stars": int(stars[1] or 0), "votes": int(votes[1].replace(",", "")) if votes else 0}
 
 
 def details(ids):
@@ -147,10 +181,11 @@ def cmd_list(a):
         for sort in a.sort:
             prev = None
             for page in range(a.start, a.start + a.pages):
-                ids = browse_page(sort, page, excluded)
+                ids, rated = browse_page(sort, page, excluded)
                 if not ids or ids == prev:  # past the last page (Steam repeats it)
                     break
                 prev = ids
+                save_ratings(out, rated, sort=sort, page=page)
                 new = [i for i in ids if i not in known]
                 for d in details(new) if new else []:
                     known.add(d["publishedfileid"])
@@ -167,6 +202,93 @@ def cmd_list(a):
                 print(f"{sort} page {page}: {len(new)} new ids, {added} puzzles added", file=sys.stderr)
                 time.sleep(a.delay)
     print(f"{added} added; {items_path}")
+
+
+# ---- ratings ----
+
+def rating_lines(out):
+    path = out / "ratings.jsonl"
+    if not path.exists():
+        return []
+    lines = []
+    for line in open(path, encoding="utf-8"):
+        try:
+            lines.append(json.loads(line))
+        except ValueError:  # a partial last line
+            pass
+    return lines
+
+
+def save_ratings(out, rated, sort, page):
+    """Append one browse page's (or item page's) ratings to out/ratings.jsonl."""
+    with open(out / "ratings.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"time": int(time.time()), "sort": sort, "page": page, "ratings": rated}) + "\n")
+
+
+def load_ratings(out):
+    """{workshop id: {"stars", "votes"}}, the latest seen for each item."""
+    rated = {}
+    for r in rating_lines(out):
+        rated.update({k: v for k, v in r["ratings"].items() if v})
+    return rated
+
+
+def annotate(rated, paths):
+    """Set `stars`/`votes` in place on every record of these level files that has a rating."""
+    for path in paths:
+        if not path.exists():
+            continue
+        n = total = 0
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(path, encoding="utf-8") as src, open(tmp, "w", encoding="utf-8", newline="\n") as dst:
+            for line in src:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                total += 1
+                if str(r.get("workshop_id")) in rated:
+                    r.update(rated[str(r["workshop_id"])])
+                    n += 1
+                dst.write(json.dumps(r) + "\n")
+        tmp.replace(path)
+        print(f"{path}: {n} of {total} levels rated")
+
+
+def cmd_ratings(a):
+    """Re-read every browse page items.jsonl was listed from, for the star ratings they show; then
+    the item pages of converted levels no browse page showed (they moved to another page)."""
+    out = Path(a.out)
+    if not a.annotate_only:
+        fresh = time.time() - a.max_age * 86400
+        done = {(r["sort"], str(r["page"])) for r in rating_lines(out) if r["time"] >= fresh}
+        pages = sorted({(r["sort"], r["page"]) for r in map(json.loads, open(out / "items.jsonl", encoding="utf-8"))})
+        todo = [p for p in pages if (p[0], str(p[1])) not in done]
+        print(f"{len(todo)} browse pages to read ({len(pages) - len(todo)} read in the last {a.max_age} days)",
+              file=sys.stderr)
+        for n, (sort, page) in enumerate(todo, 1):
+            try:
+                _, rated = browse_page(sort, page, EXCLUDED_TAGS)
+                save_ratings(out, rated, sort=sort, page=page)
+            except IOError as e:
+                print(f"{sort} page {page}: {e} (a rerun retries it)", file=sys.stderr)
+            if n % 50 == 0 or n == len(todo):
+                print(f"{n}/{len(todo)} pages, {len(load_ratings(out))} items rated", file=sys.stderr)
+            time.sleep(a.delay)
+        converted = read_ids(out / "levels.jsonl", key="workshop_id")
+        missing = sorted(converted - set(load_ratings(out)) - {p for s, p in done if s == "item"})
+        print(f"{len(missing)} converted levels not on any page read: their item pages", file=sys.stderr)
+        for n, wid in enumerate(missing, 1):
+            try:
+                r = detail_rating(wid)
+                save_ratings(out, {wid: r}, sort="item", page=wid)
+            except IOError as e:
+                print(f"{e} (a rerun retries it)", file=sys.stderr)
+            if n % 50 == 0 or n == len(missing):
+                print(f"{n}/{len(missing)} item pages", file=sys.stderr)
+            time.sleep(a.delay * 4)  # item pages are rate-limited sooner
+    rated = load_ratings(out)
+    print(f"{len(rated)} items rated; {out / 'ratings.jsonl'}")
+    annotate(rated, [ROOT / f for f in (a.files or RATED_FILES)])
 
 
 # ---- download ----
@@ -296,11 +418,11 @@ def score_levels(a, ids, lines, meta, out, mode):
 
 def cmd_build(a):
     out = Path(a.out)
-    meta = {}
+    meta, rated = {}, load_ratings(out)
     for l in open(out / "items.jsonl", encoding="utf-8"):
         r = json.loads(l)
         meta[r["id"]] = {"title": r["title"], "subscribers": r.get("lifetime_subscriptions"),
-                         "favorited": r.get("favorited")}
+                         "favorited": r.get("favorited"), **rated.get(r["id"], {})}
     incremental = getattr(a, "incremental", False)
     if incremental:
         # Only what a completed download has produced and no build has seen yet. fetched.jsonl
@@ -410,6 +532,11 @@ def main():
     p.add_argument("--start", type=int, default=1)
     p.add_argument("--delay", type=float, default=1.0, help="seconds between browse pages")
     p.add_argument("--all-items", action="store_true", help="don't exclude tags of unsupported items")
+    p = sub.add_parser("ratings", help="star ratings of the listed puzzles, onto the level files")
+    p.add_argument("--delay", type=float, default=0.5, help="seconds between pages")
+    p.add_argument("--max-age", type=float, default=7, help="re-read pages read more than this many days ago")
+    p.add_argument("--annotate-only", action="store_true", help="fetch nothing, only update the level files")
+    p.add_argument("--files", nargs="+", help=f"level files to annotate (default {' '.join(RATED_FILES)})")
     p = sub.add_parser("download", help="fetch the listed puzzles' slim maps")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--max", type=int, default=0)
@@ -431,8 +558,8 @@ def main():
     p.add_argument("--budget", type=int, default=50_000)
     p.add_argument("--p2c", help="also write the solvable levels as .p2c files here")
     a = ap.parse_args()
-    {"list": cmd_list, "download": cmd_download, "build": cmd_build, "finalize": cmd_finalize,
-     "pipeline": cmd_pipeline}[a.cmd](a)
+    {"list": cmd_list, "ratings": cmd_ratings, "download": cmd_download, "build": cmd_build,
+     "finalize": cmd_finalize, "pipeline": cmd_pipeline}[a.cmd](a)
 
 
 if __name__ == "__main__":

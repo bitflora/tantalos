@@ -24,9 +24,47 @@ python tools/workshop/fetch.py pipeline --workers 8 --retry-errors
 ```
 
 `levels.jsonl` has the fields `glados dataset` writes (`tokens`, `verdict`, `min_len`, `metrics`),
-plus `workshop_id`, `title`, `subscribers` (lifetime unique) and `favorited`. Training reads the
+plus `workshop_id`, `title`, `subscribers` (lifetime unique), `favorited` and, once `ratings` has
+run, the Workshop page's star rating: `stars` (1-5; 0 = "not enough ratings yet") and `votes` (its
+"N ratings"). Training reads the
 id as `<src:ws>` and the subscribers as `<tier:top>` (≥ 100) or `<tier:mid>` (train/data.py).
 `build --p2c DIR` also writes the solvable ones as `.p2c`.
+
+```bash
+python tools/workshop/fetch.py ratings                 # out/workshop/ratings.jsonl, then annotate
+python tools/workshop/fetch.py ratings --annotate-only # only copy ratings onto the level files
+```
+
+`ratings` reads the star ratings without an API key: each browse page embeds its 30 items'
+`star_rating` and `total_votes` (the same numbers as the item page). It re-reads every
+(sort, page) `items.jsonl` was listed from (about 2,500 pages, an hour or so; pages read in the
+last `--max-age` days are skipped, so an interrupted run resumes). Converted levels that have
+moved off those pages are then looked up on their own item page. Those pages get rate-limited (429)
+sooner, and a 429 makes the request wait a minute. Last, it sets `stars`/`votes` in place in
+`out/workshop/levels.jsonl` and `data/ws5/{train,test}.jsonl` (`--files` for others); `build` and
+`ws3.py` carry them on from there. `list` also saves the ratings of every page it reads.
+
+## Triaging the downloaded levels
+
+`glados workbench` (repo root, needs the release or debug `glados.exe`) serves a local browser app
+for `out/workshop/levels.jsonl` joined with `data/ws5/{train,test}.jsonl`, the ratings and item
+metadata. It shows the Workshop stars/votes, subscribers, tags, the solver and dataset verdicts,
+all metrics, conversion problems, the level tokens and a 2.5D drawing of the chamber. You can mark
+a level as staged for manual playtesting, give it your own 1–5 stars, write notes, and exclude it
+from the test data.
+
+The annotations are in `train/workshop-annotations.jsonl` (server-side, one JSON object per
+`workshop_id`). Agents can read or write them without the browser:
+
+```bash
+python tools/workshop/annotations.py --get 100091397
+python tools/workshop/annotations.py --excluded
+python tools/workshop/annotations.py --set 100091397 --rating 4 --staged --notes "worth playing"
+```
+
+`excluded` is honoured when the ws5 split is rebuilt (`ws3.py` moves the level to train) and when
+`data/plans/test-ws.jsonl` is rebuilt (`train/plans.py` skips it). It does not remove the level
+from training.
 
 ## How it works
 

@@ -20,6 +20,8 @@ import shutil
 from collections import Counter
 from pathlib import Path
 
+from annotations import excluded_ids
+
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "out" / "workshop" / "levels.jsonl"
 OUT = ROOT / "data" / "ws3"
@@ -40,6 +42,7 @@ def main():
     out = Path(a.out)
     levels = [json.loads(l) for l in open(a.src, encoding="utf-8") if l.strip()]
     old_test, old_train = ids(ROOT / "data/ws2/test.jsonl"), ids(ROOT / "data/ws2/train.jsonl")
+    excluded = excluded_ids()
     seen, counts = set(), Counter()
     split = {"train": [], "test": []}
     for r in levels:
@@ -65,6 +68,10 @@ def main():
             name = "train"
         else:
             name = "test" if int(hashlib.md5(wid.encode()).hexdigest(), 16) % 9 == 0 else "train"
+        if name == "test" and wid in excluded:
+            # `glados workbench`: the user marked this level as one to keep out of the test split.
+            name = "train"
+            counts["moved out of test by annotation"] += 1
         split[name].append(r)
 
     out.mkdir(parents=True, exist_ok=True)

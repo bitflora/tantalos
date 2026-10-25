@@ -66,7 +66,14 @@ const USAGE: &str = "usage:
                                 a browser app for saved solutions: scans the roots for
                                 <name>.route.jsonl with <name>.p2c beside it, serves them and
                                 draws the level in 2.5D with the plan playing back. --list just
-                                prints what it found. (default roots: fixtures, out, runs)";
+                                prints what it found. (default roots: fixtures, out, runs)
+  glados workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE]
+                   [--items FILE] [--fetched FILE] [--annotations FILE]
+                   [--port N] [--no-open] [--list]
+                                a browser app for the downloaded Workshop levels: every field
+                                we have, the solver's verdict, the Workshop rating and the
+                                level in 2.5D. Rate, note, mark playtest-staged or exclude
+                                from test data; saved in train/workshop-annotations.jsonl.";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -88,6 +95,7 @@ fn main() -> ExitCode {
         Some("editor") if args.len() > 1 => editor_check(&args[1..]),
         Some("route") => run_route(&args[1..]),
         Some("view") => run_view(&args[1..]),
+        Some("workbench") => glados::workbench::run(&args[1..]).map_err(Into::into),
         Some("roundtrip") if args.len() > 1 => {
             args[1..].iter().try_for_each(|f| roundtrip(Path::new(f)))
         }

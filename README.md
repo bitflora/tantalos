@@ -394,6 +394,44 @@ self-contained copy with the data inlined.
 doesn't launch the browser, and `--list` just prints what it found. It works the same for a plan
 the Rust solver made (`glados route`) and for one the solver net wrote (`glados check --route`).
 
+## Triaging the downloaded Workshop levels
+`glados workbench` is a local browser app for the levels `tools/workshop/fetch.py` downloaded. It
+merges `out/workshop/levels.jsonl`, `data/ws5/{train,test}.jsonl`, the Workshop ratings and item
+metadata, and shows every field we have: title and id, subscribers/favourites/tags, the Workshop
+star rating and vote count, the solver's verdict and the dataset verdict, plan length, all
+metrics, conversion problems, and the chamber drawn in 2.5D from its tokens. The sidebar filters
+by verdict, ws5 split, Workshop rating, your own rating, staged/excluded/notes, and sorts by any
+of the useful numbers.
+
+The app also stores your triage of each level in `train/workshop-annotations.jsonl` (one JSON
+object per line, keyed by `workshop_id`):
+
+```json
+{"workshop_id":"100091397","staged":true,"rating":4,"notes":"solver gap: laser timing","excluded":true,"updated":1792888260}
+```
+
+- **staged** — copied into the Puzzle Maker for manual playtesting.
+- **rating** — your 0–5 stars (0 = not rated).
+- **notes** — free text.
+- **excluded** — keep this level out of the ws5 **test** split. `tools/workshop/ws3.py` moves it
+  to train when it rebuilds `data/ws5`, and `train/plans.py` leaves it out of `data/plans/test-ws.jsonl`.
+  It can still be used for training.
+
+The annotations are server-side, so agents and other tools read the same store as the browser:
+
+```bash
+python tools/workshop/annotations.py --get 100091397
+python tools/workshop/annotations.py --excluded
+python tools/workshop/annotations.py --json
+python tools/workshop/annotations.py --set 100091397 --rating 4 --staged --notes "worth playing"
+python tools/workshop/annotations.py --set 100091397 --exclude
+```
+
+`glados workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE] [--items FILE]
+[--annotations FILE] [--port N] [--no-open] [--list]` defaults to the files above. `--list` prints
+the corpus and annotation summary without starting a server. The level files are never rewritten;
+only the annotation store is.
+
 ## Plans as tokens (for a solver net)
 `src/plan.rs` writes a route as plan tokens, one group per step in the level's own coordinates
 and without the walks: `fire blue 0 5 4 -x fire orange 7 0 1 +x pickup 2 2 1 enter orange

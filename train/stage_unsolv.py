@@ -5,11 +5,14 @@ these and reports how they solved them (see the memory/CLAUDE.md notes). One com
 
     python train/stage_unsolv.py --n 5            # pick, re-score, write out/unsolv-DATE/, stage
     python train/stage_unsolv.py --n 5 --dry-run  # same picks, nothing written or copied
+    python train/stage_unsolv.py --order rating   # best rated first instead of smallest
 
 Steps: take levels of data/ws5/train.jsonl labelled unsolvable, drop those already staged
 (train/unsolv-staged.jsonl, plus any staged Title), whose compiled map paints gel with
 `@pre_paint_sprayer` entities (the converter doesn't model it, so the copy wouldn't play like
-the original) or that have no map in out/workshop/bsp. Smallest first, one per item set. Re-score
+the original) or that have no map in out/workshop/bsp. Smallest first (or with `--order rating`
+most Workshop stars first, then most ratings: `stars`/`votes` from `fetch.py ratings`), one per
+item set. Re-score
 each pick with the current release `glados.exe` (50k and 250k budgets, editor rules off) and
 `glados editor`; keep only those still unsolvable and without editor flags. Write p2c/, tokens,
 scores, MANIFEST.md in out/unsolv-DATE[-N]/, copy to the Puzzle Maker folder as
@@ -78,8 +81,15 @@ def score(tokens, budget, p2c_dir=None):
     return run(args, "\n".join(tokens) + "\n")
 
 
-def candidates(n, skip_ids, skip_titles, pool):
-    """Smallest-first unsolvable, unstaged levels with a usable map, one per item set."""
+def rating(r):
+    if "stars" not in r:
+        return "?"
+    return f"{r['stars']}/5 ({r['votes']:,})" if r["stars"] else f"not yet ({r['votes']:,})"
+
+
+def candidates(n, skip_ids, skip_titles, pool, order="size"):
+    """Smallest-first (or best-rated-first) unsolvable, unstaged levels with a usable map, one
+    per item set."""
     rows = []
     for line in DATA.open(encoding="utf-8"):
         r = json.loads(line)
@@ -87,6 +97,8 @@ def candidates(n, skip_ids, skip_titles, pool):
                 and r.get("title", "") not in skip_titles:
             rows.append(r)
     rows.sort(key=lambda r: r["n_tokens"])
+    if order == "rating":
+        rows.sort(key=lambda r: (-r.get("stars", 0), -r.get("votes", 0)))
     picked, seen, tmp = [], set(), ROOT / "out" / ".stage-probe"
     for i in range(0, len(rows), 40):
         if len(picked) >= pool:
@@ -111,6 +123,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n", type=int, default=5, help="how many levels to stage")
     ap.add_argument("--dry-run", action="store_true", help="show the picks, write and copy nothing")
+    ap.add_argument("--order", choices=["size", "rating"], default="size",
+                    help="smallest first, or most Workshop stars (then ratings) first")
     a = ap.parse_args()
     if not GLADOS.exists():
         sys.exit("target/release/glados.exe is missing: cargo build --release (not during a training run)")
@@ -121,7 +135,7 @@ def main():
     tmp = ROOT / "out" / ".stage-probe"
     tmp.mkdir(parents=True, exist_ok=True)
     # a pool larger than n: some picks fail the 250k re-score or the editor check
-    pool = candidates(a.n, skip_ids, skip_titles, a.n * 3)
+    pool = candidates(a.n, skip_ids, skip_titles, a.n * 3, a.order)
     tokens = [r["tokens"] for r in pool]
     s50 = score(tokens, 50_000)
     s250 = score(tokens, 250_000)
@@ -138,7 +152,7 @@ def main():
         print(f"only {len(keep)} of {a.n} still unsolvable at 250k; run again after this batch")
     if a.dry_run or not keep:
         for r, _, _ in keep:
-            print(r["workshop_id"], r["n_tokens"], r["title"])
+            print(r["workshop_id"], r["n_tokens"], rating(r), r["title"])
         return
 
     (out / "p2c").mkdir(parents=True)
@@ -170,17 +184,17 @@ def main():
         rows.append((name, r, src, bad))
         with REGISTRY.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"workshop_id": r["workshop_id"], "title": r["title"], "file": name,
-                                "date": day}) + "\n")
-        print(f"{dst}  <- workshop {r['workshop_id']} {r['title']!r}" + (f"  EDITOR FLAGS {bad}" if bad else ""))
+                                "date": day, "stars": r.get("stars"), "votes": r.get("votes")}) + "\n")
+        print(f"{dst}  <- workshop {r['workshop_id']} {r['title']!r} ({rating(r)})" + (f"  EDITOR FLAGS {bad}" if bad else ""))
 
     lines = [f"# {len(rows)} more unsolvable Workshop levels, staged {day}", "",
              f"Source: `data/ws5/train.jsonl`, picked by `train/stage_unsolv.py`. Still unsolvable with the "
              f"current release build at 50k and 250k (`glados score --editor-rules off`). A published "
              f"puzzle was solved by its author, so the verdict is a solver gap.", "",
-             "| staged file | workshop id | title | tokens | items | editor flags | in game |",
-             "|---|---|---|---:|---|---|---|"]
+             "| staged file | workshop id | title | rating | tokens | items | editor flags | in game |",
+             "|---|---|---|---|---:|---|---|---|"]
     for name, r, src, bad in rows:
-        lines.append(f"| `{name}` | {r['workshop_id']} | {r['title']} | {r['n_tokens']} | "
+        lines.append(f"| `{name}` | {r['workshop_id']} | {r['title']} | {rating(r)} | {r['n_tokens']} | "
                      f"{preview.summary(src)} | {bad or 'none'} | not run |")
     lines += ["", "Files: `tokens.txt`, `p2c/NNNNN.p2c` (same order), `scores-50k/250k.jsonl`, `editor.jsonl`."]
     (out / "MANIFEST.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

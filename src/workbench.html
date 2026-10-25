@@ -1,0 +1,1137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glados workbench</title>
+<style>
+  :root {
+    --bg:#15171c; --panel:#1d2027; --panel2:#252a33; --panel3:#2d333e; --line:#343b48;
+    --text:#e7eaf0; --dim:#98a2b3; --faint:#6d7788; --accent:#5aa9ff;
+    --green:#37d67a; --amber:#f4b740; --red:#ff5d5d; --purple:#c084fc; --blue:#60a5fa;
+    --pink:#f472b6;
+  }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font:13px/1.45 "Segoe UI", system-ui, sans-serif; overflow:hidden; }
+  #app { display:flex; height:100vh; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  button, select, input, textarea {
+    font:inherit; color:var(--text); background:var(--panel2); border:1px solid var(--line);
+    border-radius:6px; outline:none;
+  }
+  button { padding:5px 9px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button:disabled { opacity:.4; cursor:default; border-color:var(--line); }
+  button.primary { background:#2b3d55; border-color:#3c5a7d; }
+  select, input[type=text], input[type=search] { padding:5px 7px; }
+  textarea { padding:8px; resize:vertical; min-height:110px; line-height:1.5; width:100%; }
+  input:focus, select:focus, textarea:focus, button:focus-visible { border-color:var(--accent); }
+  label { color:var(--dim); }
+  .hint { color:var(--faint); font-size:11px; margin:4px 0 0; }
+  .chips { display:flex; flex-wrap:wrap; gap:4px 12px; margin-top:8px; }
+  .chips label { display:flex; align-items:center; gap:4px; font-size:11px; cursor:pointer;
+    white-space:nowrap; }
+  input[type=checkbox] { accent-color:var(--accent); }
+
+  /* ---- sidebar ---------------------------------------------------------- */
+  #sidebar { width:350px; flex:0 0 auto; background:var(--panel); border-right:1px solid var(--line);
+    display:flex; flex-direction:column; min-height:0; }
+  #sidebar header { padding:10px 12px 9px; border-bottom:1px solid var(--line); }
+  #sidebar h1 { margin:0 0 2px; font-size:14px; font-weight:650; letter-spacing:.2px; }
+  #sidebar h1 span { color:var(--dim); font-weight:400; font-size:11px; }
+  #search { width:100%; margin-top:7px; }
+  .filters { display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:7px; }
+  .filters select { width:100%; min-width:0; }
+  .filters .wide { grid-column:1 / -1; }
+  #list { overflow:auto; flex:1; margin:0; padding:5px 6px; list-style:none; min-height:0; }
+  #list li { padding:7px 8px; border-radius:6px; cursor:pointer; border:1px solid transparent; }
+  #list li:hover { background:var(--panel2); }
+  #list li.active { background:#293b53; border-color:#3b5c82; }
+  #list li .top { display:flex; align-items:center; gap:6px; min-width:0; }
+  #list li .title { flex:1; min-width:0; white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis; font-weight:550; }
+  #list li .sub { display:flex; align-items:center; flex-wrap:wrap; gap:5px; margin-top:3px;
+    color:var(--dim); font-size:11px; }
+  #list li .stars { color:#f3c34b; letter-spacing:.5px; white-space:nowrap; }
+  #list li .mine { color:#ffe08a; }
+  #listfoot { padding:6px 10px; border-top:1px solid var(--line); color:var(--faint);
+    font-size:11px; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  #listfoot button { padding:2px 7px; font-size:11px; }
+
+  .badge { display:inline-flex; align-items:center; gap:3px; padding:0 5px; height:17px;
+    border-radius:9px; font-size:10px; font-weight:650; letter-spacing:.25px; white-space:nowrap;
+    border:1px solid transparent; }
+  .b-solvable { background:#153a26; color:#7ef0a8; border-color:#245c3b; }
+  .b-uncertain { background:#3a2f12; color:#ffd479; border-color:#5e4b1c; }
+  .b-unsolvable { background:#3e1c1f; color:#ff9b9b; border-color:#6a2c31; }
+  .b-invalid, .b-unsupported { background:#33223f; color:#d8b4fe; border-color:#54366b; }
+  .b-published { background:#1d3048; color:#9ccaff; border-color:#31527d; }
+  .b-solvable, .b-uncertain, .b-unsolvable, .b-invalid, .b-unsupported, .b-published { text-transform:lowercase; }
+  .b-test { background:#2f2240; color:#e6b8ff; border-color:#583b74; }
+  .b-train { background:#1f3030; color:#9de0d8; border-color:#31504d; }
+  .b-staged { background:#3b3214; color:#ffe08a; border-color:#655522; }
+  .b-excluded { background:#3d1d24; color:#ffa3b1; border-color:#6d303b; }
+  .b-mine { background:#3d3518; color:#ffe08a; border-color:#685a28; }
+  .b-note { background:#202b3a; color:#b7d4f5; border-color:#344b68; }
+
+  /* ---- main ------------------------------------------------------------- */
+  #main { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+  #welcome { margin:auto; max-width:600px; padding:30px; color:var(--dim); text-align:center; }
+  #welcome h2 { color:var(--text); margin:0 0 8px; font-size:20px; }
+  #welcome kbd { background:var(--panel2); border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:4px; padding:1px 5px; color:var(--text); font-size:11px; }
+  #detail { display:none; flex:1; min-height:0; overflow:auto; }
+  #detail.on { display:block; }
+  .detail-head { position:sticky; top:0; z-index:5; display:flex; gap:12px; align-items:flex-start;
+    padding:12px 16px; background:rgba(21,23,28,.94); backdrop-filter:blur(7px);
+    border-bottom:1px solid var(--line); }
+  .detail-head .heading { min-width:0; flex:1; }
+  .detail-head h2 { margin:0; font-size:17px; line-height:1.3; overflow-wrap:anywhere; }
+  .detail-head .sub { color:var(--dim); font-size:11px; margin-top:3px; display:flex;
+    flex-wrap:wrap; gap:5px 10px; align-items:center; }
+  .detail-head .nav { display:flex; gap:4px; flex:0 0 auto; }
+  .detail-head .nav button { padding:4px 8px; }
+  .detail-grid { display:grid; grid-template-columns:355px minmax(0,1fr); gap:12px;
+    padding:12px 16px 26px; align-items:start; }
+  .col { display:flex; flex-direction:column; gap:12px; min-width:0; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:9px; padding:11px 12px;
+    min-width:0; }
+  .card h3 { margin:0 0 9px; font-size:12px; text-transform:uppercase; letter-spacing:.7px;
+    color:var(--dim); font-weight:650; display:flex; align-items:center; gap:8px; }
+  .card h3 .spacer { flex:1; }
+  .warning { border:1px solid #68421a; background:#332611; color:#ffd28a; border-radius:7px;
+    padding:8px 10px; margin-bottom:12px; font-size:12px; overflow-wrap:anywhere; }
+  .facts { display:flex; flex-direction:column; }
+  .fact { display:grid; grid-template-columns:118px minmax(0,1fr); gap:8px; padding:4px 0;
+    border-bottom:1px solid rgba(255,255,255,.035); font-size:12px; }
+  .fact:last-child { border-bottom:none; }
+  .fact .k { color:var(--dim); }
+  .fact .v { min-width:0; overflow-wrap:anywhere; }
+  .row { display:flex; align-items:center; gap:8px; }
+  .row.wrap { flex-wrap:wrap; }
+  .bigcheck { display:flex; gap:7px; align-items:flex-start; cursor:pointer; color:var(--text);
+    padding:5px 0; font-size:12px; }
+  .bigcheck input { margin-top:2px; width:15px; height:15px; }
+  .bigcheck small { display:block; color:var(--faint); font-size:11px; margin-top:1px; }
+  .starrow { background:none; border:none; padding:0 1px; cursor:pointer; color:#4b5260;
+    font-size:22px; line-height:1; }
+  .starrow.on { color:#f3c34b; }
+  .starrow:hover { color:#ffe08a; }
+  .clear { font-size:11px; padding:2px 6px; color:var(--dim); }
+  #saved { font-weight:400; text-transform:none; letter-spacing:0; color:var(--faint); }
+  #saved.ok { color:var(--green); } #saved.err { color:var(--red); }
+
+  .tags { display:flex; flex-wrap:wrap; gap:4px; }
+  .tag { background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+    padding:0 7px; font-size:10px; color:var(--dim); }
+  .stagecard { padding:0; overflow:hidden; }
+  .stagehead { display:flex; align-items:center; gap:8px; padding:9px 12px;
+    border-bottom:1px solid var(--line); }
+  .stagehead h3 { margin:0; }
+  .stagehead .tools { margin-left:auto; display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
+  .stagehead button { padding:3px 7px; font-size:11px; }
+  .stagehead label { font-size:11px; display:flex; align-items:center; gap:4px; cursor:pointer; }
+  #stage { position:relative; height:clamp(320px, 52vh, 620px); background:
+    radial-gradient(ellipse at 50% 38%, #222630 0%, #16181d 70%); overflow:hidden; }
+  #cv { position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; }
+  #cv.drag { cursor:grabbing; }
+  #stage-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--faint); padding:20px; text-align:center; pointer-events:none; }
+  #legend { position:absolute; left:9px; bottom:7px; right:9px; display:flex; flex-wrap:wrap;
+    gap:3px 9px; pointer-events:none; }
+  #legend span { display:flex; align-items:center; gap:4px; color:var(--dim); font-size:10px;
+    background:rgba(21,23,28,.72); padding:1px 5px; border-radius:9px; }
+  #legend i { width:8px; height:8px; border-radius:2px; display:inline-block; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  td, th { text-align:left; padding:3px 4px; border-bottom:1px solid rgba(255,255,255,.04);
+    vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+  th { color:var(--dim); font-weight:550; }
+  td.k { color:var(--dim); width:42%; overflow-wrap:anywhere; }
+  td.v { overflow-wrap:anywhere; }
+  code, pre { font-family:"Cascadia Mono", Consolas, monospace; font-size:11px; }
+  pre { margin:7px 0 0; padding:9px; background:var(--bg); border:1px solid var(--line);
+    border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere; max-height:260px; overflow:auto; }
+  details summary { cursor:pointer; color:var(--dim); font-size:12px; }
+  details summary:hover { color:var(--text); }
+  .copy { font-size:11px; padding:2px 7px; }
+  @media (max-width:1050px) {
+    .detail-grid { grid-template-columns:1fr; }
+    #sidebar { width:310px; }
+  }
+  @media (max-width:760px) {
+    #sidebar { width:270px; }
+    .detail-grid { padding:10px; }
+  }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#3a404c; border-radius:6px; border:2px solid var(--bg); }
+  ::-webkit-scrollbar-track { background:transparent; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header>
+      <h1>glados workbench <span id="count">loading…</span></h1>
+      <input id="search" type="search" placeholder="Search title, id, tag, notes…" autocomplete="off">
+      <div class="filters">
+        <select id="f-verdict" title="Solver classification">
+          <option value="">all verdicts</option>
+          <option value="solvable">solvable</option>
+          <option value="uncertain">uncertain</option>
+          <option value="unsolvable">unsolvable</option>
+          <option value="invalid">invalid</option>
+          <option value="unsupported">unsupported</option>
+          <option value="published">published, solver disagrees</option>
+        </select>
+        <select id="f-split" title="ws5 split">
+          <option value="">all splits</option>
+          <option value="test">test</option>
+          <option value="train">train</option>
+          <option value="none">not in ws5</option>
+        </select>
+        <select id="f-stars" title="Workshop rating">
+          <option value="">any Workshop rating</option>
+          <option value="rated">rated (1★+)</option>
+          <option value="3">3★ and up</option>
+          <option value="4">4★ and up</option>
+          <option value="5">5★</option>
+          <option value="unrated">not enough ratings</option>
+        </select>
+        <select id="f-mine" title="My rating">
+          <option value="">any of my ratings</option>
+          <option value="1">my 1★ and up</option>
+          <option value="3">my 3★ and up</option>
+          <option value="4">my 4★ and up</option>
+          <option value="5">my 5★</option>
+          <option value="rated">rated by me</option>
+        </select>
+        <select id="sort" class="wide" title="Sort">
+          <option value="workshop">sort: Workshop rating</option>
+          <option value="votes">sort: most ratings</option>
+          <option value="subscribers">sort: most subscribers</option>
+          <option value="favourited">sort: most favourited</option>
+          <option value="newest">sort: newest Workshop upload</option>
+          <option value="smallest">sort: smallest level</option>
+          <option value="largest">sort: largest level</option>
+          <option value="title">sort: title</option>
+          <option value="verdict">sort: solver verdict</option>
+          <option value="mine">sort: my rating</option>
+          <option value="recent">sort: recently annotated</option>
+        </select>
+      </div>
+      <div class="chips">
+        <label><input type="checkbox" id="f-staged"> staged</label>
+        <label><input type="checkbox" id="f-excluded"> excluded</label>
+        <label><input type="checkbox" id="f-notes"> has notes</label>
+        <label><input type="checkbox" id="f-annotated"> annotated</label>
+        <label><input type="checkbox" id="f-testonly"> test split only</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="rescan" title="Re-read the level files from disk">Rescan</button>
+        <a id="export" href="/api/export" download="workshop-annotations.jsonl" title="Download all annotations as JSONL">Export notes</a>
+        <span class="hint" style="margin-left:auto">↑↓ to move · 1–5 rate · s staged · e exclude</span>
+      </div>
+    </header>
+    <ul id="list"></ul>
+    <div id="listfoot"><span id="shown"></span><button id="more" hidden>show more</button></div>
+  </aside>
+  <main id="main">
+    <div id="welcome">
+      <h2>Pick a level</h2>
+      <p>This reads every downloaded Workshop level, joins the Workshop rating and item metadata,
+        shows how our solver classified it, and draws its chamber.</p>
+      <p>Your notes, rating, playtest staging and test-data exclusion are saved to
+        <code>train/workshop-annotations.jsonl</code>.</p>
+      <p>Use the filters on the left, or press <kbd>/</kbd> to search.</p>
+    </div>
+    <div id="detail"></div>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+// ---- data -----------------------------------------------------------------
+const state = {
+  levels: [],
+  byId: new Map(),
+  ratings: {},
+  items: {},
+  fetched: {},
+  annotations: {},
+  filtered: [],
+  shown: 500,
+  selected: null,
+  geom: null,
+  geomError: null,
+  loadingGeometry: false,
+  view: { yaw: 0, zoom: 1, panX: 0, panY: 0, nearWalls: false },
+};
+const LIMIT = 500;
+const EMPTY_ANNOTATION = () => ({ staged:false, rating:0, notes:"", excluded:false, updated:0 });
+
+// ---- small helpers --------------------------------------------------------
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
+  "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+}[c]));
+const num = n => (n === null || n === undefined || Number.isNaN(Number(n))) ? "—"
+  : Number(n).toLocaleString("en-US");
+function big(n) {
+  n = Number(n || 0);
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k";
+  return String(n);
+}
+function date(sec) {
+  if (!sec) return "—";
+  const d = new Date(sec * 1000);
+  return isNaN(d) ? "—" : d.toLocaleDateString("en-GB", { year:"numeric", month:"short", day:"numeric" });
+}
+function starsText(n) {
+  if (!n) return "not enough ratings yet";
+  return "★".repeat(n) + "☆".repeat(5 - n);
+}
+function starsHtml(n) {
+  return `<span class="stars" title="${n}/5">${"★".repeat(n)}${"☆".repeat(5-n)}</span>`;
+}
+function verdictOf(l) {
+  return l.solver_verdict || (l.verdict === "published" ? "published" : l.verdict) || "?";
+}
+function verdictBadge(l) {
+  const v = verdictOf(l);
+  const cls = ["solvable","uncertain","unsolvable","invalid","unsupported","published"].includes(v)
+    ? v : "unsupported";
+  return `<span class="badge b-${cls}">${esc(v)}</span>`;
+}
+function splitBadge(l) {
+  if (l.split === "test") return `<span class="badge b-test">test</span>`;
+  if (l.split === "train") return `<span class="badge b-train">train</span>`;
+  return "";
+}
+function annotationBadges(l) {
+  const a = l.ann || EMPTY_ANNOTATION();
+  let out = "";
+  if (a.staged) out += `<span class="badge b-staged">staged</span>`;
+  if (a.excluded) out += `<span class="badge b-excluded">excluded</span>`;
+  if (a.rating) out += `<span class="badge b-mine">my ${"★".repeat(a.rating)}</span>`;
+  if (a.notes) out += `<span class="badge b-note">notes</span>`;
+  return out;
+}
+function fact(k, v) {
+  return `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`;
+}
+function value(v, fallback="—") {
+  if (v === null || v === undefined || v === "") return fallback;
+  return esc(v);
+}
+function tagsHtml(tags) {
+  if (!Array.isArray(tags) || !tags.length) return `<span class="hint">no tags</span>`;
+  return `<span class="tags">${tags.map(t => `<span class="tag">${esc(t)}</span>`).join("")}</span>`;
+}
+
+// ---- loading --------------------------------------------------------------
+async function getJson(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+  return r.json();
+}
+
+async function loadAll() {
+  const [levels, ratings, items, fetched, annotations] = await Promise.all([
+    getJson("/api/levels"), getJson("/api/ratings"), getJson("/api/items"),
+    getJson("/api/fetched"), getJson("/api/annotations"),
+  ]);
+  state.ratings = ratings || {};
+  state.items = items || {};
+  state.fetched = fetched || {};
+  state.annotations = {};
+  for (const a of annotations || []) state.annotations[String(a.workshop_id)] = a;
+  const keep = state.selected;
+  state.selected = null;
+  state.byId.clear();
+  state.levels = (levels.levels || []).map(r => {
+    const id = String(r.workshop_id);
+    const it = state.items[id] || {};
+    const rt = state.ratings[id];
+    const dl = state.fetched[id];
+    const l = Object.assign({}, r, it, { id });
+    // The corpus record and the ws5 record may disagree on which field holds the verdict.
+    l.dataset_verdict = r.verdict;
+    l.solver = r.solver_verdict || r.verdict || "?";
+    l.ann = state.annotations[id] || EMPTY_ANNOTATION();
+    if (rt) { l.stars = rt.stars; l.votes = rt.votes; }
+    if (dl) { l.download = dl.status; l.download_bytes = dl.bytes; }
+    l.search = [l.title, id, l.verdict, l.solver_verdict, l.problem,
+      (it.tags || []).join(" "), l.ann.notes].filter(Boolean).join(" ").toLowerCase();
+    state.byId.set(id, l);
+    return l;
+  });
+  renderFilterOptions();
+  applyFilters();
+  const id = decodeURIComponent(location.hash.replace(/^#/, ""));
+  if (id && state.byId.has(id)) select(id, { scroll:false });
+  else if (keep && state.byId.has(keep)) select(keep, { scroll:false });
+  else if (state.filtered.length) select(state.filtered[0].id, { scroll:false });
+}
+
+function renderFilterOptions() {
+  // Keep the markup's options; counts are shown in the header.
+  const n = state.levels.length;
+  $("#count").textContent = `${num(n)} levels`;
+}
+
+// ---- filtering and sorting ------------------------------------------------
+function compare(a, b, key) {
+  const av = a[key], bv = b[key];
+  if (av === bv) return 0;
+  if (av === null || av === undefined) return 1;
+  if (bv === null || bv === undefined) return -1;
+  return av < bv ? -1 : 1;
+}
+const VERDICT_ORDER = { solvable:0, uncertain:1, unsolvable:2, invalid:3, unsupported:4, published:5 };
+
+function applyFilters() {
+  const q = $("#search").value.trim().toLowerCase();
+  const verdict = $("#f-verdict").value;
+  const split = $("#f-split").value;
+  const stars = $("#f-stars").value;
+  const mine = $("#f-mine").value;
+  const staged = $("#f-staged").checked;
+  const excluded = $("#f-excluded").checked;
+  const notes = $("#f-notes").checked;
+  const annotated = $("#f-annotated").checked;
+  const testonly = $("#f-testonly").checked;
+
+  state.filtered = state.levels.filter(l => {
+    if (q && !l.search.includes(q)) return false;
+    if (verdict === "published") {
+      if (l.dataset_verdict !== "published") return false;
+    } else if (verdict && l.solver !== verdict) return false;
+    if (split === "none" && l.split) return false;
+    if (split === "test" && l.split !== "test") return false;
+    if (split === "train" && l.split !== "train") return false;
+    if (testonly && l.split !== "test") return false;
+    const s = Number(l.stars || 0);
+    if (stars === "rated" && s < 1) return false;
+    if (stars === "unrated" && s > 0) return false;
+    if (["1","3","4","5"].includes(stars) && s < Number(stars)) return false;
+    const m = Number(l.ann.rating || 0);
+    if (mine === "rated" && m < 1) return false;
+    if (["1","3","4","5"].includes(mine) && m < Number(mine)) return false;
+    if (staged && !l.ann.staged) return false;
+    if (excluded && !l.ann.excluded) return false;
+    if (notes && !l.ann.notes.trim()) return false;
+    if (annotated && !(l.ann.staged || l.ann.excluded || l.ann.rating || l.ann.notes.trim())) return false;
+    return true;
+  });
+
+  const sort = $("#sort").value;
+  const byVotes = (a,b) => (Number(b.votes||0) - Number(a.votes||0));
+  if (sort === "workshop") {
+    state.filtered.sort((a,b) => (Number(b.stars||0) - Number(a.stars||0)) || byVotes(a,b)
+      || compare(a,b,"title"));
+  } else if (sort === "votes") {
+    state.filtered.sort((a,b) => byVotes(a,b) || (Number(b.stars||0)-Number(a.stars||0)));
+  } else if (sort === "subscribers") {
+    state.filtered.sort((a,b) => Number(b.subscribers||0) - Number(a.subscribers||0));
+  } else if (sort === "favourited") {
+    state.filtered.sort((a,b) => Number(b.favourited||0) - Number(a.favourited||0));
+  } else if (sort === "newest") {
+    state.filtered.sort((a,b) => Number(b.time_created||0) - Number(a.time_created||0));
+  } else if (sort === "smallest") {
+    state.filtered.sort((a,b) => Number(a.n_tokens||1e9) - Number(b.n_tokens||1e9));
+  } else if (sort === "largest") {
+    state.filtered.sort((a,b) => Number(b.n_tokens||0) - Number(a.n_tokens||0));
+  } else if (sort === "verdict") {
+    state.filtered.sort((a,b) => (VERDICT_ORDER[a.solver] ?? 9) - (VERDICT_ORDER[b.solver] ?? 9)
+      || (Number(b.stars||0)-Number(a.stars||0)) || byVotes(a,b));
+  } else if (sort === "mine") {
+    state.filtered.sort((a,b) => (Number(b.ann.rating||0)-Number(a.ann.rating||0))
+      || (Number(b.ann.updated||0)-Number(a.ann.updated||0)));
+  } else if (sort === "recent") {
+    state.filtered.sort((a,b) => Number(b.ann.updated||0) - Number(a.ann.updated||0));
+  } else {
+    state.filtered.sort((a,b) => compare(a,b,"title"));
+  }
+
+  state.shown = LIMIT;
+  renderList();
+}
+
+function renderList() {
+  const list = $("#list");
+  const shown = state.filtered.slice(0, state.shown);
+  list.innerHTML = shown.map(l => {
+    const ws = Number(l.stars || 0);
+    const votes = l.votes ? `${num(l.votes)} ratings` : "no ratings";
+    const mine = l.ann.rating ? `<span class="mine">mine ${"★".repeat(l.ann.rating)}</span>` : "";
+    return `<li data-id="${esc(l.id)}" class="${state.selected === l.id ? "active" : ""}">
+      <div class="top"><span class="title">${esc(l.title || "(untitled)")}</span>${verdictBadge(l)}</div>
+      <div class="sub">
+        <span class="stars" title="${ws ? ws+" of 5 stars" : "not enough ratings yet"}">${ws ? "★".repeat(ws) : "—"}</span>
+        <span>${votes}</span>
+        ${splitBadge(l)}${annotationBadges(l)}
+      </div>
+      <div class="sub"><span>#${esc(l.id)}</span><span>${big(l.subscribers)} subs</span>${mine}</div>
+    </li>`;
+  }).join("");
+  $("#shown").textContent = state.filtered.length
+    ? `${num(state.filtered.length)} matches · showing ${num(shown.length)}`
+    : "no matches";
+  $("#more").hidden = state.filtered.length <= state.shown;
+  const active = list.querySelector("li.active");
+  if (active) active.scrollIntoView({ block:"nearest" });
+}
+
+function navStep(delta) {
+  if (!state.filtered.length) return;
+  let i = state.filtered.findIndex(l => l.id === state.selected);
+  if (i < 0) i = 0;
+  i = Math.max(0, Math.min(state.filtered.length - 1, i + delta));
+  select(state.filtered[i].id);
+  if (i >= state.shown) { state.shown = i + LIMIT; renderList(); }
+}
+
+// ---- selection and detail -------------------------------------------------
+let notesTimer = null;
+let notesDirty = false;
+let saveSeq = 0, saveApplied = 0;
+
+function current() { return state.byId.get(state.selected) || null; }
+
+function flushNotes() {
+  if (notesTimer) { clearTimeout(notesTimer); notesTimer = null; }
+  const l = current();
+  const ta = $("#a-notes");
+  if (l && ta && notesDirty) {
+    l.ann.notes = ta.value;
+    persist(l);
+    notesDirty = false;
+  }
+}
+
+function select(id, opts={}) {
+  if (state.selected === id && state.byId.has(id)) return;
+  flushNotes();
+  if (!state.byId.has(id)) return;
+  state.selected = id;
+  state.geom = null;
+  state.geomError = null;
+  state.loadingGeometry = true;
+  try { history.replaceState(null, "", "#" + encodeURIComponent(id)); } catch (_) {}
+  renderList();
+  renderDetail(state.byId.get(id));
+  loadGeometry(id);
+}
+
+function renderDetail(l) {
+  const a = l.ann;
+  const ws = Number(l.stars || 0);
+  const votes = Number(l.votes || 0);
+  const geom = state.geom;
+  const size = geom ? geom.size.join(" × ") : "—";
+  const items = geom ? num(geom.items.length) : "—";
+  const detail = $("#detail");
+  $("#welcome").style.display = "none";
+  detail.classList.add("on");
+  detail.innerHTML = `
+    <div class="detail-head">
+      <div class="heading">
+        <h2>${esc(l.title || "(untitled)")}</h2>
+        <div class="sub">
+          <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(l.id)}"
+             target="_blank" rel="noreferrer">Workshop #${esc(l.id)}</a>
+          ${verdictBadge(l)}${splitBadge(l)}<span id="head-ann">${annotationBadges(l)}</span>
+          <span>${ws ? starsHtml(ws) + " " + num(votes) + " ratings" : "not enough ratings yet" + (votes ? " ("+num(votes)+")" : "")}</span>
+        </div>
+      </div>
+      <div class="nav">
+        <button id="prev" title="Previous level (↑ or ←)">↑</button>
+        <button id="next" title="Next level (↓ or →)">↓</button>
+      </div>
+    </div>
+    ${l.problem ? `<div style="padding:12px 16px 0"><div class="warning"><b>Conversion/solver note:</b> ${esc(l.problem)}</div></div>` : ""}
+    <div class="detail-grid">
+      <div class="col">
+        <section class="card">
+          <h3>My annotation <span id="saved"></span></h3>
+          <label class="bigcheck"><input type="checkbox" id="a-staged" ${a.staged ? "checked" : ""}>
+            <span>Staged for manual playtesting<small>you have copied this level into the Puzzle Maker for a play test</small></span></label>
+          <div style="margin:5px 0 2px;color:var(--dim);font-size:12px">My rating</div>
+          <div class="row" style="margin-bottom:3px">
+            <span id="a-stars">${[1,2,3,4,5].map(n =>
+              `<button class="starrow ${a.rating >= n ? "on" : ""}" data-star="${n}"
+                title="${n} star${n>1?"s":""}">★</button>`).join("")}</span>
+            <button class="clear" id="a-clear" title="Clear my rating">clear</button>
+          </div>
+          <label class="bigcheck"><input type="checkbox" id="a-excluded" ${a.excluded ? "checked" : ""}>
+            <span>Exclude from test data<small>kept out of the ws5 test split when the split or <code>data/plans</code> is rebuilt</small></span></label>
+          <div style="margin-top:9px;color:var(--dim);font-size:12px">Notes</div>
+          <textarea id="a-notes" placeholder="What is interesting, broken, or worth remembering?">${esc(a.notes)}</textarea>
+          <p class="hint">Saved automatically. ${a.updated ? "Last edit " + date(a.updated) : ""}</p>
+        </section>
+        <section class="card">
+          <h3>Facts</h3>
+          <div class="facts">
+            ${fact("Solver verdict", verdictBadge(l))}
+            ${fact("Dataset verdict", value(l.dataset_verdict || l.verdict))}
+            ${fact("ws5 split", l.split === "test" ? `<span class="badge b-test">test</span>`
+              : l.split === "train" ? `<span class="badge b-train">train</span>` : "not in ws5")}
+            ${fact("Workshop rating", ws ? `${starsHtml(ws)} <span class="hint">${num(votes)} ratings</span>`
+              : `not enough ratings yet${votes ? ` <span class="hint">(${num(votes)} ratings)</span>` : ""}`)}
+            ${fact("Subscribers", num(l.subscribers))}
+            ${fact("Favourited", num(l.favourited))}
+            ${fact("Shortest plan", (l.min_len === null || l.min_len === undefined) ? "—" : num(l.min_len) + " actions")}
+            ${fact("Needs portals", l.needs_portals === true ? "yes" : l.needs_portals === false ? "no" : "—")}
+            ${fact("Level tokens", num(l.n_tokens))}
+            ${fact("Chamber size", `<span id="f-size">${size}</span>`)}
+            ${fact("Items in view", `<span id="f-items">${items}</span>`)}
+          </div>
+        </section>
+        <section class="card">
+          <h3>Workshop metadata</h3>
+          <div class="facts">
+            ${fact("Tags", tagsHtml(l.tags))}
+            ${fact("Views", num(l.views))}
+            ${fact("Subscriptions", num(l.subscriptions))}
+            ${fact("Lifetime subs", num(l.lifetime_subscriptions))}
+            ${fact("Created", date(l.time_created))}
+            ${fact("Updated", date(l.time_updated))}
+            ${fact("File size", l.file_size ? (Number(l.file_size)/1048576).toFixed(1) + " MB" : "—")}
+            ${fact("Map file", l.filename ? `<code>${esc(l.filename)}</code>` : "—")}
+            ${fact("Listed as", l.sort ? `${esc(l.sort)} page ${esc(l.page)}` : "—")}
+            ${fact("Download", l.download ? `${esc(l.download)}${l.download_bytes ? " (" + (Number(l.download_bytes)/1048576).toFixed(2) + " MB)" : ""}` : "—")}
+            ${fact("Sources", (l.sources || []).map(s => `<span class="tag">${esc(s)}</span>`).join(" "))}
+          </div>
+        </section>
+      </div>
+      <div class="col">
+        <section class="card stagecard">
+          <div class="stagehead">
+            <h3>The level</h3>
+            <div class="tools">
+              <button id="rotl" title="Rotate left">⟲</button>
+              <button id="rotr" title="Rotate right">⟳</button>
+              <button id="zin" title="Zoom in">+</button>
+              <button id="zout" title="Zoom out">−</button>
+              <button id="fit" title="Reset pan and zoom">Fit</button>
+              <label><input type="checkbox" id="nearw" ${state.view.nearWalls ? "checked" : ""}> near walls</label>
+            </div>
+          </div>
+          <div id="stage">
+            <canvas id="cv"></canvas>
+            <div id="stage-empty">${state.loadingGeometry ? "reading the level…" : "no drawing"}</div>
+            <div id="legend"></div>
+          </div>
+        </section>
+        <section class="card">
+          <h3>Metrics</h3>
+          <div id="d-metrics">${metricsHtml(l)}</div>
+        </section>
+        <section class="card">
+          <h3>Everything we have <span class="spacer"></span>
+            <button id="copyfields" class="copy">copy JSON</button></h3>
+          <details>
+            <summary>Show every level field</summary>
+            <div id="d-all" style="margin-top:7px">${allFieldsHtml(l)}</div>
+          </details>
+        </section>
+        <section class="card">
+          <h3>Tokens <span class="spacer"></span><button id="copytokens" class="copy">copy</button></h3>
+          <details>
+            <summary>Show the level token sequence</summary>
+            <pre id="d-tokens"></pre>
+          </details>
+        </section>
+      </div>
+    </div>`;
+
+  // Annotation controls.
+  $("#a-staged").addEventListener("change", e => { a.staged = e.target.checked; persist(l); });
+  $("#a-excluded").addEventListener("change", e => { a.excluded = e.target.checked; persist(l); });
+  $("#a-stars").addEventListener("click", e => {
+    const b = e.target.closest("[data-star]"); if (!b) return;
+    const n = Number(b.dataset.star);
+    a.rating = (a.rating === n) ? 0 : n;
+    paintStars(a.rating);
+    persist(l);
+  });
+  $("#a-clear").addEventListener("click", () => { a.rating = 0; paintStars(0); persist(l); });
+  $("#a-notes").addEventListener("input", e => {
+    a.notes = e.target.value; notesDirty = true;
+    if (notesTimer) clearTimeout(notesTimer);
+    notesTimer = setTimeout(() => { notesTimer = null; notesDirty = false; persist(l); }, 650);
+  });
+  $("#a-notes").addEventListener("blur", () => { if (notesDirty) { notesDirty = false; persist(l); } });
+  $("#a-notes").addEventListener("keydown", e => e.stopPropagation());
+
+  // Stage controls.
+  $("#rotl").addEventListener("click", () => { state.view.yaw -= Math.PI/2; buildBase(); });
+  $("#rotr").addEventListener("click", () => { state.view.yaw += Math.PI/2; buildBase(); });
+  $("#zin").addEventListener("click", () => { state.view.zoom *= 1.2; buildBase(); });
+  $("#zout").addEventListener("click", () => { state.view.zoom /= 1.2; buildBase(); });
+  $("#fit").addEventListener("click", () => { state.view.zoom = 1; state.view.panX = 0; state.view.panY = 0; buildBase(); });
+  $("#nearw").addEventListener("change", e => { state.view.nearWalls = e.target.checked; buildBase(); });
+
+  $("#copyfields").addEventListener("click", () => copyText(JSON.stringify(fieldsFor(l), null, 2)));
+  $("#copytokens").addEventListener("click", () => copyText($("#d-tokens").textContent || ""));
+
+  setupCanvas();
+  if (state.geom) { updateGeomFields(); }
+}
+
+function paintStars(n) {
+  document.querySelectorAll("#a-stars [data-star]").forEach(b => {
+    b.classList.toggle("on", Number(b.dataset.star) <= n);
+  });
+  const l = current();
+  if (l) { l.ann.rating = n; renderList(); }
+}
+
+function persist(l) {
+  const seq = ++saveSeq;
+  setSaved("saving…", "");
+  const body = new URLSearchParams({
+    id: l.id,
+    staged: l.ann.staged ? "1" : "0",
+    rating: String(l.ann.rating || 0),
+    notes: l.ann.notes || "",
+    excluded: l.ann.excluded ? "1" : "0",
+  });
+  fetch("/api/annotate", { method:"POST", body })
+    .then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t || ("HTTP " + r.status)); }); return r.json(); })
+    .then(a => {
+      if (seq < saveApplied) return;
+      saveApplied = seq;
+      l.ann = Object.assign({}, a);
+      state.annotations[l.id] = l.ann;
+      l.search = [l.title, l.id, l.verdict, l.solver_verdict, l.problem,
+        (l.tags || []).join(" "), l.ann.notes].filter(Boolean).join(" ").toLowerCase();
+      setSaved("saved", "ok");
+      renderList();
+      if (state.selected === l.id) renderAnnotationSummary(l);
+    })
+    .catch(e => setSaved("save failed: " + e.message, "err"));
+}
+
+function setSaved(text, cls) {
+  const el = $("#saved"); if (!el) return;
+  el.textContent = text; el.className = cls || "";
+  if (cls === "ok") setTimeout(() => { if (el.textContent === "saved") el.textContent = ""; }, 1600);
+}
+
+function renderAnnotationSummary(l) {
+  const el = $("#head-ann");
+  if (el) el.innerHTML = annotationBadges(l);
+}
+
+async function loadGeometry(id) {
+  try {
+    const d = await getJson("/api/level?id=" + encodeURIComponent(id));
+    if (state.selected !== id) return;
+    state.geom = d.geometry;
+    state.geomError = d.geometry_error || null;
+    state.loadingGeometry = false;
+    const tok = $("#d-tokens"); if (tok) tok.textContent = d.tokens || "";
+    updateGeomFields();
+    buildBase();
+  } catch (e) {
+    if (state.selected !== id) return;
+    state.loadingGeometry = false;
+    state.geom = null;
+    state.geomError = e.message;
+    updateGeomFields();
+    buildBase();
+  }
+}
+
+function updateGeomFields() {
+  const empty = $("#stage-empty");
+  if (empty) {
+    if (state.geomError) empty.textContent = state.geomError;
+    else if (state.geom) empty.style.display = "none";
+    else empty.textContent = state.loadingGeometry ? "reading the level…" : "no drawing";
+    if (state.geom) empty.style.display = "none";
+  }
+  renderLegend();
+  // The size/items facts were rendered before the geometry arrived; update their cells.
+  const geom = state.geom;
+  if (geom) {
+    const size = $("#f-size"), items = $("#f-items");
+    if (size) size.textContent = geom.size.join(" × ");
+    if (items) items.textContent = num(geom.items.length);
+  }
+}
+
+function metricsHtml(l) {
+  if (!l.metrics || typeof l.metrics !== "object") {
+    return `<p class="hint">No metrics: the solver only computes them for levels it can solve.</p>`;
+  }
+  const order = ["score","portal_trips","shortest_plans","states","dead_end_states","cubes",
+    "unnecessary_cubes","classes","necessary_classes","random_success","necessary_buttons",
+    "necessary_pedestals","load_bearing_fizzlers","load_bearing_lasers","load_bearing_turrets",
+    "necessary_gels","necessary_items","mechanics","mechanic_bits","chain_depth","travel",
+    "cube_travel","backtrack"];
+  const keys = Object.keys(l.metrics).sort((a,b) => {
+    const ia = order.indexOf(a), ib = order.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+  return `<table>${keys.map(k => {
+    let v = l.metrics[k];
+    if (k === "random_success") v = (Number(v) * 100).toFixed(0) + "%";
+    else if (typeof v === "number") v = Number.isInteger(v) ? num(v) : Number(v).toFixed(2);
+    return `<tr><td class="k">${esc(k.replace(/_/g, " "))}</td><td class="v">${value(v)}</td></tr>`;
+  }).join("")}</table>`;
+}
+
+function fieldsFor(l) {
+  const out = {};
+  for (const k of Object.keys(l)) {
+    if (["ann","search","id","download","download_bytes"].includes(k)) continue;
+    out[k] = l[k];
+  }
+  out.annotation = l.ann;
+  return out;
+}
+
+function allFieldsHtml(l) {
+  const f = fieldsFor(l);
+  const keys = Object.keys(f).sort();
+  return `<table>${keys.map(k => {
+    let v = f[k];
+    if (v !== null && typeof v === "object") v = JSON.stringify(v);
+    return `<tr><td class="k">${esc(k)}</td><td class="v">${esc(v)}</td></tr>`;
+  }).join("")}</table>`;
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(
+    () => setSaved("copied", "ok"),
+    () => setSaved("copy failed", "err"));
+}
+
+// ---- 2.5D drawing (the same projection as `glados view`) -------------------
+const C = {
+  wall:"#4a515b", goo:"#1f6b52", white:"rgba(226,236,246,0.45)",
+  glass:"rgba(150,215,230,0.32)", grating:"rgba(182,196,206,0.32)",
+  fizzler:"rgba(110,165,255,0.38)", laserfield:"rgba(255,105,215,0.32)",
+  paint:{ bounce:"#2f6bff", speed:"#ff8c14", portal:"#e6e6e6", water:"#6ec8ff" },
+};
+const ITEM = {
+  door:"#31d158", entry:"#31d158", exit:"#ff4636", cubedropper:"#c8c8c8",
+  button:"#e6325a", pedestal:"#e6325a", paintdropper:"#b06cff", turret:"#ffe128",
+  laser:"#ff2828", catcher:"#c82828", relay:"#c82828", plate:"#a0e63c",
+  bridge:"#8cd2ff", funnel:"#aa64ff", panel:"#d2aa6e", glasspanel:"#a8e0e0",
+  flippanel:"#d2aa6e", stairs:"#d2aa6e", piston:"#d2aa6e", rail:"#d2aa6e",
+};
+const LEGEND = [
+  ["door", ITEM.entry], ["exit", ITEM.exit], ["cube dropper", ITEM.cubedropper],
+  ["button", ITEM.button], ["turret", ITEM.turret], ["laser", ITEM.laser],
+  ["gel", C.paint.bounce], ["fizzler", "#7ab0ff"], ["laser field", "#ff6ad5"],
+  ["panel", ITEM.panel], ["white face", "#dfe7ef"],
+];
+const AX = { "+x":[1,0], "-x":[-1,0], "+y":[0,1], "-y":[0,-1], "+z":[0,0], "-z":[0,0] };
+
+let cv = null, ctx = null, base = null, baseCtx = null, tf = null, drawingCtx = null;
+let resizeObserver = null, stageAbort = null;
+
+function rotXY(x, y) {
+  const a = state.view.yaw, c = Math.cos(a), s = Math.sin(a);
+  return [x*c - y*s, x*s + y*c];
+}
+function proj(x, y, z) {
+  const [rx, ry] = rotXY(x, y);
+  return [(rx - ry) * 0.5, (rx + ry) * 0.25 - z, rx + ry];
+}
+function makeTransform(cw, ch) {
+  const [sx, sy, sz] = state.geom.size;
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+  for (const x of [0, sx]) for (const y of [0, sy]) for (const z of [0, sz]) {
+    const [px, py] = proj(x, y, z);
+    minX = Math.min(minX, px); maxX = Math.max(maxX, px);
+    minY = Math.min(minY, py); maxY = Math.max(maxY, py);
+  }
+  const w = Math.max(1e-3, maxX - minX), h = Math.max(1e-3, maxY - minY);
+  const scale = Math.min((cw - 40) / w, (ch - 40) / h) * state.view.zoom;
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  return {
+    scale,
+    toScreen(x, y, z) {
+      const [px, py] = proj(x, y, z);
+      return [(px - cx) * scale + cw/2 + state.view.panX,
+              (py - cy) * scale + ch/2 + state.view.panY];
+    },
+  };
+}
+const key = (x, y, z) => x + "," + y + "," + z;
+let solidSet = null, gooSet = null, whiteSet = null;
+function buildSets() {
+  solidSet = new Set(state.geom.solid.map(c => key(c[0], c[1], c[2])));
+  gooSet = new Set(state.geom.goo.map(c => key(c[0], c[1], c[2])));
+  whiteSet = new Set(state.geom.white.map(w => key(w[0], w[1], w[2]) + "," + w[3]));
+}
+function isSolid(x, y, z) {
+  const [sx, sy, sz] = state.geom.size;
+  if (x < 0 || y < 0 || z < 0 || x >= sx || y >= sy || z >= sz) return true;
+  return solidSet.has(key(x, y, z));
+}
+function faceQuad(x, y, z, d) {
+  switch (d) {
+    case "+x": return [[x+1,y,z],[x+1,y+1,z],[x+1,y+1,z+1],[x+1,y,z+1]];
+    case "-x": return [[x,y,z],[x,y+1,z],[x,y+1,z+1],[x,y,z+1]];
+    case "+y": return [[x,y+1,z],[x+1,y+1,z],[x+1,y+1,z+1],[x,y+1,z+1]];
+    case "-y": return [[x,y,z],[x+1,y,z],[x+1,y,z+1],[x,y,z+1]];
+    case "-z": return [[x,y,z],[x+1,y,z],[x+1,y+1,z],[x,y+1,z]];
+    default:   return [[x,y,z+1],[x+1,y,z+1],[x+1,y+1,z+1],[x,y+1,z+1]];
+  }
+}
+function nearFace(d) {
+  const [vx, vy] = AX[d];
+  const [rx, ry] = rotXY(vx, vy);
+  return rx + ry;
+}
+function poly(points, fill, stroke) {
+  const c = drawingCtx;
+  c.beginPath();
+  points.forEach((p, i) => {
+    const [sx, sy] = tf.toScreen(p[0], p[1], p[2]);
+    i ? c.lineTo(sx, sy) : c.moveTo(sx, sy);
+  });
+  c.closePath();
+  if (fill) { c.fillStyle = fill; c.fill(); }
+  if (stroke) { c.strokeStyle = stroke; c.lineWidth = 1; c.stroke(); }
+}
+function dot(x, y, z, r, fill, stroke) {
+  const c = drawingCtx;
+  const [sx, sy] = tf.toScreen(x, y, z);
+  c.beginPath(); c.arc(sx, sy, r, 0, 2 * Math.PI);
+  c.fillStyle = fill; c.fill();
+  if (stroke) { c.strokeStyle = stroke; c.lineWidth = 1.5; c.stroke(); }
+}
+function floorColour(z, sz) {
+  const v = 34 + Math.round(70 * (z / Math.max(1, sz - 1)));
+  return `rgb(${v},${v+5},${v+12})`;
+}
+function itemColour(it) {
+  if (it.k === "door") return ITEM[it.t] || "#fff";
+  return ITEM[it.k] || "#bbb";
+}
+function hexA(hex, a) {
+  if (!hex || !hex.startsWith("#") || hex.length !== 7) return hex || "#888";
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function setupCanvas() {
+  cv = $("#cv"); if (!cv) return;
+  ctx = cv.getContext("2d");
+  base = document.createElement("canvas");
+  baseCtx = base.getContext("2d");
+  if (resizeObserver) resizeObserver.disconnect();
+  resizeObserver = new ResizeObserver(() => { buildBase(); });
+  resizeObserver.observe($("#stage"));
+  if (stageAbort) stageAbort.abort();
+  stageAbort = new AbortController();
+  const signal = stageAbort.signal;
+  let drag = null;
+  cv.addEventListener("mousedown", e => {
+    drag = { x:e.clientX, y:e.clientY, px:state.view.panX, py:state.view.panY };
+    cv.classList.add("drag");
+  }, { signal });
+  window.addEventListener("mouseup", () => { drag = null; if (cv) cv.classList.remove("drag"); }, { signal });
+  window.addEventListener("mousemove", e => {
+    if (!drag) return;
+    state.view.panX = drag.px + (e.clientX - drag.x);
+    state.view.panY = drag.py + (e.clientY - drag.y);
+    buildBase();
+  }, { signal });
+  cv.addEventListener("wheel", e => {
+    e.preventDefault();
+    state.view.zoom *= e.deltaY < 0 ? 1.12 : 1/1.12;
+    buildBase();
+  }, { passive:false, signal });
+  cv.addEventListener("dblclick", () => {
+    state.view.zoom = 1; state.view.panX = 0; state.view.panY = 0; buildBase();
+  }, { signal });
+  buildBase();
+}
+
+function buildBase() {
+  if (!cv || !base) return;
+  const dpr = window.devicePixelRatio || 1;
+  const rect = cv.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width)), h = Math.max(1, Math.round(rect.height));
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  base.width = cv.width; base.height = cv.height;
+  baseCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  baseCtx.clearRect(0, 0, w, h);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!state.geom) { renderLegend(); return; }
+  buildSets();
+  tf = makeTransform(w, h);
+  const [sx, sy, sz] = state.geom.size;
+  const ops = [];
+  const depthOf = (x, y, z) => { const [rx, ry] = rotXY(x, y); return rx + ry; };
+
+  for (let z = 0; z < sz; z++) for (let y = 0; y < sy; y++) for (let x = 0; x < sx; x++) {
+    if (isSolid(x, y, z)) continue;
+    const cx = x + 0.5, cy = y + 0.5;
+    const dep = depthOf(cx, cy);
+    const goo = gooSet.has(key(x, y, z));
+    if (goo || isSolid(x, y, z - 1)) {
+      const col = goo ? C.goo : floorColour(z, sz);
+      ops.push({ d:dep, r:0, f:() => poly(faceQuad(x, y, z, "-z"), col, "rgba(0,0,0,0.15)") });
+    }
+    for (const d of ["+x","-x","+y","-y"]) {
+      if (!isSolid(x + AX[d][0], y + AX[d][1], z)) continue;
+      if (!state.view.nearWalls && nearFace(d) > 0.01) continue;
+      ops.push({ d:dep, r:1, f:() => poly(faceQuad(x, y, z, d), C.wall, "rgba(0,0,0,0.25)") });
+    }
+    if (isSolid(x, y, z + 1) && whiteSet.has(key(x, y, z) + ",+z")) {
+      ops.push({ d:dep, r:4, f:() => dot(cx, cy, z + 1, 4, C.white, "rgba(255,255,255,0.6)") });
+    }
+  }
+  for (const wf of state.geom.white) {
+    if (wf[3] === "+z" || wf[3] === "-z") continue;
+    const [x, y, z] = wf;
+    ops.push({ d:depthOf(x + 0.5, y + 0.5), r:2,
+      f:() => poly(faceQuad(x, y, z, wf[3]), C.white) });
+  }
+  for (const b of state.geom.barriers) for (const f of b.faces) {
+    const col = b.kind === "glass" ? C.glass : C.grating;
+    ops.push({ d:depthOf(f[0] + 0.5, f[1] + 0.5), r:2,
+      f:() => poly(faceQuad(f[0], f[1], f[2], f[3]), col) });
+  }
+  for (const hz of state.geom.hazards) for (const f of hz.faces) {
+    const col = hz.kind === "fizzler" ? C.fizzler : C.laserfield;
+    ops.push({ d:depthOf(f[0] + 0.5, f[1] + 0.5), r:2,
+      f:() => poly(faceQuad(f[0], f[1], f[2], f[3]), col) });
+  }
+  for (const p of state.geom.paint) {
+    const col = C.paint[p.kind] || "#888";
+    const f = p.face;
+    ops.push({ d:depthOf(f[0] + 0.5, f[1] + 0.5), r:2,
+      f:() => poly(faceQuad(f[0], f[1], f[2], f[3]), hexA(col, 0.5), "rgba(0,0,0,0)") });
+    if (p.dropper) ops.push({ d:depthOf(p.dropper[0] + 0.5, p.dropper[1] + 0.5), r:3,
+      f:() => dot(p.dropper[0] + .5, p.dropper[1] + .5, p.dropper[2] + .5, 4, col, "#000") });
+  }
+
+  const idxCell = {};
+  for (const it of state.geom.items) {
+    if (it.i != null) idxCell[it.i] = it.p;
+    const p = it.p, col = itemColour(it);
+    ops.push({ d:depthOf(p[0] + .5, p[1] + .5), r:3, f:() => {
+      dot(p[0] + .5, p[1] + .5, p[2] + .4, it.k === "turret" ? 7 : 5, col, "rgba(0,0,0,0.7)");
+    }});
+  }
+  for (const [a, b] of state.geom.links) {
+    if (!idxCell[a] || !idxCell[b]) continue;
+    ops.push({ d:(depthOf(idxCell[a][0], idxCell[a][1]) + depthOf(idxCell[b][0], idxCell[b][1]))/2, r:3,
+      f:() => {
+        const [ax, ay] = tf.toScreen(idxCell[a][0] + .5, idxCell[a][1] + .5, idxCell[a][2] + .4);
+        const [bx, by] = tf.toScreen(idxCell[b][0] + .5, idxCell[b][1] + .5, idxCell[b][2] + .4);
+        baseCtx.strokeStyle = "rgba(255,255,255,0.18)"; baseCtx.setLineDash([3,4]); baseCtx.lineWidth = 1;
+        baseCtx.beginPath(); baseCtx.moveTo(ax, ay); baseCtx.lineTo(bx, by); baseCtx.stroke();
+        baseCtx.setLineDash([]);
+      }});
+  }
+  for (const line of (state.geom.beams || [])) {
+    if (line.length < 2) continue;
+    const pts = line.map(p => tf.toScreen(p[0], p[1], p[2]));
+    let dep = 0;
+    for (const p of line) { const [rx, ry] = rotXY(p[0], p[1]); dep += rx + ry; }
+    dep /= line.length;
+    ops.push({ d:dep, r:4, f:() => {
+      const c = drawingCtx;
+      c.strokeStyle = "rgba(255,60,60,0.85)"; c.lineWidth = 2;
+      c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
+      c.strokeStyle = "rgba(255,200,200,0.9)"; c.lineWidth = 1;
+      c.beginPath(); pts.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
+    }});
+  }
+
+  ops.sort((a, b) => (a.d - b.d) || (a.r - b.r));
+  const prev = drawingCtx;
+  drawingCtx = baseCtx;
+  for (const op of ops) op.f();
+  drawingCtx = prev;
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(base, 0, 0);
+  renderLegend();
+}
+
+function renderLegend() {
+  const el = $("#legend"); if (!el) return;
+  if (!state.geom) { el.innerHTML = ""; return; }
+  el.innerHTML = LEGEND.map(([name, col]) =>
+    `<span><i style="background:${col}"></i>${esc(name)}</span>`).join("");
+}
+
+// ---- wiring ---------------------------------------------------------------
+function wire() {
+  $("#search").addEventListener("input", () => { state.shown = LIMIT; applyFilters(); });
+  for (const id of ["#f-verdict","#f-split","#f-stars","#f-mine","#sort"]) {
+    $(id).addEventListener("change", () => { state.shown = LIMIT; applyFilters(); });
+  }
+  for (const id of ["#f-staged","#f-excluded","#f-notes","#f-annotated","#f-testonly"]) {
+    $(id).addEventListener("change", () => { state.shown = LIMIT; applyFilters(); });
+  }
+  $("#list").addEventListener("click", e => {
+    const li = e.target.closest("li[data-id]"); if (!li) return;
+    select(li.dataset.id);
+  });
+  $("#more").addEventListener("click", () => { state.shown += LIMIT; renderList(); });
+  // The prev/next buttons live inside the detail, which is rebuilt on selection.
+  document.addEventListener("click", e => {
+    if (e.target.id === "next") navStep(1);
+    if (e.target.id === "prev") navStep(-1);
+  });
+  $("#rescan").addEventListener("click", async () => {
+    flushNotes();
+    $("#rescan").disabled = true;
+    try {
+      await fetch("/api/rescan", { cache:"no-store" });
+      await loadAll();
+    } catch (e) { alert("rescan failed: " + e.message); }
+    finally { $("#rescan").disabled = false; }
+  });
+  window.addEventListener("hashchange", () => {
+    const id = decodeURIComponent(location.hash.replace(/^#/, ""));
+    if (id && state.byId.has(id)) select(id);
+  });
+  document.addEventListener("keydown", e => {
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (["input","textarea","select"].includes(tag) || e.target.isContentEditable) {
+      if (e.key === "Escape") e.target.blur();
+      return;
+    }
+    if (e.key === "/") { e.preventDefault(); $("#search").focus(); return; }
+    if (e.key === "ArrowDown" || e.key === "ArrowRight" || e.key === "j") { e.preventDefault(); navStep(1); }
+    else if (e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "k") { e.preventDefault(); navStep(-1); }
+    else if (e.key === "s" || e.key === "S") {
+      const l = current(); if (l) { l.ann.staged = !l.ann.staged; persist(l); renderDetail(l); }
+    } else if (e.key === "e" || e.key === "E") {
+      const l = current(); if (l) { l.ann.excluded = !l.ann.excluded; persist(l); renderDetail(l); }
+    } else if (/^[0-5]$/.test(e.key)) {
+      const l = current(); if (l) { l.ann.rating = Number(e.key); persist(l); renderDetail(l); }
+    }
+  });
+  window.addEventListener("resize", () => { if (state.geom) buildBase(); });
+}
+
+// ---- start ----------------------------------------------------------------
+wire();
+loadAll().catch(e => {
+  $("#count").textContent = "failed to load";
+  $("#list").innerHTML = `<li style="color:#ff9b9b;padding:12px">Failed to load: ${esc(e.message)}</li>`;
+});
+</script>
+</body>
+</html>

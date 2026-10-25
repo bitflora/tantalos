@@ -46,6 +46,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sample import DEFAULT_GLADOS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools" / "workshop"))
+from annotations import excluded_ids  # noqa: E402
+
 # (name, files, editor rules, src, budget): the levels a source holds. Workshop levels were
 # labelled with a budget of 500k (tools/workshop); at 50k some fall to uncertain.
 SOURCES = [
@@ -63,8 +66,9 @@ def held_out(tokens):
     return int(hashlib.md5(tokens.encode()).hexdigest(), 16) % TEST_EVERY == 0
 
 
-def solvable_records(patterns, seen, limit):
-    """Solvable records of the files, one per level not in `seen` (which grows)."""
+def solvable_records(patterns, seen, limit, skip_ids=()):
+    """Solvable records of the files, one per level not in `seen` (which grows). Levels in
+    `skip_ids` (the workbench's "exclude from test data" flag) are left out."""
     n = 0
     for pattern in patterns:
         paths = sorted(glob.glob(str(ROOT / pattern)))
@@ -78,6 +82,8 @@ def solvable_records(patterns, seen, limit):
                     r = json.loads(line)
                     if r.get("verdict") != "solvable" or r["tokens"] in seen:
                         continue
+                    if str(r.get("workshop_id")) in skip_ids:
+                        continue
                     seen.add(r["tokens"])
                     yield r
                     n += 1
@@ -85,7 +91,7 @@ def solvable_records(patterns, seen, limit):
                         return
 
 
-def plan_part(name, patterns, editor_rules, src, budget, out, seen, settings, args):
+def plan_part(name, patterns, editor_rules, src, budget, out, seen, settings, args, skip_ids=()):
     """Plans one source's solvable levels into `out`; returns counts. Carries on from the
     `.partial` file a stopped run left, if it was made with the same settings."""
     cmd = [str(Path(args.glados).resolve()), "score", "--plan-only", "--budget", str(budget or args.budget),
@@ -122,7 +128,7 @@ def plan_part(name, patterns, editor_rules, src, budget, out, seen, settings, ar
 
     def feed():
         try:
-            for r in solvable_records(patterns, seen, args.limit):
+            for r in solvable_records(patterns, seen, args.limit, skip_ids):
                 if r["tokens"] in done:
                     counts["kept"] += 1
                     continue
@@ -200,6 +206,7 @@ def main():
 
     out = ROOT / args.out
     (out / "parts").mkdir(parents=True, exist_ok=True)
+    excluded = excluded_ids()
     seen = set()
     for name, patterns, editor_rules, src, budget in SOURCES:
         part = out / "parts" / f"{name}.jsonl"
@@ -225,7 +232,8 @@ def main():
             print(f"{name}: {part.name} was built with {old}, not {settings}: scoring again",
                   flush=True)
         print(f"{name}: scoring", flush=True)
-        counts = plan_part(name, patterns, editor_rules, src, budget, part, seen, settings, args)
+        counts = plan_part(name, patterns, editor_rules, src, budget, part, seen, settings, args,
+                           excluded if name == TEST_WS else ())
         params.write_text(json.dumps(settings) + "\n")
         print(f"{name}: {dict(counts)}", flush=True)
 
@@ -240,6 +248,8 @@ def main():
         with open(part, encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
+                if name == TEST_WS and str(r.get("workshop_id")) in excluded:
+                    continue
                 key = "test-ws" if name == TEST_WS else "test-gen" if r["src"] == "gen" and held_out(r["tokens"]) else "train"
                 files[key].write(line)
                 sizes[key] += 1

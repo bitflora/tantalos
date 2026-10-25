@@ -68,6 +68,26 @@ warms up and decays to its minimum over its own time, so a chained run starts ba
 rate and spends its first part undoing the fine-tuning the last one ended with. Chain runs only
 to change something between them (data, settings) or to look at a model midway.
 
+## Workshop workbench (triage of downloaded levels)
+
+`glados workbench` is the browser app for the downloaded Workshop levels (`out/workshop/levels.jsonl`
+plus `data/ws5/{train,test}.jsonl`). It shows every field, the solver's verdict and rating, and
+draws the chamber. The user's triage is server-side in `train/workshop-annotations.jsonl`, not in
+the browser. Read or write it with:
+
+```bash
+python tools/workshop/annotations.py --get ID
+python tools/workshop/annotations.py --excluded
+python tools/workshop/annotations.py --json
+python tools/workshop/annotations.py --set ID --rating 4 --staged --notes "..."
+python tools/workshop/annotations.py --set ID --exclude
+```
+
+Fields: `staged` (manual playtest), `rating` (0–5), `notes`, `excluded` (leave out of the ws5 test
+split; `tools/workshop/ws3.py` moves it to train on rebuild, `train/plans.py` leaves it out of
+`test-ws`). When the user asks for levels to play-test, `--excluded`/`--get` is the shared source
+of truth. Do not rewrite the level files for annotations.
+
 ## Broadcast (Twitch stream)
 
 `train/broadcast.py` runs the stream's loop in rounds: the level net writes levels, the solver net
@@ -120,7 +140,9 @@ release build (50k/250k, editor rules off) and `glados editor`, writes `out/unso
 (p2c, tokens, scores, MANIFEST.md), copies them into the Puzzle Maker folder as
 `glados-ws5b-unsolv-NNNNN` (continuing the highest number; Title `unsolv <title>`) and appends them
 to the registry. `--dry-run` shows the picks only. Commit `train/unsolv-staged.jsonl` afterwards.
-Then tell the user the file names, titles and item sets. Add `--n` only if the user names a count.
+Then tell the user the file names, titles, Workshop ratings and item sets. Add `--n` only if the
+user names a count, and `--order rating` (most stars, then most ratings, first; from
+`tools/workshop/fetch.py ratings`) only if they ask for well-rated or popular levels.
 If an editor flag shows up, say so; the real-editor check is `train/portal2.py check DIR --out F
 --launch` and only when the game is closed. When the user reports how they solved one, follow
 the unsolv-playtests memory: fix the solver or document it in docs/solver-gaps-2026-10.md and add
