@@ -152,7 +152,8 @@ def nearest(paths, probes):
 def time_generator(glados, count, seed):
     with tempfile.TemporaryDirectory() as d:
         out = Path(d) / "levels.jsonl"
-        args = [str(Path(glados).resolve()), "dataset", "--seed", str(seed), "--count", str(count), "--out", str(out)]
+        data = Path(glados).resolve().with_name("glados-data" + Path(glados).suffix)
+        args = [str(data), "dataset", "--seed", str(seed), "--count", str(count), "--out", str(out)]
         t = time.time()
         subprocess.run(args, check=True, capture_output=True)
         dt = time.time() - t
@@ -338,10 +339,10 @@ def main():
     # only a binary that never reports them is stale.
     parsed_rows = [r for r in results if r["verdict"] != "unparsed"]
     if parsed_rows and not any("tokens" in r for r in parsed_rows):
-        sys.exit("glados score didn't report canonical tokens: rebuild it (cargo build --release)")
+        sys.exit("glados-score score didn't report canonical tokens: rebuild it (cargo build --release)")
     with open(out / "samples.jsonl", "w", encoding="utf-8") as f:
         for name, line, r in zip(owner, lines, results):
-            # `sample` is the model's raw line; `line` is glados score's line number.
+            # `sample` is the model's raw line; `line` is glados-score score's line number.
             f.write(json.dumps({**r, "setting": name, "sample": line}) + "\n")
 
     by_setting = defaultdict(list)

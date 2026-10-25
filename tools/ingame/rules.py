@@ -1,4 +1,4 @@
-"""Score `glados editor` predictions against the game's INVALID ITEM lists, item by item.
+"""Score `glados-p2c editor` predictions against the game's INVALID ITEM lists, item by item.
 
     python tools/ingame/rules.py out/ingame/sample/p2c out/ingame/sample/ingame.jsonl
 
@@ -17,7 +17,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("p2c_dir")
     ap.add_argument("game")
-    ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados.exe"))
+    ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados-p2c.exe"))
     ap.add_argument("--examples", type=int, default=6)
     a = ap.parse_args()
     game = {}

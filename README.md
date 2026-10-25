@@ -21,20 +21,33 @@ wait for their inputs; in the solver, tokens, metrics, generator, routes, `train
 and the Workshop converter. The modelling assumptions are listed in each module's header;
 the ones most worth checking in the game are in "Unverified" below.
 
+The command-line tools are separate binaries (`src/bin/`; each prints its usage when run
+without arguments, and they share `src/cli.rs`):
+
+| binary | commands |
+|---|---|
+| `glados-score` | `score`, `check`, `route`: solving and checking, what training, evaluation and play call |
+| `glados-data` | `dataset`, `mutate`: making training data |
+| `glados-p2c` | `info`, `solve`, `tokens`, `vocab`, `editor`, `roundtrip`, `fixtures`: one-off tools for .p2c files |
+| `glados-view` | the browser app for saved solutions |
+| `glados-workbench` | the browser app for triaging Workshop levels |
+| `glados-evolve` | evolutionary search for interesting levels |
+| `reverse` | the reverse generator (solvable by construction) |
+
 ```bash
 cargo test
-cargo run -- info fixtures/synthetic/worked_example.p2c
-cargo run -- solve fixtures/synthetic/*.p2c
-cargo run --release -- evolve --seed 1 --gens 40   # best levels + report.md in out/evolve-1
-cargo run -- roundtrip fixtures/real/*.p2c
-cargo run -- fixtures            # regenerate fixtures/synthetic from src/fixtures.rs
-cargo run -- tokens fixtures/synthetic/worked_example.p2c
+cargo run --bin glados-p2c -- info fixtures/synthetic/worked_example.p2c
+cargo run --bin glados-p2c -- solve fixtures/synthetic/*.p2c
+cargo run --release --bin glados-evolve -- --seed 1 --gens 40   # best levels + report.md in out/evolve-1
+cargo run --bin glados-p2c -- roundtrip fixtures/real/*.p2c
+cargo run --bin glados-p2c -- fixtures            # regenerate fixtures/synthetic from src/fixtures.rs
+cargo run --bin glados-p2c -- tokens fixtures/synthetic/worked_example.p2c
 ```
 
 ## Training a level model
 ```bash
 cargo build --release
-./target/release/glados dataset --seed 1 --count 200000 --out data/levels.jsonl
+./target/release/glados-data dataset --seed 1 --count 200000 --out data/levels.jsonl
 python -m venv .venv
 .venv/Scripts/pip install torch --index-url https://download.pytorch.org/whl/cu130
 .venv/Scripts/pip install -r train/requirements.txt
@@ -76,7 +89,7 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   `LATER_MECH_GROUPS`) come after the old ones, which shifts level-token ids, so
   `train.py --init` matches embeddings by token name: a checkpoint from before them warm-starts
   with its 274 tokens kept and the new ones fresh (and `--block` may grow).
-- **Dataset** (`glados dataset`): JSONL, one level per line with its tokens, verdict, plan length
+- **Dataset** (`glados-data dataset`): JSONL, one level per line with its tokens, verdict, plan length
   and metrics, plus `vocab.txt` beside it. Jobs are 30% fresh random genomes, 70% mutations of a
   pool of solvable ones that drifts toward higher `Metrics::score`. Over a 20k run the share of
   solvable levels needing 0 actions falls from 34% to 10%, and portal use rises from 5% to 33%.
@@ -92,7 +105,7 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   bounces from 2% to 13%, gel through a portal from 0 to 2%, and 0-action plans fell from 43% to
   12%. Leaps stay near zero (orange gel rarely lands at the edge of a gap). Records carry
   `mechanic_bits`, chain depth and the other metrics for conditioning.
-- **Scoring** (`glados score`): one token line in, one JSON line out (`unparsed`, `invalid`,
+- **Scoring** (`glados-score score`): one token line in, one JSON line out (`unparsed`, `invalid`,
   `unsupported`, `unsolvable`, `uncertain`, `solvable` + metrics; `tokens`, the canonical form
   of anything that parsed, and `canonical` if the line was already exactly that). `--p2c DIR`
   writes the solvable ones for playtesting.
@@ -105,7 +118,7 @@ running the generator at the same time slows both, so `night.sh` runs them in tu
   hidden conditions out, so the level's position varied. Prompts with only `<verdict:solvable>`
   were then unlike anything in training, and the model dropped a size number: at step 5,000,
   5% parsed with that prompt and 64% with full condition sets. Every eval
-  samples levels conditioned on `<verdict:solvable>` and scores them with `glados score`.
+  samples levels conditioned on `<verdict:solvable>` and scores them with `glados-score score`.
   Generation keeps a key/value cache, so each new token costs one position, not the whole level.
 - **Evaluation** (`train/evaluate.py`): samples 256 levels asked to be solvable, 64 with no
   conditions, and 32 for every other condition value, scores them all, and writes `report.md`.
@@ -299,7 +312,7 @@ risk; next steps are a style prior from real levels and in-game checks of the wi
 ## Editor placement rules (checked in the game)
 The Puzzle Maker marks misplaced items red and won't build. `src/editor.rs` predicts which items
 it flags, by the names and positions the game logs, and `mount_problems` (so `score`,
-`dataset` and relabelling) calls such levels invalid. `glados editor FILE|DIR` prints them.
+`dataset` and relabelling) calls such levels invalid. `glados-p2c editor FILE|DIR` prints them.
 
 Fitted on 2,403 generated levels checked in Portal 2 (2026-10-10): the new rules agree with the
 game on 98.0% of levels (6 flagged that the game accepts, 43 missed), against 79.3% for the
@@ -346,7 +359,7 @@ runs train on as invalid without relabelling. If the game can't be used it logs 
 run carries on.
 
 ## Playing a solution in the game
-`glados route FILE` makes the conservative plan concrete (`src/route.rs`): for each step, the
+`glados-score route FILE` makes the conservative plan concrete (`src/route.rs`): for each step, the
 cells to walk through, where to stand, the face each portal goes on and the point to aim at,
 the cube to pick up and where it ends up, then a last walk out of the exit door. Choices the
 plan leaves open go to the nearest cell on foot, avoiding cubes, buttons, pedestals, turrets,
@@ -367,7 +380,7 @@ sums one up. `--spike` checks the console, VScript, coordinates, movement and th
 instead of playing. It has played batches of generated levels in the game (see
 `out/play/REPORT.md`); `play.Session` lets other scripts drive the game a level at a time.
 
-`glados route --plan "TOKENS" FILE` routes a given plan (the solver net's) instead of the
+`glados-score route --plan "TOKENS" FILE` routes a given plan (the solver net's) instead of the
 solver's own. A plan that doesn't solve the level is routed as far as its steps fit, then an
 `attempt` leg tries the step that fits no move (a shot at the face it names, or a walk toward
 the cell); the head line's `net` says what `plan::check` found. play.py plays an attempt leg once
@@ -380,22 +393,22 @@ asks for harder ones (`train/tier.py`). Its overlay is an OBS browser source; se
 `docs/streaming.md`.
 
 ## Looking at solutions in a browser
-`glados view` is a local browser app for the solutions you already have on disk. It scans folders
-for `<name>.route.jsonl` files with their `<name>.p2c` beside them — what `glados route FILE >
-NAME.route.jsonl` and `glados check --route DIR` write — lists them in a sidebar (grouped by
+`glados-view` is a local browser app for the solutions you already have on disk. It scans folders
+for `<name>.route.jsonl` files with their `<name>.p2c` beside them — what `glados-score route FILE >
+NAME.route.jsonl` and `glados-score check --route DIR` write — lists them in a sidebar (grouped by
 folder) and draws the chamber in oblique 2.5D (Z up, open-top cutaway) with its portalable faces,
 gel, barriers, hazards, laser beams and devices, then plays the route back: the walks, the
 portals and the cube, driven by each leg's `after` state. Picking a solution parses its `.p2c`
 and reads its route — it never solves — so switching is instant, and `Save .html` writes a
 self-contained copy with the data inlined.
 
-`glados view [--roots DIR]... [--port N] [--no-open] [--list]`: `--roots`/`--dir` add scan roots
+`glados-view [--roots DIR]... [--port N] [--no-open] [--list]`: `--roots`/`--dir` add scan roots
 (default `fixtures`, `out`, `runs`), `--port` fixes the port (default: any free one), `--no-open`
 doesn't launch the browser, and `--list` just prints what it found. It works the same for a plan
-the Rust solver made (`glados route`) and for one the solver net wrote (`glados check --route`).
+the Rust solver made (`glados-score route`) and for one the solver net wrote (`glados-score check --route`).
 
 ## Triaging the downloaded Workshop levels
-`glados workbench` is a local browser app for the levels `tools/workshop/fetch.py` downloaded. It
+`glados-workbench` is a local browser app for the levels `tools/workshop/fetch.py` downloaded. It
 merges `out/workshop/levels.jsonl`, `data/ws5/{train,test}.jsonl`, the Workshop ratings and item
 metadata, and shows every field we have: title and id, subscribers/favourites/tags, the Workshop
 star rating and vote count, the solver's verdict and the dataset verdict, plan length, all
@@ -427,7 +440,7 @@ python tools/workshop/annotations.py --set 100091397 --rating 4 --staged --notes
 python tools/workshop/annotations.py --set 100091397 --exclude
 ```
 
-`glados workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE] [--items FILE]
+`glados-workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE] [--items FILE]
 [--annotations FILE] [--port N] [--no-open] [--list]` defaults to the files above. `--list` prints
 the corpus and annotation summary without starting a server. The level files are never rewritten;
 only the annotation store is.
@@ -435,9 +448,9 @@ only the annotation store is.
 ## Plans as tokens (for a solver net)
 `src/plan.rs` writes a route as plan tokens, one group per step in the level's own coordinates
 and without the walks: `fire blue 0 5 4 -x fire orange 7 0 1 +x pickup 2 2 1 enter orange
-putdown 2 6 3 exit` is the worked example. `glados score --plan` adds each solvable level's
+putdown 2 6 3 exit` is the worked example. `glados-score score --plan` adds each solvable level's
 plan (`"plan"`, or `"plan_error"` when the route can't ground it), and
-`train/plans.py` builds `data/plans/` from the existing data that way. `glados check` replays
+`train/plans.py` builds `data/plans/` from the existing data that way. `glados-score check` replays
 plans a model writes: each step has to fit an action the solver could take next (any face of
 the right face class, any cell of the region it leads to), and the plan has to reach the exit.
 It reports `solved` (with `optimal` when given the level's `min_len`), `illegal` (the step

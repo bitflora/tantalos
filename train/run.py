@@ -9,7 +9,7 @@
     .venv/Scripts/python train/run.py note v4-a "what it showed"
     .venv/Scripts/python train/run.py ingame v4-a     # redo the Portal 2 steps if they were skipped
 
-`start` builds target/release/glados.exe, then returns: the run carries on in the background,
+`start` builds the target/release/glados-*.exe binaries, then returns: the run carries on in the background,
 detached, and survives the terminal or session that started it. Every run does every step, in
 order, with nothing to remember:
   1. train (train.py) for --hours
@@ -35,7 +35,7 @@ in runs.csv did. Anything after `--` goes to train.py as is.
 
 Solver-net runs (`start NAME --task solve`) train the second net, which reads a level and
 writes its plan, on data/plans (train/plans.py makes it). Their steps: train, evaluate best.pt
-(solve_eval.py, about 15 minutes: plans for held-out levels, replayed by `glados check`), record
+(solve_eval.py, about 15 minutes: plans for held-out levels, replayed by `glados-score check`), record
 in train/solver-runs.csv (`list --task solve` shows them).
 No Portal 2 steps, no training away, no play-test picks. The main score is EVAL solved %: the
 share of test-gen levels whose greedy plan solves. --from a level-writing run warm-starts from
@@ -66,7 +66,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
 PY = sys.executable
-GLADOS = ROOT / "target" / "release" / "glados.exe"
+GLADOS = ROOT / "target" / "release" / "glados-score.exe"
 ACTIVE = ("starting", "training", "evaluating", "ingame", "away", "picking")
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: no console pops up, none is needed
 DETACH = NO_WINDOW | 0x00000200  # | CREATE_NEW_PROCESS_GROUP
@@ -206,10 +206,10 @@ def start(a):
     lr, min_lr, warmup = ("2e-4", "2e-5", "200") if warm else ("1e-3", "1e-4", "300")
     if a.quick:
         lr, min_lr, warmup = QUICK_LR
-    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bin", "glados"], cwd=ROOT) \
+    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bins"], cwd=ROOT) \
         if not a.dry_run else subprocess.CompletedProcess([], 0)
     if build.returncode or not GLADOS.exists():
-        sys.exit("`cargo build --release --bin glados` failed (output above): fix that first, no run started")
+        sys.exit("`cargo build --release --bins` failed (output above): fix that first, no run started")
 
     train = [
         "train/train.py", "--data", *map(str, data), "--vocab", str(vocab), "--out", str(d),

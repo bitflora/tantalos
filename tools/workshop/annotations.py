@@ -1,6 +1,6 @@
 """Read and write the workbench's per-level annotations.
 
-The `glados workbench` browser app saves one JSON object per annotated Workshop level in
+The `glados-workbench` browser app saves one JSON object per annotated Workshop level in
 `train/workshop-annotations.jsonl`. Agents can use this module or its command line instead of
 the browser:
 

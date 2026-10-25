@@ -23,7 +23,7 @@ mid-download resumes where it left off, because `report.jsonl` is the set of map
 python tools/workshop/fetch.py pipeline --workers 8 --retry-errors
 ```
 
-`levels.jsonl` has the fields `glados dataset` writes (`tokens`, `verdict`, `min_len`, `metrics`),
+`levels.jsonl` has the fields `glados-data dataset` writes (`tokens`, `verdict`, `min_len`, `metrics`),
 plus `workshop_id`, `title`, `subscribers` (lifetime unique), `favorited` and, once `ratings` has
 run, the Workshop page's star rating: `stars` (1-5; 0 = "not enough ratings yet") and `votes` (its
 "N ratings"). Training reads the
@@ -46,7 +46,7 @@ sooner, and a 429 makes the request wait a minute. Last, it sets `stars`/`votes`
 
 ## Triaging the downloaded levels
 
-`glados workbench` (repo root, needs the release or debug `glados.exe`) serves a local browser app
+`glados-workbench` (repo root, needs the release `glados-score.exe` for staging) serves a local browser app
 for `out/workshop/levels.jsonl` joined with `data/ws5/{train,test}.jsonl`, the ratings and item
 metadata. It shows the Workshop stars/votes, subscribers, tags, the solver and dataset verdicts,
 all metrics, conversion problems, the level tokens and a 2.5D drawing of the chamber. You can mark
@@ -110,7 +110,7 @@ from training.
     its door's outward face; pistons from their func_movelinear and level counters; rails from
     the track's movedir/movedistance; loose cubes from `cube<N>` instances' CubeType. The voxel
     behind each such item is forced solid (it is in the editor; compiled, it's a hollow).
-- **Labelling**: `glados score --editor-rules off`. A published map already passed the real
+- **Labelling**: `glados-score score --editor-rules off`. A published map already passed the real
   editor, and our model of its rules flags some of them (a fizzler centred in a doorway, fields
   crossing), so those flags are skipped.
 

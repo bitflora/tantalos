@@ -3,7 +3,7 @@
     python train/harvest.py runs/v4-warm-3h/best.pt --n 4096
     python train/harvest.py runs/v4-warm-3h/best.pt --n 4096 --cond "<verdict:solvable> <diff:4>"
 
-Samples `--n` levels with the given conditions, scores them with `glados score`, and keeps
+Samples `--n` levels with the given conditions, scores them with `glados-score score`, and keeps
 the ones that are solvable, need portals (the solver can't finish them without firing one)
 and are novel: not an exact copy of a level in `--data`, and no same-size level there with
 token 4-gram Jaccard similarity of `--max-similarity` or more (the measure evaluate.py's novelty
@@ -38,7 +38,7 @@ from evaluate import nearest  # noqa: E402
 from seeding import resolve  # noqa: E402
 
 SOLVABLE = "<verdict:solvable>"
-# Fields of a `glados score` line that make up a dataset record.
+# Fields of a `glados-score score` line that make up a dataset record.
 RECORD_KEYS = ("tokens", "n_tokens", "verdict", "min_len", "needs_portals", "metrics")
 
 
@@ -63,11 +63,11 @@ def known_hashes(paths):
 
 
 def candidate(r):
-    """Solvable and needs a portal (a `glados score` result)."""
+    """Solvable and needs a portal (a `glados-score score` result)."""
     if r["verdict"] != "solvable":
         return False
     if "needs_portals" not in r:
-        sys.exit("glados score didn't report needs_portals: rebuild it (cargo build --release)")
+        sys.exit("glados-score score didn't report needs_portals: rebuild it (cargo build --release)")
     return bool(r["needs_portals"])
 
 
@@ -88,7 +88,7 @@ def novel(candidates, data, max_similarity=0.9, counts=None):
 
 
 def keep(results, data, max_similarity=0.9, counts=None):
-    """harvest's rules on `glados score` results: solvable, needs portals, novel (`novel`)."""
+    """harvest's rules on `glados-score score` results: solvable, needs portals, novel (`novel`)."""
     return novel([r for r in results if candidate(r)], data, max_similarity, counts)[0]
 
 

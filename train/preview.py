@@ -5,7 +5,7 @@ one itself when the level is saved in the editor, so generated levels have none.
 stand-in: the chamber in oblique 2.5D on the left (Z up, the near walls cut away so you can see
 in; darker = lower floor, teal = goo, grey = wall, and items as coloured dots, barriers and
 tracks as lines), the level name, size and item counts on the right. The projection is the one
-`glados view` (src/viewer.html) draws with, turned to the corner the editor's own preview looks
+`glados-view` (src/viewer.html) draws with, turned to the corner the editor's own preview looks
 from, so a level is oriented the way the game shows it. playtest.py calls it for every level it
 copies in.
 
@@ -155,7 +155,7 @@ def render(p2c, name=None):
             return y, -x
         return x, y
 
-    # Oblique 2.5D, Z up: the projection glados view draws with, the level turned TURNS quarter
+    # Oblique 2.5D, Z up: the projection glados-view draws with, the level turned TURNS quarter
     # turns first. `rx + ry` is depth, so cells with a larger one are nearer (drawn last).
     def project(x, y, z):
         rx, ry = rotxy(x, y)
@@ -188,7 +188,7 @@ def render(p2c, name=None):
         return [(x, y, z), (x + 1, y, z), (x + 1, y, z + 1), (x, y, z + 1)]  # -y
 
     # Floors and walls. Only the walls facing away from the camera are drawn: the near ones are
-    # cut away so the room reads from the front (glados view's `nearFace`).
+    # cut away so the room reads from the front (glados-view's `nearFace`).
     walls = [s for s in (("+x", 1, 0), ("-x", -1, 0), ("+y", 0, 1), ("-y", 0, -1))
              if sum(rotxy(s[1], s[2])) <= 0.01]
 

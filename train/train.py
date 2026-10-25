@@ -1,17 +1,17 @@
-"""Train a small GPT on `glados dataset` output.
+"""Train a small GPT on `glados-data dataset` output.
 
-    cargo run --release -- dataset --count 200000 --out data/levels.jsonl
+    cargo run --release --bin glados-data -- dataset --count 200000 --out data/levels.jsonl
     python train/train.py --data data/levels.jsonl --out runs/first
 
 --until 07:45 trains until a clock time instead of for --iters steps; --init starts from another
 run's weights. Every --eval-every steps: validation loss, then --score-n sampled levels run through
-`glados score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
+`glados-score score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
 (lowest validation loss). Log: <out>/log.jsonl. The run gets a row in train/runs.csv
 (train/record.py), with --note as its notes.
 
 --task solve trains the solver net instead: it reads a level and writes its plan (data/plans from
 train/plans.py; sequences in train/data.py). Its eval replays greedy plans for --score-n
-validation levels with `glados check` and logs the solved share. --init from a level model keeps
+validation levels with `glados-score check` and logs the solved share. --init from a level model keeps
 the embeddings of the tokens both know (level words), and drops its conditions.
 
 Training batches hold levels of similar length (--bucket), so they pad little. On the GPU the
@@ -47,7 +47,7 @@ from model import GPT, Config  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", nargs="+", required=True, help="JSONL files from `glados dataset`")
+    ap.add_argument("--data", nargs="+", required=True, help="JSONL files from `glados-data dataset`")
     ap.add_argument(
         "--task",
         choices=("levels", "solve"),
@@ -95,7 +95,7 @@ def main():
         type=int,
         default=32,
         help="levels sampled and scored per eval; with --task solve, validation levels whose "
-        "greedy plans `glados check` replays (0: off)",
+        "greedy plans `glados-score check` replays (0: off)",
     )
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
     ap.add_argument(

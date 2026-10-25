@@ -1,4 +1,4 @@
-//! Edits to finished levels (`glados mutate`).
+//! Edits to finished levels (`glados-data mutate`).
 
 use std::collections::{BTreeMap, HashSet};
 

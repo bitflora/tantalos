@@ -22,7 +22,7 @@ saves them as a slim BSP. Every map's outcome goes to out/workshop/fetched.jsonl
 what's done. Steam's CDN drops connections now and then; requests retry with backoff.
 
 `build` converts every slim map (tools/workshop/convert.py), scores the tokens with
-`glados score`, and writes the dataset records (the same fields as `glados dataset`, plus
+`glados-score score`, and writes the dataset records (the same fields as `glados-data dataset`, plus
 `workshop_id`, `title`, and the popularity that train/data.py's `tier` condition reads:
 `subscribers` (lifetime unique) and `favorited`). Use --p2c DIR to also get the solvable ones as .p2c files.
 """
@@ -395,7 +395,7 @@ def read_ids(path, status=None, key="id"):
 
 
 def score_levels(a, ids, lines, meta, out, mode):
-    """Score converted token lines in one `glados score` pass and write their records."""
+    """Score converted token lines in one `glados-score score` pass and write their records."""
     if not lines:
         return {}
     # Published puzzles already passed the game's own editor; our model of its rules would only
@@ -542,7 +542,7 @@ def main():
     p.add_argument("--max", type=int, default=0)
     p.add_argument("--retry-errors", action="store_true")
     p = sub.add_parser("build", help="convert and score the downloaded maps")
-    p.add_argument("--glados", default=str(ROOT / "target" / "release" / ("glados.exe" if sys.platform == "win32" else "glados")))
+    p.add_argument("--glados", default=str(ROOT / "target" / "release" / ("glados-score.exe" if sys.platform == "win32" else "glados-score")))
     p.add_argument("--budget", type=int, default=50_000)
     p.add_argument("--p2c", help="also write the solvable levels as .p2c files here")
     p.add_argument("--incremental", action="store_true",
@@ -554,7 +554,7 @@ def main():
     p.add_argument("--interval", type=float, default=120.0,
                    help="seconds between incremental builds while download runs")
     p.add_argument("--retry-errors", action="store_true", help="run a retry pass after the first")
-    p.add_argument("--glados", default=str(ROOT / "target" / "release" / ("glados.exe" if sys.platform == "win32" else "glados")))
+    p.add_argument("--glados", default=str(ROOT / "target" / "release" / ("glados-score.exe" if sys.platform == "win32" else "glados-score")))
     p.add_argument("--budget", type=int, default=50_000)
     p.add_argument("--p2c", help="also write the solvable levels as .p2c files here")
     a = ap.parse_args()

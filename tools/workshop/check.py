@@ -18,11 +18,13 @@ from bsp import Bsp  # noqa: E402
 from convert import convert  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-GLADOS = ROOT / "target" / "release" / ("glados.exe" if sys.platform == "win32" else "glados")
+EXE = ".exe" if sys.platform == "win32" else ""
+SCORE = ROOT / "target" / "release" / f"glados-score{EXE}"
+P2C = ROOT / "target" / "release" / f"glados-p2c{EXE}"
 
 
 def score(tokens):
-    out = subprocess.run([str(GLADOS), "score"], input=tokens + "\n", capture_output=True, text=True, check=True)
+    out = subprocess.run([str(SCORE), "score"], input=tokens + "\n", capture_output=True, text=True, check=True)
     r = json.loads(out.stdout)
     return r, {k: r.get(k) for k in ("verdict", "min_len", "metrics", "problem")}
 
@@ -32,7 +34,7 @@ def main():
     for bsp in sorted((ROOT / "fixtures" / "workshop").glob("*.bsp.gz")):
         name = bsp.name[:-len(".bsp.gz")]
         got = convert(Bsp.open(bsp))
-        want = subprocess.run([str(GLADOS), "tokens", str(bsp.with_name(name + ".p2c"))],
+        want = subprocess.run([str(P2C), "tokens", str(bsp.with_name(name + ".p2c"))],
                               capture_output=True, text=True, check=True).stdout.splitlines()[1]
         (got_r, got_label), (_, want_label) = score(got), score(want)
         ok = got_label == want_label

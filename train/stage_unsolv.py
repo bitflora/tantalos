@@ -13,15 +13,15 @@ Steps: take levels of data/ws5/train.jsonl labelled unsolvable, drop those alrea
 the original) or that have no map in out/workshop/bsp. Smallest first (or with `--order rating`
 most Workshop stars first, then most ratings: `stars`/`votes` from `fetch.py ratings`), one per
 item set. Re-score
-each pick with the current release `glados.exe` (50k and 250k budgets, editor rules off) and
-`glados editor`; keep only those still unsolvable and without editor flags. Write p2c/, tokens,
+each pick with the current release `glados-score.exe` (50k and 250k budgets, editor rules off)
+and `glados-p2c editor`; keep only those still unsolvable and without editor flags. Write p2c/, tokens,
 scores, MANIFEST.md in out/unsolv-DATE[-N]/, copy to the Puzzle Maker folder as
 glados-ws5b-unsolv-NNNNN (the series continues the highest number there; Title `unsolv <title>`,
 items in Description, a .jpg preview, timestamps a second apart), and append to the registry.
 
 It never starts or touches Portal 2. The real-editor check (`train/portal2.py check`) needs the
 game closed; run it afterwards if the user asks (see CLAUDE.md "Staging unsolvable levels").
-Needs target/release/glados.exe (don't rebuild it during a training run).
+Needs target/release/glados-score.exe and glados-p2c.exe (don't rebuild them during a training run).
 """
 import argparse, datetime, json, re, subprocess, sys, time
 from pathlib import Path
@@ -33,7 +33,8 @@ import playtest  # noqa: E402
 import preview  # noqa: E402
 import bsp  # noqa: E402
 
-GLADOS = ROOT / "target" / "release" / "glados.exe"
+SCORE = ROOT / "target" / "release" / "glados-score.exe"
+P2C = ROOT / "target" / "release" / "glados-p2c.exe"
 DATA = ROOT / "data" / "ws5" / "train.jsonl"
 BSPS = ROOT / "out" / "workshop" / "bsp"
 REGISTRY = ROOT / "train" / "unsolv-staged.jsonl"
@@ -66,11 +67,11 @@ def pre_painted(wid):
     return False
 
 
-def run(args, stdin=None):
-    r = subprocess.run([str(GLADOS), *args], input=stdin, capture_output=True, text=True,
+def run(exe, args, stdin=None):
+    r = subprocess.run([str(exe), *args], input=stdin, capture_output=True, text=True,
                        encoding="utf-8", cwd=ROOT)
     if r.returncode:
-        sys.exit(f"glados {' '.join(args)} failed:\n{r.stderr[-2000:]}")
+        sys.exit(f"{exe.stem} {' '.join(args)} failed:\n{r.stderr[-2000:]}")
     return [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
 
 
@@ -78,7 +79,7 @@ def score(tokens, budget, p2c_dir=None):
     args = ["score", "--editor-rules", "off", "--budget", str(budget)]
     if p2c_dir:
         args += ["--p2c-all", str(p2c_dir)]
-    return run(args, "\n".join(tokens) + "\n")
+    return run(SCORE, args, "\n".join(tokens) + "\n")
 
 
 def rating(r):
@@ -126,8 +127,9 @@ def main():
     ap.add_argument("--order", choices=["size", "rating"], default="size",
                     help="smallest first, or most Workshop stars (then ratings) first")
     a = ap.parse_args()
-    if not GLADOS.exists():
-        sys.exit("target/release/glados.exe is missing: cargo build --release (not during a training run)")
+    for exe in (SCORE, P2C):
+        if not exe.exists():
+            sys.exit(f"{exe.relative_to(ROOT)} is missing: cargo build --release (not during a training run)")
 
     reg = registry()
     skip_ids = {r["workshop_id"] for r in reg}
@@ -163,7 +165,7 @@ def main():
     for name, rows in (("scores-50k.jsonl", sc50), ("scores-250k.jsonl", sc250)):
         (out / name).write_text("".join(json.dumps(x) + "\n" for x in rows), encoding="utf-8")
     files = sorted((out / "p2c").glob("*.p2c"))
-    flags = run(["editor", *map(str, files)])
+    flags = run(P2C, ["editor", *map(str, files)])
     (out / "editor.jsonl").write_text("".join(json.dumps(x) + "\n" for x in flags), encoding="utf-8")
     if len(files) != len(keep):
         sys.exit(f"{len(files)} p2c files for {len(keep)} levels: check {out}")
@@ -189,7 +191,7 @@ def main():
 
     lines = [f"# {len(rows)} more unsolvable Workshop levels, staged {day}", "",
              f"Source: `data/ws5/train.jsonl`, picked by `train/stage_unsolv.py`. Still unsolvable with the "
-             f"current release build at 50k and 250k (`glados score --editor-rules off`). A published "
+             f"current release build at 50k and 250k (`glados-score score --editor-rules off`). A published "
              f"puzzle was solved by its author, so the verdict is a solver gap.", "",
              "| staged file | workshop id | title | rating | tokens | items | editor flags | in game |",
              "|---|---|---|---|---:|---|---|---|"]

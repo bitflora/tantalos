@@ -1,8 +1,8 @@
 //! A graphical viewer for the solver's solutions.
 //!
-//! `glados view` scans folders for saved routes — `<name>.route.jsonl` files with their
-//! `<name>.p2c` level beside them, exactly what `glados route` (redirected) and
-//! `glados check --route DIR` write — serves the app and those levels over a local port, and
+//! `glados-view` scans folders for saved routes — `<name>.route.jsonl` files with their
+//! `<name>.p2c` level beside them, exactly what `glados-score route` (redirected) and
+//! `glados-score check --route DIR` write — serves the app and those levels over a local port, and
 //! opens the browser. Picking a solution loads its geometry and route; nothing is re-solved, so
 //! switching levels is instant.
 //!
@@ -173,7 +173,7 @@ pub fn serve(roots: Vec<PathBuf>, port: u16, open: bool) -> Result<(), String> {
     let actual = listener.local_addr().map_err(|e| e.to_string())?.port();
     let n = found.lock().unwrap().len();
     println!(
-        "glados view: {n} solutions under {}",
+        "glados-view: {n} solutions under {}",
         roots
             .iter()
             .map(|p| p.display().to_string())
@@ -181,7 +181,7 @@ pub fn serve(roots: Vec<PathBuf>, port: u16, open: bool) -> Result<(), String> {
             .join(", ")
     );
     if n == 0 {
-        println!("  (no <name>.route.jsonl + <name>.p2c pairs found; make some with `glados route` or `glados check --route`)");
+        println!("  (no <name>.route.jsonl + <name>.p2c pairs found; make some with `glados-score route` or `glados-score check --route`)");
     }
     let url = format!("http://127.0.0.1:{actual}/");
     println!("  {url}   (Ctrl-C to stop)");

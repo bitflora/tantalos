@@ -13,7 +13,7 @@ being wrong, and an "uncertain" is the model being wrong or the search being too
 ## Method
 
 Seeded samples (seed 42) of 100 unsolvable and 100 uncertain levels, scored with
-`glados score --editor-rules off` (as `tools/workshop/fetch.py` does), at budget 50k unless
+`glados-score score --editor-rules off` (as `tools/workshop/fetch.py` does), at budget 50k unless
 noted. Each level was also scored with one thing *relaxed* in its tokens (`relax.py`,
 `relax2.py`):
 
@@ -155,7 +155,7 @@ Limits:
 - Angled aims are sampled, not every angle.
 - Beams stay horizontal.
 - A plan that uses an angled spot still encodes the cube's facing as its nearest axis
-  (`Spot::dir`; the real yaw is in `Spot::aim`). Plan tokens, `glados check` and the play
+  (`Spot::dir`; the real yaw is in `Spot::aim`). Plan tokens, `glados-score check` and the play
   harness can't replay those plans yet. That only matters for the solver net's plan data
   (`train/plans.py`), and only for levels solved through the angled pass.
 
@@ -274,7 +274,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   right). Drop down the shaft onto the stairs, which are always up and face a wall, and step
   off their top step **sideways** onto the exit ledge. The solver only let stairs lead
   straight ahead. **Fixed:** `Stairs::exits` (src/level.rs) adds the cells beside the top step,
-  one voxel up, when standable and not walled off; the solver and `glados route` use it. On
+  one voxel up, when standable and not walled off; the solver and `glados-score route` use it. On
   800 unsolved Workshop levels with stairs, 7 become solvable (none get worse); on 1,000
   generated stairs levels from data/v5b, 1 becomes solvable and 4 get a shorter plan. The
   play harness hasn't walked a sideways exit yet.
@@ -296,7 +296,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     cell beside the button's (or across a corner) in another region, across fizzlers that are
     on but off while the button is held. Conservative rules want every cell of that region in
     reach; liberal ones any.
-  - Dash timing (`DashTimes`, shared by the solver and `glados route`): steps across a corner
+  - Dash timing (`DashTimes`, shared by the solver and `glados-score route`): steps across a corner
     cost 1.4 voxels, a cell counts as reached on entering it (half a voxel before its middle),
     and a held cube half a voxel sooner still. Escaping through the exit still needs the exit
     cell's middle in time.
@@ -307,7 +307,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     plans; 1,000 v5b levels with a timed pedestal, 3 → solvable, 3 unsolvable → uncertain and
     39 shorter plans. No verdict got worse. Mechanics: a fetch counts as "timed dash"; a reach
     has no bit of its own (a new one would add a training-condition group).
-  - `train/play.py` has `act_fetch` and `act_reach`, not yet tried in game. `glados route`
+  - `train/play.py` has `act_fetch` and `act_reach`, not yet tried in game. `glados-score route`
     can now put a cube down in the player's own cell when its region has no other.
 - 00011..00013 (One Jump, FLAAD TEST, You can't simply jump around it): not recorded here.
 - **3094057883 "Simple Test 01"** (staged as `glados-ws5b-unsolv-00002`, 2026-10-24; the user's
@@ -321,7 +321,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   - `Action::Loop`: with a floor portal under the way out of the other portal (straight down,
     or a cell further out, `loop_falls`), walk in and fall back through at the speed of that
     fall, flying out of the other portal or (`refire`) of a face the player shoots on the way
-    down from where they walked in. Not grounded by `glados route` yet (no plan word, no play
+    down from where they walked in. Not grounded by `glados-score route` yet (no plan word, no play
     harness leg), so such plans are left out of solver-net data.
   - The dropper's cube falls into goo in an alcove; the player catches it from the floor
     beside its fall. A dropper's cube that would fall into goo now lies in such a floor's
@@ -402,7 +402,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     (`start_exits`), and nowhere else it can shoot.
   - `Action::PortalReach`: within reach of a portal (its face's cell or one beside it), take
     a cube off the floor button the other portal comes out onto, staying put (and riding the
-    platform the button released). Not grounded by `glados route` yet.
+    platform the button released). Not grounded by `glados-score route` yet.
   - Conservative rules solve it in 18 actions, the play-tester's second route (they never
     need to knock the turret over); liberal ones also by a portal loop.
 
@@ -423,7 +423,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     rise. **Fixed:** `dynamics::funnel_path` (grating passes; a ride along a beam stops at a
     grating), and `climb_moves`: from a cell of the beam out of a portal, up the column
     through cells some other portal's beam crosses, stepping out sideways anywhere. Conservative-
-    solvable; `glados route` can't ground the lift yet.
+    solvable; `glados-score route` can't ground the lift yet.
   - **68651531 "Mari0 - Test chamber 04 (Update 1)"** (00006): gel dropped through the floor
     portal under the dispenser and ceiling portals paints the floor; bounces off it, fed
     back in through ceiling portals, carry the player up to the exit ledge (running jump
@@ -445,7 +445,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   back before the timer runs out; the cube on the exit's button. Three gaps, **fixed
   (2026-10-24), liberal rules only** (`tests/playtested.rs`):
   - Stairs whose top step is a faith plate went nowhere (the plate's cell isn't standable).
-    Now a `Move::Plate` to where the plate chain lands; `glados route` writes it as `plate`
+    Now a `Move::Plate` to where the plate chain lands; `glados-score route` writes it as `plate`
     (up the stairs onto the plate). Conservative-solvable and routed with the exit unwired.
   - **Rail platforms stood a voxel too low.** The platform is the top face of its item's
     voxel, so whoever rides it stands in the cell above (`Rail::stops`): in all 9,264 rails
@@ -516,7 +516,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   (`Geo::jumps`, src/regions.rs): a running jump across one voxel that can't be stood in, onto
   a floor at the same height, both rule sets. About 127 units of flight at walking speed
   (scaled from the measured gel leap, 290 units at 400 u/s) against 96 needed. Plans write it
-  as `walk` (no new plan word); `glados route` gives it a `jump` leg and train/play.py
+  as `walk` (no new plan word); `glados-score route` gives it a `jump` leg and train/play.py
   `act_jump` jumps at the edge (untested in game). One-voxel pits in generated levels are now
   jumpable too, so v5b labels go stale where those were the obstacle (fixture
   `piston_bridge` widened to two).

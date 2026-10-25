@@ -69,7 +69,7 @@ def main():
         else:
             name = "test" if int(hashlib.md5(wid.encode()).hexdigest(), 16) % 9 == 0 else "train"
         if name == "test" and wid in excluded:
-            # `glados workbench`: the user marked this level as one to keep out of the test split.
+            # `glados-workbench`: the user marked this level as one to keep out of the test split.
             name = "train"
             counts["moved out of test by annotation"] += 1
         split[name].append(r)

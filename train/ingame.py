@@ -1,7 +1,7 @@
 """Check scored levels in Portal 2's own editor, after an evaluation.
 
     python train/ingame.py runs/v2/eval                    # samples.jsonl from evaluate.py
-    python train/ingame.py --samples out/x/scores.jsonl    # any `glados score` output
+    python train/ingame.py --samples out/x/scores.jsonl    # any `glados-score score` output
 
 Takes every parsed level our checker passes (solvable, uncertain, unsolvable) and a share of
 the ones it calls invalid (so rules that are too strict show up too), writes them as .p2c,
@@ -91,7 +91,7 @@ def main():
     ap.add_argument("--reject-share", type=float, default=0.2,
                     help="share of the levels our checker calls invalid to check too")
     ap.add_argument("--limit", type=int, default=None, help="at most this many levels")
-    ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados.exe"))
+    ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados-score.exe"))
     ap.add_argument("--store", default=str(ROOT / "data" / "ingame"))
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")

@@ -1,13 +1,13 @@
 # glados
 
-Generates Portal 2 puzzle-maker levels: a Rust generator/solver (`src/`, binary
-`target/release/glados.exe`) makes training data; a small GPT (`train/`) learns to write levels.
+Generates Portal 2 puzzle-maker levels: a Rust generator/solver (`src/`, binaries
+`target/release/glados-*.exe`, see below) makes training data; a small GPT (`train/`) learns to write levels.
 
 ## Training runs
 
 Use `train/run.py` for every training run. Don't call train.py, evaluate.py, ingame.py,
 pick.py, retrain.sh or loop.sh yourself, and don't change their settings, unless the user asks
-you to. `run.py start` already does every step of a run, in order: build `glados.exe`, train,
+you to. `run.py start` already does every step of a run, in order: build the `glados-*.exe` binaries, train,
 evaluate, check the levels in Portal 2's own editor, train 15 minutes away from every level
 the game has rejected or a play-tester found unsolvable (`data/ingame/human-unsolvable.jsonl`) (into `runs/NAME/away`; evaluated and game-checked too, and the final
 model unless it scores over 3 points lower), pick 5 game-checked levels from the final model
@@ -51,7 +51,13 @@ A training run is exactly these steps:
 - Name runs short and dated by topic, e.g. `v5-fresh-2h`, `v5-cont-1h`. The name can't exist yet.
 - Only one run at a time (one GPU). `start` refuses if one is running; say so to the user.
 - While a run is going, don't rebuild `target/release` (`cargo build --release`) or start
-  other heavy jobs: training calls `glados.exe` and shares the machine.
+  other heavy jobs: training calls `glados-score.exe` and shares the machine.
+
+Binaries (`src/bin/`, each prints its usage when run without arguments):
+`glados-score` (`score`, `check`, `route`: what training, evaluation and play call),
+`glados-data` (`dataset`, `mutate`), `glados-p2c` (`info`, `solve`, `tokens`, `vocab`, `editor`,
+`roundtrip`, `fixtures`), `glados-view`, `glados-workbench`, `glados-evolve`, and `reverse`.
+There is no `glados.exe` any more.
 
 Reading results: the main score is **EVAL solvable %** (share of sampled levels our solver can
 solve; higher is better). Differences under about 10 points are noise. Val loss: lower is
@@ -70,7 +76,7 @@ to change something between them (data, settings) or to look at a model midway.
 
 ## Workshop workbench (triage of downloaded levels)
 
-`glados workbench` is the browser app for the downloaded Workshop levels (`out/workshop/levels.jsonl`
+`glados-workbench` is the browser app for the downloaded Workshop levels (`out/workshop/levels.jsonl`
 plus `data/ws5/{train,test}.jsonl`). It shows every field, the solver's verdict and rating, and
 draws the chamber. The user's triage is server-side in `train/workshop-annotations.jsonl`, not in
 the browser. Read or write it with:
@@ -120,7 +126,7 @@ new task, fresh learning rates); `--from` a solve run continues it.
 - Solve runs are recorded in `train/solver-runs.csv`, not runs.csv; see them with
   `.venv/Scripts/python train/run.py list --task solve`. `note` finds the right file itself.
 - The main score is **EVAL solved %**: the share of 1,024 held-out generated levels (test-gen)
-  whose greedy plan `glados check` accepts. Higher is better; differences under about 5 points
+  whose greedy plan `glados-score check` accepts. Higher is better; differences under about 5 points
   are noise. Also reported: pass@8, optimal %, test-ws (Workshop levels our solver solves) and
   published-liberal (Workshop levels it can't; a weak signal). Don't compare it with the level
   runs' EVAL solvable %.
@@ -128,7 +134,7 @@ new task, fresh learning rates); `--from` a solve run continues it.
 ## Staging "unsolv" Workshop levels for play-testing
 
 When the user asks for N more "unsolvable" Workshop levels, run one command (no Portal 2 needed,
-don't start or touch the game; needs `target/release/glados.exe`):
+don't start or touch the game; needs `target/release/glados-score.exe` and `glados-p2c.exe`):
 
 ```bash
 .venv/Scripts/python train/stage_unsolv.py --n 5
@@ -136,7 +142,7 @@ don't start or touch the game; needs `target/release/glados.exe`):
 
 It picks the smallest levels of `data/ws5/train.jsonl` our solver calls unsolvable (not yet in
 `train/unsolv-staged.jsonl`, no `@pre_paint_sprayer` gel, one per item set), re-scores them with the
-release build (50k/250k, editor rules off) and `glados editor`, writes `out/unsolv-DATE/`
+release build (50k/250k, editor rules off) and `glados-p2c editor`, writes `out/unsolv-DATE/`
 (p2c, tokens, scores, MANIFEST.md), copies them into the Puzzle Maker folder as
 `glados-ws5b-unsolv-NNNNN` (continuing the highest number; Title `unsolv <title>`) and appends them
 to the registry. `--dry-run` shows the picks only. Commit `train/unsolv-staged.jsonl` afterwards.

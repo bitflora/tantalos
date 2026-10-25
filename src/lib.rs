@@ -16,6 +16,7 @@
 //! downloaded Workshop levels (`workbench`).
 
 pub mod builder;
+pub mod cli;
 pub mod dataset;
 pub mod dynamics;
 pub mod flings;

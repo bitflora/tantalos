@@ -5,14 +5,14 @@
     python tools/workshop/stage.py --id 100091397 --force   # make another copy
 
 The workbench's **Stage** button calls this. It compiles the level's token sequence with the
-release `glados.exe` (`score --editor-rules off --p2c-all`), copies the resulting .p2c into the
+release `glados-score.exe` (`score --editor-rules off --p2c-all`), copies the resulting .p2c into the
 Puzzle Maker folder as `glados-wb-NNNNN.p2c`, adds a preview .jpg, retitles it `wb <title>`, and
 marks the level `staged` in `train/workshop-annotations.jsonl`. Each new copy is also logged in
 `train/workbench-staged.jsonl` (workshop id, title, file, date, rating) so agents and the next
 run can find it. A level already staged there (or in `train/unsolv-staged.jsonl`) is reused
 unless `--force` is given.
 
-It never starts or touches Portal 2. It needs `target/release/glados.exe`; build it first
+It never starts or touches Portal 2. It needs `target/release/glados-score.exe`; build it first
 (`cargo build --release`, not during a training run). The Puzzle Maker folder is the same one
 `train/playtest.py` uses; `--puzzles DIR` or `GLADOS_PUZZLES` overrides it. `--registry FILE`,
 `--annotations FILE`, `--all FILE`, `--train FILE` and `--test FILE` override the other paths.
@@ -54,11 +54,11 @@ def glados_bin():
     override = os.environ.get("GLADOS_BIN")
     if override:
         return Path(override)
-    for name in ("glados.exe", "glados"):
+    for name in ("glados-score.exe", "glados-score"):
         path = ROOT / "target" / "release" / name
         if path.is_file():
             return path
-    raise StageError("target/release/glados.exe is missing: cargo build --release (not during a training run)")
+    raise StageError("target/release/glados-score.exe is missing: cargo build --release (not during a training run)")
 
 
 def find_level(wid, paths):
@@ -139,13 +139,13 @@ def compile_p2c(tokens, budget):
             r = subprocess.run(cmd, input=tokens.strip() + "\n", text=True, encoding="utf-8",
                                errors="replace", capture_output=True, cwd=ROOT, timeout=180)
         except subprocess.TimeoutExpired:
-            raise StageError("glados score timed out after 180s")
+            raise StageError("glados-score score timed out after 180s")
         if r.returncode:
-            raise StageError("glados score failed:\n" + r.stderr.strip()[-2000:])
+            raise StageError("glados-score score failed:\n" + r.stderr.strip()[-2000:])
         files = sorted(work.glob("*.p2c"))
         if not files:
             detail = (r.stderr or r.stdout).strip()[-2000:]
-            raise StageError("glados score wrote no .p2c for this level" + (":\n" + detail if detail else ""))
+            raise StageError("glados-score score wrote no .p2c for this level" + (":\n" + detail if detail else ""))
         text = files[0].read_bytes().decode("utf-8")
         try:
             summary = preview.summary(files[0])

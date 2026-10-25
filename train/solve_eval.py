@@ -2,7 +2,7 @@
 
     .venv/Scripts/python train/solve_eval.py runs/solve-fresh-2h/best.pt
 
-For each level it writes one greedy plan and --k sampled ones, and `glados check` replays
+For each level it writes one greedy plan and --k sampled ones, and `glados-score check` replays
 them on our solver's model. The levels:
   test-gen   generated levels held out of training (data/plans/test-gen.jsonl, --n-gen of them)
   test-ws    the Workshop test split our solver solves (data/plans/test-ws.jsonl)
@@ -67,9 +67,9 @@ def generate_plans(model, vocab, prompts, temperature=1.0, top_k=None, rows=64):
 
 
 def check(items, glados=DEFAULT_GLADOS, mode="conservative"):
-    """One `glados check` verdict per plan, in order. An item is `{tokens, plans: [...]}` (or
+    """One `glados-score check` verdict per plan, in order. An item is `{tokens, plans: [...]}` (or
     `{tokens, plan}` for one), optionally with `min_len`. An item's plans share one input line,
-    so `glados check` builds the level's model once for all of them. Returns the per-plan result
+    so `glados-score check` builds the level's model once for all of them. Returns the per-plan result
     dicts, flattened in item order."""
     lines = []
     for it in items:
@@ -84,12 +84,12 @@ def check(items, glados=DEFAULT_GLADOS, mode="conservative"):
         results.extend(json.loads(line)["results"])
     want = sum(len(it["plans"]) if "plans" in it else 1 for it in items)
     if len(results) != want:
-        raise ValueError(f"glados check answered {len(results)} of {want} plans")
+        raise ValueError(f"glados-score check answered {len(results)} of {want} plans")
     return results
 
 
 def summarize(results):
-    """Shares of verdicts over `results` (glados check output)."""
+    """Shares of verdicts over `results` (glados-score check output)."""
     n = max(len(results), 1)
     verdicts = Counter(r["verdict"] for r in results)
     return {

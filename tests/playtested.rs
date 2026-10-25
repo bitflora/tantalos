@@ -130,7 +130,7 @@ fn reflection_cube_on_a_button_holds_it_and_redirects() {
 
 #[test]
 fn funnel_beam_lifts_the_player_as_its_portal_moves_up() {
-    // Not routed yet (`glados route` can't ground a ride up).
+    // Not routed yet (`glados-score route` can't ground a ride up).
     let model = Model::new(&level(GRATE_ESCAPE), Mode::Conservative).unwrap();
     let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
         panic!("not solved");

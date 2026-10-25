@@ -1,6 +1,6 @@
 //! A browser app for triaging the downloaded Workshop levels.
 //!
-//! `glados workbench` reads the Workshop corpus (`out/workshop/levels.jsonl`), the ws5
+//! `glados-workbench` reads the Workshop corpus (`out/workshop/levels.jsonl`), the ws5
 //! train/test splits, the Workshop ratings and item metadata, and serves a local app that
 //! shows every field we have on a level, its solver verdict, and its geometry. Notes, a
 //! personal star rating, a "staged for playtesting" flag and an "exclude from the test data"
@@ -41,7 +41,7 @@ use crate::view::geometry_json;
 const APP: &str = include_str!("workbench.html");
 
 const USAGE: &str = "usage:
-  glados workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE]
+  glados-workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE]
                    [--items FILE] [--fetched FILE] [--annotations FILE]
                    [--port N] [--no-open] [--list]
                          a browser app for the downloaded Workshop levels: every field we
@@ -127,7 +127,7 @@ struct State {
     staging: bool,
 }
 
-/// `glados workbench`: parse the flags, then serve (or just print a summary).
+/// `glados-workbench`: parse the flags, then serve (or just print a summary).
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut paths = Paths::default();
     let mut port = 0u16;
@@ -219,7 +219,7 @@ fn print_summary(state: &State) {
         .collect::<Vec<_>>()
         .join(", ");
     println!(
-        "glados workbench: {} levels ({by_verdict})",
+        "glados-workbench: {} levels ({by_verdict})",
         state.records.len()
     );
     println!(
@@ -807,7 +807,7 @@ fn repo_root() -> Result<PathBuf, String> {
     if root.join("tools").join("workshop").join("stage.py").is_file() {
         return Ok(root.to_path_buf());
     }
-    Err("can't find tools/workshop/stage.py; run glados workbench from the repo root".into())
+    Err("can't find tools/workshop/stage.py; run glados-workbench from the repo root".into())
 }
 
 fn python_exe(root: &Path) -> PathBuf {

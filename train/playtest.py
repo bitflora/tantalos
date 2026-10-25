@@ -5,7 +5,7 @@ the editor lists them all as made on Oct 8 2025. Copies get Timestamp_Created/_M
 to now, a second apart in argument order so the editor's date sort keeps that order. Files
 are named glados-<source name>.p2c unless the name already starts with glados-. Each copy gets
 a preview image (<name>.jpg, train/preview.py: isometric view and item list) for the editor's Open
-screen, its Description lists the items, and its Title is set to the file name: `glados score
+screen, its Description lists the items, and its Title is set to the file name: `glados-score score
 --p2c` titles levels by their line number, which stops being unique once a run name is added.
 
     python train/playtest.py out/sample/p2c/00003.p2c favorites/laser.p2c

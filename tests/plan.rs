@@ -162,7 +162,7 @@ fn decoder_rejects_garbage() {
     );
 }
 
-/// `glados route --plan`: a plan that solves the level routes like the solver's own; one sent
+/// `glados-score route --plan`: a plan that solves the level routes like the solver's own; one sent
 /// somewhere it can't go routes the steps before that, then a try at it.
 #[test]
 fn given_plans_route() {

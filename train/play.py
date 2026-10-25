@@ -4,7 +4,7 @@
     python train/play.py LEVEL.p2c... --port PORT --password PW     # a game you started yourself
     python train/play.py --spike fixtures/synthetic/worked_example.p2c --launch
 
-`glados route` turns the solver's shortest plan into cells, faces and points (src/route.rs).
+`glados-score route` turns the solver's shortest plan into cells, faces and points (src/route.rs).
 This loads the level into the Puzzle Maker (train/portal2.py), builds it, and plays it with the
 player's own controls: `setang` to look (a perfect mouse, turning smoothly so it can be watched;
 --fast snaps it, for validation runs) and +forward, +jump, +attack (blue),
@@ -393,7 +393,7 @@ class Game:
         return name
 
     def set_hazards(self, head):
-        """The level's hazard fields (`glados route`'s head), as planes in world units."""
+        """The level's hazard fields (`glados-score route`'s head), as planes in world units."""
         self.hazards = []
         for h, hz in enumerate(head.get("hazards", [])):
             for face in hz["faces"]:
@@ -803,7 +803,7 @@ class Game:
 
     def walk_points(self, points, cells, tol=8.0):
         """Walks a leg's straightened walk (`points`: cells to head for in turn, straight
-        lines checked clear by `glados route`), or its `cells` in routes made before those."""
+        lines checked clear by `glados-score route`), or its `cells` in routes made before those."""
         if points is None:
             return self.walk_cells(cells, tol)
         if not points:
@@ -1444,7 +1444,7 @@ class Game:
         return self.jumped
 
     def act_attempt(self, leg):
-        """The solver net's step that fits no move (`glados route --plan`): after the walk
+        """The solver net's step that fits no move (`glados-score route --plan`): after the walk
         toward it, a shot at the face it names (from the nearest cell that sees it, else from
         here), or nothing more. Never counts as done."""
         if leg.get("verb") == "fire" and leg.get("face"):
@@ -1563,19 +1563,19 @@ class Game:
 def glados_exe(path=None):
     if path:
         return Path(path)
-    for p in (ROOT / "target" / "release" / "glados.exe", ROOT / "target" / "debug" / "glados.exe"):
+    for p in (ROOT / "target" / "release" / "glados-score.exe", ROOT / "target" / "debug" / "glados-score.exe"):
         if p.exists():
             return p
-    sys.exit("no glados.exe: run `cargo build --release`")
+    sys.exit("no glados-score.exe: run `cargo build --release`")
 
 
 class NoRoute(Exception):
-    """`glados route` can't play the level."""
+    """`glados-score route` can't play the level."""
 
 
 def route(exe, level, plan=None):
-    """(head, legs) of `glados route` for the level: the solver's plan, or with `plan` (plan
-    tokens) that one, as far as it fits (src/main.rs print_route)."""
+    """(head, legs) of `glados-score route` for the level: the solver's plan, or with `plan` (plan
+    tokens) that one, as far as it fits (src/bin/glados-score.rs print_route)."""
     cmd = [str(exe), "route"] + (["--plan", plan] if plan is not None else []) + [str(level)]
     out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if out.returncode != 0:
@@ -1584,7 +1584,7 @@ def route(exe, level, plan=None):
 
 
 def route_lines(lines):
-    """(head, legs) from `glados route`'s JSON lines."""
+    """(head, legs) from `glados-score route`'s JSON lines."""
     rows = [json.loads(l) for l in lines if l.strip()]
     return rows[0], rows[1:]
 
@@ -2225,7 +2225,7 @@ def main():
     ap.add_argument("--fast", action="store_true",
                     help="snap the view instead of turning smoothly (for validation runs)")
     ap.add_argument("--spike", action="store_true", help="check the harness on the first level")
-    ap.add_argument("--glados", help="glados.exe (default: target/release, else target/debug)")
+    ap.add_argument("--glados", help="glados-score.exe (default: target/release, else target/debug)")
     ap.add_argument("--out", help="folder for reports: per level legs.jsonl, trace.jsonl and "
                     "screenshots, and summary.jsonl (levels already in it are skipped); "
                     "a file named STOP there ends the batch after the level being played")

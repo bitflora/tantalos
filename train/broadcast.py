@@ -19,7 +19,7 @@ A round, in out/broadcast/NAME/round-RR/:
    each and check them (solve_eval.solve_levels), and check the kept levels in Portal 2's editor
    (portal2.check; rejects go to data/ingame/invalid.jsonl as in every training run).
 2. play: about half levels the net solved and half it didn't, easiest first. A solved plan is
-   played as is (`glados route --plan`). A failed one is played as far as its steps fit, then
+   played as is (`glados-score route --plan`). A failed one is played as far as its steps fit, then
    the step that fits no move is tried; then the level is played again with the Rust solver's
    reference route.
 3. record: episodes.jsonl (a row per level played), rounds.jsonl (a row per round), and
@@ -55,7 +55,7 @@ import tier as tiers  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "out" / "broadcast"
 OVERLAY = Path(__file__).resolve().parent / "broadcast" / "overlay.html"
-GLADOS = ROOT / "target" / "release" / "glados.exe"
+GLADOS = ROOT / "target" / "release" / "glados-score.exe"
 HARVEST = ROOT / "data" / "harvest"
 PLANS = ROOT / "data" / "plans"
 INGAME = ROOT / "data" / "ingame"
@@ -314,7 +314,7 @@ def queue(kept, n, seed):
 # --- play ---------------------------------------------------------------------------------
 
 def route(p2c, plan=None):
-    """(head, legs) of `glados route` (with `plan`: that plan, as far as it fits)."""
+    """(head, legs) of `glados-score route` (with `plan`: that plan, as far as it fits)."""
     import play
 
     return play.route(GLADOS, p2c, plan)
@@ -431,7 +431,7 @@ def play_round(st, a, d, round_dir, picked, files, session):
 # --- feeding back ----------------------------------------------------------------------------
 
 def plans_for(records):
-    """The Rust solver's plan for each record (`glados score --plan-only`), as plans data rows."""
+    """The Rust solver's plan for each record (`glados-score score --plan-only`), as plans data rows."""
     out = []
     if not records:
         return out
@@ -660,7 +660,7 @@ def start(a):
         sys.exit(f"{OVERLAY} is missing")
     gen = run.checkpoint_of(a.gen)
     solve = run.checkpoint_of(a.solve)
-    subprocess.run(["cargo", "build", "--release", "--bin", "glados"], cwd=ROOT, check=True)
+    subprocess.run(["cargo", "build", "--release", "--bins"], cwd=ROOT, check=True)
     d.mkdir(parents=True)
     args = {k: v for k, v in vars(a).items() if k not in ("cmd", "func")}
     args.update(gen=str(gen), solve=str(solve))

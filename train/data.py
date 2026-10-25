@@ -1,4 +1,4 @@
-"""Load `glados dataset` JSONL into tensors, and turn labels into conditioning tokens.
+"""Load `glados-data dataset` JSONL into tensors, and turn labels into conditioning tokens.
 
 A training sequence is
 

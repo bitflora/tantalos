@@ -1,4 +1,4 @@
-"""Sample levels from a checkpoint and score them with `glados score`.
+"""Sample levels from a checkpoint and score them with `glados-score score`.
 
     python train/sample.py runs/first/best.pt --n 64 --verdict solvable --len 5-7
     python train/sample.py runs/first/best.pt --cond "<trips:2+> <fizzler:yes>" --prefix "size 8 8 6"
@@ -22,7 +22,9 @@ from model import GPT, Config  # noqa: E402
 from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_GLADOS = ROOT / "target" / "release" / ("glados.exe" if sys.platform == "win32" else "glados")
+EXE = ".exe" if sys.platform == "win32" else ""
+# score, check and route; the other glados-* binaries sit beside it (src/bin/).
+DEFAULT_GLADOS = ROOT / "target" / "release" / f"glados-score{EXE}"
 
 
 def load_checkpoint(path, device):
@@ -52,7 +54,7 @@ def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, 
 
 
 def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None):
-    """One result dict per line, from `glados score`."""
+    """One result dict per line, from `glados-score score`."""
     args = [str(Path(glados).resolve()), "score", "--budget", str(budget)]
     if p2c_dir:
         args += ["--p2c", str(p2c_dir)]

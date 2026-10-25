@@ -30,7 +30,7 @@ fn committed_files_are_current_and_reparse() {
         let generated = puzzle.to_p2c();
         assert!(
             on_disk == generated,
-            "{path} is stale; run `cargo run -- fixtures`"
+            "{path} is stale; run `cargo run --bin glados-p2c -- fixtures`"
         );
         assert_eq!(Puzzle::parse(&generated).unwrap(), puzzle, "{name}");
         assert_eq!(

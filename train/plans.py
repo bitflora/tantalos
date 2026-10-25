@@ -3,16 +3,16 @@
     .venv/Scripts/python train/plans.py                  # every source, into data/plans/
     .venv/Scripts/python train/plans.py --limit 2000 --out data/plans-try
 
-Solves the solvable levels of the usual data files again with `glados score --plan-only` (the
+Solves the solvable levels of the usual data files again with `glados-score score --plan-only` (the
 solver throws its plans away when it labels data, so they are found again) and keeps the ones
-whose plan grounds (`glados route` can make it concrete). Each level gets up to --plans
+whose plan grounds (`glados-score route` can make it concrete). Each level gets up to --plans
 different shortest plans (`Model::shortest_plans`): the solver's own first, then others drawn
 at random from all its shortest plans, so the net isn't taught that one of several equally
 good orders or portal choices is wrong. Only the plan is found again: min_len,
 needs_portals and metrics come from the data files. Duplicate levels are scored once. The
 Workshop file repeated 20 times in data/v5b is left out; the Workshop levels come from
 data/ws5, scored without our editor rules as the Workshop pipeline does. Each source's levels
-stream through one `glados score` process, so no thread waits on the slowest level of a batch.
+stream through one `glados-score score` process, so no thread waits on the slowest level of a batch.
 
 Writes, under --out (default data/plans/):
     parts/SOURCE.jsonl   every planned level of one source (a finished part is reused, but only

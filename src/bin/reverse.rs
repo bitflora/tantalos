@@ -2,7 +2,7 @@
 //! construction (plan.md, "self-play" -> "solvability by construction": reverse play).
 //!
 //! This is a **separate binary** (`reverse`, run with `cargo run --bin reverse`) so both it and
-//! the forward `glados dataset` generator live in the crate at once and can be compared on the
+//! the forward `glados-data dataset` generator live in the crate at once and can be compared on the
 //! same data. It only *adds* files: it borrows the library (`builder`, `tokens`, `dataset`) and
 //! does not touch the forward generator, the solver, or `main.rs`.
 //!
@@ -47,7 +47,7 @@
 //! search *did* finish, i.e. for the smaller chambers.
 //!
 //! # Output
-//! One JSON object per line, the same schema `glados dataset` writes (`tokens`, `n_tokens`,
+//! One JSON object per line, the same schema `glados-data dataset` writes (`tokens`, `n_tokens`,
 //! `size`, `verdict`, and for solvable levels `min_len`, `needs_portals`, `metrics`), plus
 //! `"src":"reverse"`, `"layout"`, `"constructed_len"` (actions the construction spends; an upper
 //! bound on the true minimum, and the length `train/data.py` conditions on), `"rooms"`,
