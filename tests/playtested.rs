@@ -212,3 +212,37 @@ fn reflection_cube_rising_in_a_funnel_sweeps_the_beam_onto_the_catcher() {
         assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable, "{other}");
     }
 }
+
+/// 252742140 "Parkour, Parkour PARKOUR PARKOUR": strips of floor between one-voxel channels of
+/// goo; a running jump clears each one.
+const PARKOUR: &str = "size 4 7 5 open 0 0 1 2 6 4 3 2 4 3 3 4 goo 0 1 0 2 1 0 0 3 0 2 3 0 0 5 0 2 5 0 entry 1 0 1 +y exit 1 6 1 -y pedestal 2 6 1 inf > exit";
+
+#[test]
+fn jump_one_voxel_gaps() {
+    let plan = solved(PARKOUR);
+    let jumps = plan
+        .iter()
+        .filter(|a| matches!(a, Action::Move { kind: glados::regions::Move::Jump, .. }))
+        .count();
+    assert_eq!(jumps, 3, "{plan:?}");
+    // Not two voxels.
+    let wide = PARKOUR.replace("goo 0 1 0 2 1 0", "goo 0 1 0 2 2 0");
+    let model = Model::new(&level(&wide), Mode::Liberal).unwrap();
+    assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable);
+}
+
+/// 3666439290 "First chamber": a laser field cuts the player off from the exit; the only white
+/// face is high on the wall on their side, and a conversion gel stream pours on the far side.
+/// Portal the stream out of the wall: it paints the wall across the room, which sent on paints
+/// the floor; a portal there drops the player out under the stream.
+const FIRST_CHAMBER: &str = "size 9 6 4 open 0 0 0 7 5 3 8 2 3 8 3 3 white +y 0 5 3 0 5 3 entry 1 0 0 +y exit 6 5 0 -y laserfield 3 5 0 -y +z 3 on gel 7 0 0 +z portal stream on";
+
+#[test]
+fn conversion_gel_sent_on_through_painted_walls() {
+    let plan = solved(FIRST_CHAMBER);
+    assert!(plan.iter().any(|a| matches!(a, Action::Enter { .. })), "{plan:?}");
+    // Not with the dropper off.
+    let off = FIRST_CHAMBER.replace("stream on", "stream off");
+    let model = Model::new(&level(&off), Mode::Liberal).unwrap();
+    assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable);
+}

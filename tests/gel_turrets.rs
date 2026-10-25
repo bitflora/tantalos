@@ -159,7 +159,7 @@ fn wall_exit_gel_paints_the_floor_under_a_turret() {
             .portals
             .classes
             .iter()
-            .any(|c| c.gel_cells == [[5, 1, 1]]),
+            .any(|c| c.gel_cells.contains(&([5, 1, 1], Dir::NegZ))),
         "a wall portal's spray lands on the turret's cell"
     );
 

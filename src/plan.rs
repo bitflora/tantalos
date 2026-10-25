@@ -5,7 +5,8 @@
 //! (the numbers and directions of `tokens`), without the walking between steps:
 //!
 //! ```text
-//! walk X Y Z                where the player ends up (a drop, a step, a walk across a field)
+//! walk X Y Z                where the player ends up (a drop, a step, a walk across a field,
+//!                           a jump across a gap)
 //! fire blue|orange X Y Z D  the face the portal goes on (cell and direction, as `white` boxes)
 //! enter blue|orange         walk into that portal
 //! pickup X Y Z              the cube's cell
@@ -100,7 +101,7 @@ pub fn encode(route: &Route) -> String {
     for leg in &route.legs {
         let to = leg.after.player;
         match &leg.act {
-            Act::Walk => put(&["walk"], &[to]),
+            Act::Walk | Act::Jump { .. } => put(&["walk"], &[to]),
             Act::Fire { color, face, .. } => {
                 put(&["fire", color_word(*color)], &[face.0]);
                 put(&[dir_token(face.1)], &[]);
@@ -407,7 +408,7 @@ fn fits(model: &Model, s: &State, a: &Action, next: &State, step: &Step) -> bool
         .map(|c| c.kind);
     match (*step, *a) {
         (Step::Walk(c), Action::Move { kind, .. }) => {
-            matches!(kind, Move::Walk | Move::Drop { .. } | Move::Step) && lands(&c)
+            matches!(kind, Move::Walk | Move::Drop { .. } | Move::Step | Move::Jump) && lands(&c)
         }
         (Step::Bounce(c), Action::Move { kind: Move::Bounce, .. })
         | (Step::Leap(c), Action::Move { kind: Move::Leap, .. })

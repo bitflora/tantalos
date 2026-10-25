@@ -1448,47 +1448,89 @@ impl Model {
             }
             out
         }
-        let mut cell_spots: HashMap<Cell, Vec<usize>> = HashMap::new();
-        let mut exit_cells: HashMap<Face, Vec<Cell>> = HashMap::new();
-        if !redirectable.is_empty() {
-            // Ceilings first: a cell a ceiling portal's gel falls on gets its whole spot, even
-            // if a wall exit reaches it too.
-            let mut surfaces: Vec<Face> = level.portal_surfaces().into_iter().collect();
-            surfaces.sort_by_key(|f| f.1 != Dir::PosZ);
-            for f in surfaces {
-                let cells = match f.1 {
-                    Dir::PosZ => level.fall(f.0).into_iter().collect(),
-                    d if d.axis() != 2 && mode == Mode::Liberal && portal_redirectable => {
-                        turret_wall_exits(level, f)
-                    }
-                    _ => Vec::new(),
-                };
-                if cells.is_empty() {
-                    continue;
-                }
-                for &land in &cells {
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        cell_spots.entry(land)
-                    {
-                        let faces = if f.1 == Dir::PosZ {
-                            floor_spot(land)
-                        } else {
-                            // Liberal wall exits: model only the floor under a turret (so a
-                            // portal there can drop it). Painting other floors would add paint
-                            // state without knocking anything.
-                            vec![(land, Dir::NegZ)]
-                        };
-                        slot.insert(intern(faces, &mut paint_faces, &mut face_id));
-                    }
-                }
-                exit_cells.insert(f, cells);
-            }
-        }
+        // Per face a stream can come out of, the faces it hits (`gel::arc`), and the faces
+        // painted around each of those.
+        let mut cell_spots: HashMap<Face, Vec<usize>> = HashMap::new();
+        let mut exit_cells: HashMap<Face, Vec<Face>> = HashMap::new();
         // Faces conversion gel can paint: where portal gel lands, and anywhere a stream of it
         // can be sent.
         let mut whitenable: HashSet<usize> = portal_gel;
-        if portal_redirectable {
-            whitenable.extend(cell_spots.values().flatten().copied());
+        if !redirectable.is_empty() {
+            // Out of a wall portal the stream flies on at the speed it fell into the floor
+            // portal. Liberal rules allow for it being up to 40% slower; conservative ones only
+            // trust one speed (every stream that can be sent falls as far).
+            let speeds: Vec<f64> = redirectable
+                .iter()
+                .filter_map(|&g| {
+                    let (_, top) = level.gels[g].dropper?;
+                    Some(gel::stream_speed(top, stream_faces[g]?.0))
+                })
+                .collect();
+            let wall_speeds: Vec<f64> = match mode {
+                Mode::Conservative if speeds.windows(2).all(|w| (w[0] - w[1]).abs() < 1.0) => {
+                    speeds.first().copied().into_iter().collect()
+                }
+                Mode::Conservative => Vec::new(),
+                Mode::Liberal => speeds
+                    .iter()
+                    .flat_map(|&v| [0.6, 0.7, 0.8, 0.9, 1.0].map(|k| k * v))
+                    .collect(),
+            };
+            let spot_of = |(c, d): Face| {
+                if d == Dir::NegZ {
+                    floor_spot(c)
+                } else {
+                    gel::spot(level, (c, d), gel_rules.radius)
+                }
+            };
+            // Ceilings first, then faces in order; faces conversion gel paints can send the
+            // stream on in turn.
+            let mut queue: Vec<Face> = level.portal_surfaces().into_iter().collect();
+            queue.sort_by_key(|f| f.1 != Dir::PosZ);
+            if portal_redirectable {
+                let mut more: Vec<Face> = whitenable.iter().map(|&f| paint_faces[f]).collect();
+                more.sort();
+                queue.extend(more);
+            }
+            let mut seen: HashSet<Face> = queue.iter().copied().collect();
+            let mut i = 0;
+            while i < queue.len() {
+                let f = queue[i];
+                i += 1;
+                let mut hits: Vec<Face> = Vec::new();
+                if f.1 == Dir::PosZ {
+                    hits.extend(level.fall(f.0).map(|land| (land, Dir::NegZ)));
+                } else if f.1 != Dir::NegZ {
+                    hits.extend(wall_speeds.iter().filter_map(|&v| gel::arc(level, f, v)));
+                    if mode == Mode::Liberal && portal_redirectable {
+                        hits.extend(turret_wall_exits(level, f).into_iter().map(|c| (c, Dir::NegZ)));
+                    }
+                }
+                // Conservative: a turret in the way takes the gel itself.
+                if mode == Mode::Conservative {
+                    hits.retain(|h| level.turret_at(h.0).is_none());
+                }
+                hits.sort();
+                hits.dedup();
+                if hits.is_empty() {
+                    continue;
+                }
+                for &hit in &hits {
+                    if let std::collections::hash_map::Entry::Vacant(slot) = cell_spots.entry(hit) {
+                        let spot = intern(spot_of(hit), &mut paint_faces, &mut face_id);
+                        if portal_redirectable {
+                            for &p in &spot {
+                                whitenable.insert(p);
+                                if seen.insert(paint_faces[p]) {
+                                    queue.push(paint_faces[p]);
+                                }
+                            }
+                        }
+                        slot.insert(spot);
+                    }
+                }
+                exit_cells.insert(f, hits);
+            }
         }
         let mut paintable: Vec<(Face, usize)> = whitenable
             .into_iter()
@@ -1794,7 +1836,7 @@ impl Model {
                 let mut spot: Vec<usize> = c
                     .gel_cells
                     .iter()
-                    .filter_map(|cell| cell_spots.get(cell))
+                    .filter_map(|hit| cell_spots.get(hit))
                     .flatten()
                     .copied()
                     .collect();
@@ -3906,6 +3948,7 @@ impl Model {
                     Move::Step => format!("climb onto region {} using a cube", label(to)),
                     Move::Bounce => format!("bounce off repulsion gel up to region {}", label(to)),
                     Move::Leap => format!("leap off propulsion gel across to region {}", label(to)),
+                    Move::Jump => format!("jump across the gap to region {}", label(to)),
                     Move::Plate => format!("get launched by a faith plate to region {}", label(to)),
                     Move::Stairs => format!("walk up the stairs to region {}", label(to)),
                     Move::Funnel => format!("float along the funnel to region {}", label(to)),

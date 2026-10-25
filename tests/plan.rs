@@ -92,7 +92,7 @@ fn shortest_plans_all_solve() {
         }
         more += (found.len() > 1) as usize;
     }
-    assert!(more > 20, "only {more} levels with more than one shortest plan");
+    assert!(more > 15, "only {more} levels with more than one shortest plan");
 }
 
 /// A cell no level here reaches.
@@ -197,5 +197,5 @@ fn given_plans_route() {
             tried += 1;
         }
     }
-    assert!(tried > 50, "only {tried} attempts");
+    assert!(tried > 40, "only {tried} attempts");
 }

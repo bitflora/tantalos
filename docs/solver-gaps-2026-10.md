@@ -510,6 +510,27 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     shorter plans; 1,216 of the 1,848 Workshop levels with a funnel, a reflection cube and a
     laser (stopped early), none changed. Nothing got worse. `tests/tier1.rs`
     `timed_field(4)` is now conservative-solvable (it was uncertain).
+- **252742140 "Parkour, Parkour PARKOUR PARKOUR"** (`glados-ws5b-unsolv-00021`, 2026-10-24).
+  Strips of floor between one-voxel channels of goo; play-tester: just jump across. Gap: the
+  solver had no plain jump, only leaps off propulsion gel. **Fixed:** `Move::Jump`
+  (`Geo::jumps`, src/regions.rs): a running jump across one voxel that can't be stood in, onto
+  a floor at the same height, both rule sets. About 127 units of flight at walking speed
+  (scaled from the measured gel leap, 290 units at 400 u/s) against 96 needed. Plans write it
+  as `walk` (no new plan word); `glados route` gives it a `jump` leg and train/play.py
+  `act_jump` jumps at the edge (untested in game). One-voxel pits in generated levels are now
+  jumpable too, so v5b labels go stale where those were the obstacle (fixture
+  `piston_bridge` widened to two).
+- **3666439290 "First chamber"** (`glados-ws5b-unsolv-00018`, 2026-10-24). A laser field cuts
+  the player off; the only white face is high on their side's wall, and a conversion gel
+  stream pours on the far side. Play-tester: spread the gel around until you can portal past
+  the field. Gap: gel out of a wall portal painted nothing (liberal: only a turret's floor).
+  **Fixed:** `gel::arc`: out of a wall portal the stream flies on at the speed it fell into the
+  floor portal (`gel::stream_speed`, sv_gravity, no drag: unmeasured) until it hits a surface,
+  which it paints; faces painted that way can send it on in turn. Conservative rules use one
+  speed (and a turret in the way takes the gel); liberal ones 60–100% of it. Here the stream
+  out of the high wall portal hits the back wall at z=1 (only about 13 units above that
+  voxel's floor at nominal speed, so close), and from there it lands on the floor in front of
+  the player: a floor portal drops them out under the stream. Conservative-solvable.
 
 ## Recommended order
 

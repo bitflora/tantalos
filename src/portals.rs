@@ -151,9 +151,9 @@ pub struct FaceClass {
     pub turret: Option<usize>,
     /// Where this gel stream (index in `Level::gels`) lands: a portal here takes the gel.
     pub stream: Option<usize>,
-    /// Ceiling and (liberal) wall faces whose fall lands in these cells: gel coming out of a
-    /// portal here paints around them. Only set when a stream can be sent through a portal.
-    pub gel_cells: Vec<Cell>,
+    /// The faces gel coming out of a portal here hits (`gel::arc`; below a ceiling portal,
+    /// the floor): it paints around them. Only set when a stream can be sent through a portal.
+    pub gel_cells: Vec<Face>,
     /// Not white: only usable while this face (the solver's id, from `Extras::paintable`)
     /// has conversion gel on it.
     pub needs_paint: Option<usize>,
@@ -218,9 +218,9 @@ pub struct Extras {
     pub streams: Vec<(Face, usize)>,
     /// Split classes by where gel coming out of them lands (one entry per face).
     pub split_gel_exits: bool,
-    /// Per face, the floor cells gel coming out of a portal there can land on: below a ceiling
-    /// portal, or (liberal) in front of a wall portal.
-    pub gel_cells: HashMap<Face, Vec<Cell>>,
+    /// Per face, the faces gel coming out of a portal there can hit: the floor below a ceiling
+    /// portal, where its arc ends out of a wall portal (and, liberal, turrets' floors in front).
+    pub gel_cells: HashMap<Face, Vec<Face>>,
     /// Faces that aren't white but conversion gel may paint, with the id the solver knows
     /// each by.
     pub paintable: Vec<(Face, usize)>,
@@ -249,7 +249,7 @@ struct ClassKey {
     deployed: Option<(usize, Behavior)>,
     turret: Option<usize>,
     stream: Option<usize>,
-    gel_cells: Vec<Cell>,
+    gel_cells: Vec<Face>,
     needs_paint: Option<usize>,
     needs: Cond,
     ends: Vec<usize>,

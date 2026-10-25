@@ -73,6 +73,7 @@ pub fn describe_regions(graph: &RegionGraph) -> String {
                     Move::Step => format!("step (needs cube){via} -> {to}"),
                     Move::Bounce => format!("bounce (needs gel) -> {to}"),
                     Move::Leap => format!("leap (needs gel) -> {to}"),
+                    Move::Jump => format!("jump{via} -> {to}"),
                     Move::Plate => format!("faith plate{via} -> {to}"),
                     Move::Stairs => format!("stairs{via} -> {to}"),
                     Move::Funnel => format!("funnel{via} -> {to}"),

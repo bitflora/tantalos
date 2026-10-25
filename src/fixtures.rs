@@ -444,12 +444,13 @@ pub fn stairs_button() -> Puzzle {
     b.build()
 }
 
-/// A two-deep pit cuts the room; a piston platform in it rises flush with the floor when a
-/// latching pedestal is pressed. (START_UP set: wired, that starts it down.)
+/// A two-deep, two-wide pit cuts the room; a piston platform in its near half rises flush with
+/// the floor when a latching pedestal is pressed, leaving a gap to jump. (START_UP set: wired,
+/// that starts it down.)
 pub fn piston_bridge() -> Puzzle {
     let mut b = Builder::new("Piston bridge", [7, 3, 6]);
     b.carve([0, 0, 3], [6, 2, 5]);
-    b.carve([3, 0, 1], [3, 2, 2]);
+    b.carve([3, 0, 1], [4, 2, 2]);
     b.entry([0, 1, 3], Dir::PosX);
     b.exit([6, 1, 3], Dir::NegX);
     let piston = b.piston([3, 1, 1], Dir::PosZ, 0, 2, true);

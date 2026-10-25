@@ -1293,6 +1293,26 @@ class Game:
         self.release("forward")
         return self.in_cell(self.wait_landed()["o"], leg["to"])
 
+    def act_jump(self, leg):
+        """Runs off the edge of `from` toward `dir` and jumps the gap onto `to`, jumping as late
+        as it dares: at walking speed a one-voxel gap leaves ~30 units to spare."""
+        d = DIRS[leg["dir"]]
+        take_off = self.floor(leg["from"])
+        to = self.floor(leg["to"])
+        self.turn(0, yaw_of(d))
+        self.hold("forward")
+        jumped, end = False, time.time() + 6
+        while time.time() < end:
+            s = self.obs()
+            ahead = (s["o"][0] - take_off[0]) * d[0] + (s["o"][1] - take_off[1]) * d[1]
+            if not jumped and ahead > 52:
+                self.tap("jump")
+                jumped = True
+            if jumped and hdist(s["o"], to) < 30:
+                break
+        self.release("forward")
+        return self.in_cell(self.wait_landed()["o"], leg["to"])
+
     def act_plate(self, leg):
         """Steps onto the faith plate and waits to come down where it throws."""
         try:
@@ -1719,7 +1739,7 @@ def walk_out(game, seconds):
 # Where a leg's action starts matters (aim, reach, a run-up): a careful retry puts the player
 # exactly there after walking. For the rest the walk is the action, or a device moves them.
 PLACED = ("fire", "pickup", "putdown", "toss", "throw", "press", "knock", "enter", "leap", "dive",
-          "bounce", "fetch", "reach")
+          "bounce", "fetch", "reach", "jump")
 # Lining up a cube or reaching for something can take the player half a cell over.
 SLACK = ("pickup", "putdown", "toss", "throw", "press", "knock", "funnel", "plate", "dive", "ride",
          "reach")

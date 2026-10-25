@@ -116,7 +116,7 @@ fn check(name: &str, level: &Level, r: &Route) {
                 assert_eq!(*button, end, "{at}");
                 assert_eq!(leg.after.player, end, "{at}");
             }
-            Act::Plate { from, to, .. } | Act::Ride { from, to } => {
+            Act::Plate { from, to, .. } | Act::Ride { from, to } | Act::Jump { from, to, .. } => {
                 assert_eq!(*from, end, "{at}");
                 assert_eq!(leg.after.player, *to, "{at}");
             }

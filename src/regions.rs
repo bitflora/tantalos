@@ -9,6 +9,10 @@
 //!   Long-fall boots mean any drop height is survivable. Glass and grating floors stop a fall.
 //!   A faith plate on the way launches whatever falls to its target (`Move::Plate`).
 //! - A one-voxel (128u) ledge can't be jumped; it is a `Step` edge that needs a cube.
+//! - A running jump clears a one-voxel gap to a floor at the same height (`Move::Jump`):
+//!   ~127 units of flight at walking speed (from the measured gel leap, 290 units at 400 u/s),
+//!   against 96 for the player's box (32 wide) to get from one floor's edge onto the other's.
+//!   Play-tested on "Parkour, Parkour PARKOUR PARKOUR".
 //!   Two or more voxels can't be climbed at all.
 //! - Cells covered by different sets of turrets are in different regions, joined by `Walk`
 //!   edges, so the solver can tell where turrets can shoot.
@@ -160,6 +164,37 @@ impl<'a> Geo<'a> {
         self.dyn_.blocks.get(&face_key(c, d)).copied()
     }
 
+    /// Running jumps from standable cell `c` across one voxel that can't be stood in, onto a
+    /// floor at the same height: the direction, the landing cell, when it can be made (on top
+    /// of `c` being there) and the fields crossed.
+    pub fn jumps(&self, c: Cell) -> Vec<(Dir, Cell, Cond, u64)> {
+        let level = self.level;
+        let open = |c: Cell, d: Dir| match self.block(c, d) {
+            _ if level.face(c, d).barrier.is_some() => None,
+            None => Some(Cond::ALWAYS),
+            Some(b) => b.negate(),
+        };
+        let mut out = Vec::new();
+        for d in Dir::HORIZONTAL {
+            let (gap, to) = (step(c, d), step(step(c, d), d));
+            if level.solid(gap) || level.solid(to) {
+                continue;
+            }
+            let no_floor = match self.stand(gap) {
+                None => Some(Cond::ALWAYS),
+                Some(g) => g.negate(),
+            };
+            let cond = [no_floor, open(c, d), open(gap, d), self.stand(to)]
+                .into_iter()
+                .try_fold(Cond::ALWAYS, |acc, k| k.and_then(|k| acc.and(k)));
+            if let Some(cond) = cond {
+                let hazards = level.face(c, d).hazards | level.face(gap, d).hazards;
+                out.push((d, to, cond, hazards));
+            }
+        }
+        out
+    }
+
     /// Every way something falling from open cell `c` can come to rest, each with the
     /// condition it needs: on the first floor down that is there. Empty if it ends in goo, `c`
     /// is solid, or a device floor's absence can't be written as a condition.
@@ -254,6 +289,8 @@ pub enum Move {
     Bounce,
     /// Leap a gap at speed from a run of propulsion gel.
     Leap,
+    /// Jump across a one-voxel gap at walking speed.
+    Jump,
     /// Walk or fall onto a faith plate and be launched to its target.
     Plate,
     /// Walk up deployed stairs.
@@ -409,6 +446,22 @@ impl RegionGraph {
                             };
                             edge(to, kind, face.hazards | fall.hazards, cc);
                         }
+                    }
+                }
+            }
+        }
+        for r in &g.regions {
+            for &c in &r.cells {
+                for (_, t, cond, hazards) in geo.jumps(c) {
+                    let to = g.region_of(t).unwrap();
+                    if to != r.id {
+                        edges.insert(Edge {
+                            from: r.id,
+                            to,
+                            kind: Move::Jump,
+                            hazards,
+                            cond,
+                        });
                     }
                 }
             }

@@ -148,6 +148,12 @@ pub enum Act {
         dir: Dir,
         to: Cell,
     },
+    /// Run from `from` (the walk's end) toward `dir` and jump across the gap to `to`.
+    Jump {
+        from: Cell,
+        dir: Dir,
+        to: Cell,
+    },
     /// Step from `from` (the walk's end) toward `dir` onto the faith plate in `plate`, and
     /// come down in `to`.
     Plate {
@@ -1025,6 +1031,20 @@ impl<'a> Grounder<'a> {
                             .map(|after| (Act::Ride { from, to: to_cell }, after))
                     })
                 }
+                Move::Jump => self.find(h, s, |c| {
+                    self.geo.jumps(c).into_iter().find_map(|(d, t, cond, hz)| {
+                        if !cond.holds(dev) || hz != hazards || self.region(t) != Some(to) {
+                            return None;
+                        }
+                        let mut after = h.clone();
+                        after.player = t;
+                        if fizzles(hz, on) {
+                            Self::fizzle(&mut after);
+                        }
+                        self.fits(after, next)
+                            .map(|after| (Act::Jump { from: c, dir: d, to: t }, after))
+                    })
+                }),
                 Move::Step => None,
             },
 
@@ -1854,6 +1874,12 @@ fn act_json(act: &Act) -> String {
         Act::Bounce { gel, to } => format!(
             "\"action\":\"bounce\",\"gel\":{},\"to\":{}",
             cell_json(*gel),
+            cell_json(*to)
+        ),
+        Act::Jump { from, dir, to } => format!(
+            "\"action\":\"jump\",\"from\":{},\"dir\":\"{}\",\"to\":{}",
+            cell_json(*from),
+            dir_name(*dir),
             cell_json(*to)
         ),
         Act::Leap { run, dir, to } => format!(
