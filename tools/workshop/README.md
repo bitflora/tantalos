@@ -118,12 +118,17 @@ one level at the edge of the 50k budget.
   - item instances are named `<kind><p2c index>` (`button23-proxy`, `barrierhazard8_brush`);
     logic entities keep the instance's angles; an item's cell is floor((anchor + up) / 128);
   - wires are the outputs of each button's `func_instance_io_proxy`;
-  - cube type: `counter_cube_type` startvalue; pedestal: `prop_button` `Delay` (99999999999 =
+  - cube type: `counter_cube_type` startvalue, where 6 is Franken (its `case_cube_type` keeps
+    only the monster-box spawner; 4 never occurs), and a loose `cube<N>-cube` that is a
+    `prop_monster_box` is Franken too (until 2026-10-25 these ~3,500 maps were rejected); pedestal: `prop_button` `Delay` (99999999999 =
     infinite; `istimer` is only the ticking sound, off for buttons that drive only droppers);
     two pedestal buttons in one cell (a map can place them inside the editor's 128-unit voxel)
     can't both be placed, so the later one moves to the nearest free neighbouring cell with a
     floor under it;
     gel: `info_paint_sprayer` `PaintType` (0 bounce, 2 speed, 3 portal, 4 water) and `start_active`;
+    a dropper in bomb mode has a `prop_paint_bomb` (its `PaintType`) instead, dropping one bomb
+    after another while its `-branch_toggle` is true (`InitialValue` = on at the start): it is
+    written as a stream, so the solver paints a stream's spot where a bomb splats wider;
     fields: their trigger brushes' extent, `trigger_hurt` = laser field;
   - turrets: the `.p2c` Facing is the npc's yaw + 180 (kept, so imports match generated levels);
   - lasers, bridges, funnels: the prop's forward (into the room) and its origin 16 units into the
@@ -162,8 +167,9 @@ Rejected with a reason in `fetched.jsonl` / `report.jsonl`:
   entrances. Of the ~20k BEE maps `download` ruled out, only ~830 have nothing but vanilla
   item names; `download --rescreen` fetches those. A sample of 150 of them: 34 converted, 13%
   of those `invalid` with editor rules off (vanilla Workshop: 16%).
-- Items the tokens can't express: pedestal and floor buttons off the floor, wall-mounted gel
-  droppers and stairs, cube types past franken. (Turrets facing between multiples of 45° are
+- Items the tokens can't express: pedestal and floor buttons off the floor (8,640 maps of
+  2026-10-21's build, the largest gap: with those buttons left out, 8,355 of them convert),
+  wall-mounted gel droppers and stairs, cube types past franken. (Turrets facing between multiples of 45° are
   rounded to the nearest.)
 - Some converted puzzles come out `unsolvable`/`uncertain` because the solver doesn't model a
   trick they need (e.g. speed-gel jumps over goo), not because conversion failed.

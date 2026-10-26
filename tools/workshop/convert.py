@@ -21,7 +21,7 @@ Puzzle Maker's compiler leaves the puzzle readable in the map:
   steps, with the instance's angles (local +x: tilt / rising direction) and their branches'
   InitialValue. Pistons: the platform's func_movelinear and its level counters. Rails: the
   track's func_movelinear (movedir, movedistance) from its own cell. Loose cubes: `cube<N>`
-  instances' prop_weighted_cube (CubeType).
+  instances' prop_weighted_cube (CubeType), or prop_monster_box (Franken).
 
 BEEmod maps are read too where their items are vanilla ones (`BEE_ITEMS`, `bee_kind`). Only
 what the token format can say is recovered: BEEmod's own items and the like make the map
@@ -589,15 +589,25 @@ def convert(bsp):
     toks_gels, gel_index = [], {}
     for inst in by_kind["paintdropper"]:
         sprayers = inst.direct("info_paint_sprayer", "-sprayer")
-        if not sprayers:
-            raise Unsupported(f"{inst.name}: no sprayer")
-        ptype = int(sprayers[0].d.get("PaintType", "-1"))
+        if sprayers:
+            source = sprayers[0]
+            on = source.d.get("start_active", "1") == "1"
+        else:
+            # Bomb mode: while its branch is true it drops a prop_paint_bomb and another 0.5 s
+            # after each one bursts, from the cell a sprayer would be in. A stream, then (its
+            # bigger splat isn't modelled).
+            bombs = inst.direct("prop_paint_bomb", "-paint_bomb")
+            if not bombs:
+                raise Unsupported(f"{inst.name}: no sprayer")
+            source = bombs[0]
+            branch = inst.direct("logic_branch", "-branch_toggle")
+            on = not branch or branch[0].d.get("InitialValue", "1") == "1"
+        ptype = int(source.d.get("PaintType", "-1"))
         if ptype not in PAINT_KINDS:
             raise Unsupported(f"{inst.name}: paint type {ptype}")
         if inst.up() != DOWN:
             raise Unsupported(f"{inst.name}: gel dropper not on a ceiling")
-        dropper = inst.anchor_cell(sprayers[0], DOWN)
-        on = sprayers[0].d.get("start_active", "1") == "1"
+        dropper = inst.anchor_cell(source, DOWN)
         gel_index[inst.index] = len(toks_gels)
         toks_gels.append((dropper, PAINT_KINDS[ptype], on))
         item_cells.append(dropper)
@@ -622,6 +632,9 @@ def convert(bsp):
         counter = inst.direct("math_counter", "-counter_cube_type")
         if counter:
             kind = int(counter[0].d.get("startvalue", "0"))
+            # 6 is Franken: its logic_case keeps only the monster-box spawner (4 never occurs).
+            if kind == 6:
+                kind = CUBE_KINDS.index("franken")
         else:  # BEEmod: only the cube it drops says
             boxes = inst.direct("prop_weighted_cube")
             kind = bee_cube_type(boxes[0]) if boxes else CUBE_KINDS.index("franken")
@@ -1054,8 +1067,10 @@ def later_items(bsp, ents, by_kind, item_cells, blocked, is_open):
             e = ws[0]
             kind = bee_cube_type(e)
         else:
-            e = inst.one("prop_weighted_cube", "-cube")
-            kind = int(e.d.get("CubeType", "0"))
+            # A loose Franken cube is a prop_monster_box.
+            e = inst.one(("prop_weighted_cube", "prop_monster_box"), "-cube")
+            kind = (CUBE_KINDS.index("franken") if e.cls == "prop_monster_box"
+                    else int(e.d.get("CubeType", "0")))
         if not 0 <= kind < len(CUBE_KINDS):
             raise Unsupported(f"{inst.name}: cube type {kind}")
         c = cell_of(e.origin())
