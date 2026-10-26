@@ -1562,6 +1562,26 @@ impl Model {
             .filter(|&((c, d), _)| !level.portal_surface(c, d))
             .collect();
         paintable.sort();
+        // Gel is only tracked where something reads it: on faces conversion gel makes portal
+        // surfaces of (`paintable`), and with bounce or speed gel on floors (gel moves; routes
+        // keep off gel too). Anywhere else (conversion gel on a white wall, bounce on a wall) it
+        // changes no successor and only multiplies the states; and a wall portal whose gel only
+        // paints there is a portal like its neighbours, not a class of its own.
+        let floors_read = gels.iter().any(|g| matches!(g.kind, PaintKind::Bounce | PaintKind::Speed));
+        let mut read: Vec<bool> = paint_faces.iter().map(|f| floors_read && f.1 == Dir::NegZ).collect();
+        for &(_, f) in &paintable {
+            read[f] = true;
+        }
+        for g in &mut gels {
+            g.spot.retain(|&f| read[f]);
+        }
+        for spot in cell_spots.values_mut() {
+            spot.retain(|&f| read[f]);
+        }
+        for hits in exit_cells.values_mut() {
+            hits.retain(|h| cell_spots.get(h).is_some_and(|s| !s.is_empty()));
+        }
+        exit_cells.retain(|_, hits| !hits.is_empty());
         // Jumping off a ledge into a floor portal: up to two cells out (three, liberal).
         let reach = if mode == Mode::Liberal { 3 } else { 2 };
         let dives = portals::dives(level, &graph, reach);

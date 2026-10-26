@@ -531,6 +531,12 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   out of the high wall portal hits the back wall at z=1 (only about 13 units above that
   voxel's floor at nominal speed, so close), and from there it lands on the floor in front of
   the player: a floor portal drops them out under the stream. Conservative-solvable.
+  **Cost (2026-10-25):** made a class of every wall face (each sends the stream somewhere
+  else) and tracked paint nobody reads; on 1,500 generated levels solvable fell 908 → 674 (the
+  search ran out of budget). Now wall faces are grouped as before and a class's gel lands where
+  every face of it sends it (liberal: any), ceiling classes still split by where gel falls, and
+  paint is tracked only on faces conversion gel can whiten and (with bounce or speed gel)
+  floors: 819 solvable. The rest is real growth (more faces to whiten) under the 50k budget.
 
 ## Orientation: the same level turned or mirrored (2026-10-25)
 

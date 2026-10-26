@@ -153,6 +153,7 @@ pub struct FaceClass {
     pub stream: Option<usize>,
     /// The faces gel coming out of a portal here hits (`gel::arc`; below a ceiling portal,
     /// the floor): it paints around them. Only set when a stream can be sent through a portal.
+    /// Out of a wall class, conservatively those every face of it hits (liberally any).
     pub gel_cells: Vec<Face>,
     /// Not white: only usable while this face (the solver's id, from `Extras::paintable`)
     /// has conversion gel on it.
@@ -216,7 +217,8 @@ pub struct PanelFace {
 pub struct Extras {
     /// The floor face each gel stream lands on (index in `Level::gels`).
     pub streams: Vec<(Face, usize)>,
-    /// Split classes by where gel coming out of them lands (one entry per face).
+    /// A stream can be sent through a portal: classes get where gel out of them lands
+    /// (`gel_cells`, per face).
     pub split_gel_exits: bool,
     /// Per face, the faces gel coming out of a portal there can hit: the floor below a ceiling
     /// portal, where its arc ends out of a wall portal (and, liberal, turrets' floors in front).
@@ -352,10 +354,12 @@ impl Portals {
                 .then(|| level.turrets.iter().position(|t| t.cell == c))
                 .flatten();
             let stream = streams.get(&(c, d)).copied();
-            let gel_cells = if extras.split_gel_exits {
-                extras.gel_cells.get(&(c, d)).cloned().unwrap_or_default()
-            } else {
-                Vec::new()
+            // Where gel falls out of a ceiling face splits classes. Where it flies out of a wall
+            // face doesn't (each face of a wall sends it somewhere else, and classes per face
+            // multiply the search): see `gel_cells` below.
+            let gel_cells = match extras.gel_cells.get(&(c, d)) {
+                Some(hits) if extras.split_gel_exits && d == Dir::PosZ => hits.clone(),
+                _ => Vec::new(),
             };
             let key = ClassKey {
                 flat,
@@ -420,6 +424,21 @@ impl Portals {
                     .beam_out
                     .as_ref()
                     .and_then(|_| extras.beam_exits.get(&faces[0]).map(|(r, _)| *r));
+                // A portal can be on any face of the class: conservative rules count on gel
+                // landing only where it does out of every one of them, liberal ones anywhere it
+                // does out of one. (Out of ceiling faces it lands the same way: `ClassKey`.)
+                let hits = |f: &Face| extras.gel_cells.get(f).map_or(&[][..], |h| &h[..]);
+                let mut gel_cells: Vec<Face> =
+                    if extras.split_gel_exits { hits(&faces[0]).to_vec() } else { Vec::new() };
+                for f in faces.iter().skip(1).filter(|_| extras.split_gel_exits) {
+                    if extras.liberal {
+                        gel_cells.extend(hits(f));
+                    } else {
+                        gel_cells.retain(|h| hits(f).contains(h));
+                    }
+                }
+                gel_cells.sort();
+                gel_cells.dedup();
                 FaceClass {
                     id,
                     faces,
@@ -429,7 +448,7 @@ impl Portals {
                     deployed_visible,
                     turret: key.turret,
                     stream: key.stream,
-                    gel_cells: key.gel_cells,
+                    gel_cells,
                     needs_paint: key.needs_paint,
                     needs: key.needs,
                     ends: key.ends,
