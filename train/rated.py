@@ -33,7 +33,7 @@ from data import MECHANICS  # noqa: E402
 
 WS_TRAIN = ROOT / "data" / "ws5" / "train.jsonl"
 # Levels whose Workshop text says they need bunny hopping or a glitch: not "rated" levels.
-EXCLUDED = ROOT / "out" / "workshop" / "excluded-tricks-2026-10-25.jsonl"
+EXCLUDED = ROOT / "tools" / "workshop" / "excluded-tricks.jsonl"
 
 FAMILIES = {
     "cubes+buttons": ["dropper", "button", "cube"],
