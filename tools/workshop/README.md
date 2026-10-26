@@ -73,7 +73,7 @@ python tools/workshop/augment.py               # data/ws5/train.jsonl -> data/v5
 target/release/glados-data.exe augment --check FILE   # also label each version against its level
 ```
 
-`data/v5b/levels-workshop-x20.jsonl` repeats each ws5 train level 20 times and models memorize
+`data/v5b/workshop-x20.jsonl` repeats each ws5 train level 20 times and models memorize
 them (2026-10-25: Workshop test loss 1.59 against 0.24 on trained levels). `augment.py` writes each
 level's 8 versions instead (mirror in x, then 0-3 quarter turns about z; `src/augment.rs`), twice
 each: 258k lines, 129k distinct sequences. Records keep their labels and get `variant` (`r0` is
@@ -81,9 +81,10 @@ the level itself). A version is left out if it isn't exactly the level moved (so
 faces, glass, fields, items: `augment::moved_level`, never failed on ws5), adds a mounting problem
 (180: a mirrored field anchored at a wall end that isn't there), changes our editor flags (167:
 the decoder's own pedestal-side and goo-cell choices), doesn't read back (14: wires renumbered
-past 32 in levels with over 32 panels) or is over 969 tokens (143). The file is outside run.py's
-default `levels-*.jsonl`; name it with `--data` in place of the x20 file. ws5 test is never
-augmented.
+past 32 in levels with over 32 panels) or is over 969 tokens (143). Since 2026-10-26 it is
+`data/v5b/levels-workshop-aug-x2.jsonl`, in run.py's default `levels-*.jsonl`, and the x20 file is
+`data/v5b/workshop-x20.jsonl`, outside it (name it with `--data` to train on it again). ws5 test is
+never augmented.
 
 `--check` on 600 ws5 levels: 99.1% of versions got the original's verdict, plan length and
 editor flags at first; the rest showed the solver depending on orientation (bridge routes,

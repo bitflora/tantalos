@@ -1,10 +1,10 @@
 """Workshop training levels as their 8 mirrored/turned versions, instead of 20 copies of each.
 
-    python tools/workshop/augment.py                 # data/ws5/train.jsonl -> data/v5b/workshop-aug-x2.jsonl
+    python tools/workshop/augment.py                 # data/ws5/train.jsonl -> data/v5b/levels-workshop-aug-x2.jsonl
     python tools/workshop/augment.py --copies 3
 
-data/v5b/levels-workshop-x20.jsonl repeats every ws5 train level 20 times, and models learn
-those levels by heart (2026-10-25: 1.59 nats a token on held-out Workshop levels against 0.24 on
+data/v5b/workshop-x20.jsonl (levels-workshop-x20.jsonl until 2026-10-26) repeats every ws5 train
+level 20 times, and models learn those levels by heart (2026-10-25: 1.59 nats a token on held-out Workshop levels against 0.24 on
 trained ones). This writes each level's versions from `glados-data augment` (src/augment.rs:
 mirror in x, then 0-3 quarter turns about z; a version that repeats an earlier one's tokens, or
 whose mirrored field would lose its wall, is left out) `--copies` times each, so about the same
@@ -14,10 +14,12 @@ re-encoded); the labels carry over, since a version plays the same (tests/augmen
 `glados-data augment --check` on Workshop levels). Versions over 969 tokens are left out (the
 greedy box cover can come out longer in another orientation).
 
-The output is outside the `levels-*.jsonl` pattern that run.py trains on by default, so it is
-used only when named with run.py's `--data`, in place of the x20 file, e.g.
+Since 2026-10-26 the default output, data/v5b/levels-workshop-aug-x2.jsonl, is what run.py
+trains on (its default `levels-*.jsonl` pattern); the x20 file was renamed
+data/v5b/workshop-x20.jsonl, out of that pattern. To train on the x20 copies again, name the
+files with run.py's `--data`, e.g.
 
-    --data "data/v5b/levels-[1-5].jsonl" "data/v5b/levels-mutants*.jsonl" data/v5b/workshop-aug-x2.jsonl
+    --data "data/v5b/levels-[1-5].jsonl" "data/v5b/levels-mutants*.jsonl" data/v5b/workshop-x20.jsonl
 
 The held-out data/ws5/test.jsonl is never augmented: it stays the Workshop test loss's set.
 
@@ -42,9 +44,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--src", default=str(ROOT / "data" / "ws5" / "train.jsonl"))
     ap.add_argument("--copies", type=int, default=2, help="times each version is written")
-    ap.add_argument("--out", default=None, help="default data/v5b/workshop-aug-xN.jsonl")
+    ap.add_argument("--out", default=None, help="default data/v5b/levels-workshop-aug-xN.jsonl")
     a = ap.parse_args()
-    out = Path(a.out) if a.out else ROOT / "data" / "v5b" / f"workshop-aug-x{a.copies}.jsonl"
+    out = Path(a.out) if a.out else ROOT / "data" / "v5b" / f"levels-workshop-aug-x{a.copies}.jsonl"
     src = Path(a.src)
     if src.resolve() == (ROOT / "data" / "ws5" / "test.jsonl").resolve():
         sys.exit("data/ws5/test.jsonl is the held-out set: don't train on its versions")

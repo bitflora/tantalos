@@ -9,6 +9,12 @@ run's weights. Every --eval-every steps: validation loss, then --score-n sampled
 (lowest validation loss). Log: <out>/log.jsonl. The run gets a row in train/runs.csv
 (train/record.py), with --note as its notes.
 
+Pausing (run.py pause/resume): a file <out>/PAUSE makes training save <out>/last.pt and exit with
+code 3 (PAUSED_EXIT) within a few steps. --resume carries on from last.pt: weights, optimizer, step,
+and the training time already done, so with --until set to the time still owed, the learning-rate
+schedule picks up where it stopped instead of starting over. <out>/last.json says, without torch,
+how far last.pt got (step, trained_s).
+
 --task solve trains the solver net instead: it reads a level and writes its plan (data/plans from
 train/plans.py; sequences in train/data.py). Its eval replays greedy plans for --score-n
 validation levels with `glados-score check` and logs the solved share. --init from a level model keeps
@@ -40,6 +46,8 @@ import torch  # noqa: E402
 sys.path.insert(0, str(Path(__file__).parent))
 import record  # noqa: E402
 import sample  # noqa: E402
+
+PAUSED_EXIT = 3  # exit code when a PAUSE file stopped training (run.py looks for it)
 import solve_eval  # noqa: E402
 from data import COND_TOKENS, Away, Vocab, load, load_solve  # noqa: E402
 from model import GPT, Config  # noqa: E402
@@ -227,6 +235,10 @@ def main():
     model = GPT(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)
     step, best = 0, float("inf")
+    done_before = 0.0  # seconds of training in the sessions before this one (--resume)
+
+    def trained_s():
+        return done_before + time.time() - start
     if init:
         state, own = init["model"], model.state_dict()
         for k, v in state.items():
@@ -247,7 +259,8 @@ def main():
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["optimizer"])
         step, best = ck["step"], ck["best_val"]
-        print(f"resumed at step {step}")
+        done_before = ck.get("trained_s", 0.0)
+        print(f"resumed at step {step}, after {done_before / 3600:.2f} h of training")
     if init or step:
         # Otherwise a run continuing another draws the very batches that run drew first. (The
         # validation split stays: it is seeded separately, by --seed alone.)
@@ -258,7 +271,9 @@ def main():
         if s < args.warmup:
             return args.lr * (s + 1) / args.warmup
         if deadline:
-            frac = min(1.0, (time.time() - start) / (deadline - start))
+            # Time-based, counting the training time of the sessions before a --resume, so a
+            # resumed run carries on down the curve rather than starting it over.
+            frac = min(1.0, trained_s() / (done_before + deadline - start))
         else:
             frac = min(1.0, (s - args.warmup) / max(1, args.iters - args.warmup))
         return args.min_lr + 0.5 * (args.lr - args.min_lr) * (1 + math.cos(math.pi * frac))
@@ -307,10 +322,13 @@ def main():
                 "step": step,
                 "best_val": best,
                 "val_loss": val_loss,
+                "trained_s": trained_s(),
                 "args": vars(args),
             },
             path,
         )
+        if path.name == "last.pt":
+            (out / "last.json").write_text(json.dumps({"step": step, "trained_s": round(trained_s(), 1)}) + "\n")
 
     log = open(out / "log.jsonl", "a")
     model.train()
@@ -352,6 +370,13 @@ def main():
         scaler.update()
         opt.zero_grad(set_to_none=True)
         step += 1
+
+        if step % 10 == 0 and (out / "PAUSE").exists():
+            checkpoint(out / "last.pt", None)
+            log.close()
+            print(f"paused at step {step} after {trained_s() / 3600:.2f} h of training: "
+                  f"--resume continues from {out / 'last.pt'}")
+            sys.exit(PAUSED_EXIT)
 
         if step % 50 == 0:
             dt = time.time() - t0

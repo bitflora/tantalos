@@ -34,18 +34,43 @@ A training run is exactly these steps:
 3. When it ends, read the printed status and do every item under **NEXT STEPS**, in order.
    `wait` exits 0 when the run is complete, 1 if it failed, 2 if the Portal 2 check was
    skipped (the game was already running): then tell the user, and when they say the game is
-   closed, run `run.py ingame NAME` and go back to step 2.
+   closed, run `run.py ingame NAME` and go back to step 2. 3 if it was paused (see Pausing a
+   run below).
+
+**Pausing a run** (when the user wants the machine back and the run continued later; never on
+your own initiative):
+
+1. `.venv/Scripts/python train/run.py pause NAME`. Only works while it is TRAINING; if it says
+   the run is past training, tell the user and let it finish. It waits until training has saved
+   and stopped (a minute or so, up to 20 if an eval is under way), then prints PAUSED and how many
+   hours are done. If a `wait NAME` was going in the background, it ends with exit code 3
+   (paused): that is not a failure.
+2. Tell the user it is paused and how many hours are done. Nothing else runs; a paused run holds
+   neither the GPU nor the machine.
+3. Only when the user says to carry on: `.venv/Scripts/python train/run.py resume NAME`, then
+   step 2 above (`wait NAME` with `run_in_background`). It trains for the hours still owed and
+   then does every other step as usual. If it refuses (another run going), tell the user why.
+
+A paused-and-resumed run equals one unbroken run of the same `--hours`: weights, optimizer and
+learning-rate schedule carry on. Two runs chained with `--from` do not (see Training time below).
+Don't use `stop` to pause: a stopped run can't be resumed. `stop NAME` on a paused run ends it
+for good and records it.
 
 ```bash
 .venv/Scripts/python train/run.py status NAME
 .venv/Scripts/python train/run.py stop NAME
+.venv/Scripts/python train/run.py pause NAME
+.venv/Scripts/python train/run.py resume NAME
 .venv/Scripts/python train/run.py list
 .venv/Scripts/python train/run.py ingame NAME
 .venv/Scripts/python train/run.py note NAME "WHAT IT SHOWED"
 ```
 
 - Defaults (data/v5b, learning rates, sizes) are already right: add no other options unless
-  the user names them. Anything after `--` goes to train.py. `--no-ingame` skips the Portal 2
+  the user names them. The default data (every `data/v5b/levels-*.jsonl`) holds the Workshop
+  levels as their 8 mirrored/turned versions, twice each (`levels-workshop-aug-x2.jsonl`), since
+  2026-10-26; the old 20 plain copies are `data/v5b/workshop-x20.jsonl`, used only if the user
+  asks (name all the files with `--data`). Anything after `--` goes to train.py. `--no-ingame` skips the Portal 2
   steps: use it only if the user says not to launch the game.
 - **Warm-start by default:** unless the user says otherwise (or names a different `--from`),
   continue the most recently trained net of the same task: pass the final model of the newest
@@ -93,7 +118,8 @@ portal-requiring, novel ones in `data/harvest/RUN.jsonl`; train on them by addin
 `--data` next to the usual files (see its docstring). It uses the GPU and the solver, so not
 while a run or data generation is going.
 
-Training time: one run of 2 hours beats two chained 1-hour runs. Each run's learning rate
+Training time: one run of 2 hours beats two chained 1-hour runs (a paused and resumed run counts
+as one run). Each run's learning rate
 warms up and decays to its minimum over its own time, so a chained run starts back at a high
 rate and spends its first part undoing the fine-tuning the last one ended with. Chain runs only
 to change something between them (data, settings) or to look at a model midway.

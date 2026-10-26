@@ -5,6 +5,8 @@
     .venv/Scripts/python train/run.py status          # the newest run (or: status v4-a)
     .venv/Scripts/python train/run.py wait v4-a       # blocks until it ends, then prints status
     .venv/Scripts/python train/run.py stop v4-a
+    .venv/Scripts/python train/run.py pause v4-a      # stop training for now, keep its place
+    .venv/Scripts/python train/run.py resume v4-a     # carry on where it paused
     .venv/Scripts/python train/run.py list            # recent rows of train/runs.csv
     .venv/Scripts/python train/run.py note v4-a "what it showed"
     .venv/Scripts/python train/run.py ingame v4-a     # redo the Portal 2 steps if they were skipped
@@ -28,10 +30,18 @@ order, with nothing to remember:
      shuffled into the Puzzle Maker folder as glados-ab-NAME-NN; the verdicts go in
      runs/NAME/playtest/results.csv and `abtest.py score NAME --out runs/NAME/playtest` unblinds them
   6. record the run (and NAME/away) in train/runs.csv
+Pausing: `pause NAME` (only while it trains) has train.py save last.pt and exit; the run is then
+PAUSED and holds neither the GPU nor the machine. `resume NAME` rebuilds the binaries and trains
+on for the time still owed (--hours less the training already done), continuing the weights,
+optimizer and learning-rate schedule, then does the remaining steps. So a run paused halfway comes out
+like one run of the same length, not like two chained runs (which each restart the schedule).
+Only the batches drawn differ.
 Everything lands in runs/NAME: status.json (what it's doing now), run.log (each phase),
 train.log, evaluate.log, ingame.log, pick.log, eval/report.md.
 
-Settings: data/v5b (all levels-*.jsonl: generated, Workshop, mutants; data/v5 cleaned with the 2026-10-20 editor rules) unless --data; block 1024, batch 16. A fresh run uses
+Settings: data/v5b (all levels-*.jsonl: generated, mutants, and the Workshop levels as their
+8 mirrored/turned versions x2 since 2026-10-26, levels-workshop-aug-x2.jsonl; the old x20 copies
+are workshop-x20.jsonl, outside the pattern) unless --data; block 1024, batch 16. A fresh run uses
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
 in runs.csv did. Anything after `--` goes to train.py as is.
 
@@ -71,6 +81,7 @@ RUNS = ROOT / "runs"
 PY = sys.executable
 GLADOS = ROOT / "target" / "release" / "glados-score.exe"
 ACTIVE = ("starting", "training", "evaluating", "ingame", "away", "picking")
+PAUSED_EXIT = 3  # train.py's exit code when a PAUSE file stopped it (train.py PAUSED_EXIT)
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: no console pops up, none is needed
 DETACH = NO_WINDOW | 0x00000200  # | CREATE_NEW_PROCESS_GROUP
 BREAKAWAY = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB: outlive the session that started it
@@ -279,7 +290,7 @@ PLANS = ROOT / "data" / "plans" / "train.jsonl"  # its training data (train/plan
 INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
 HUMAN = ROOT / "data" / "ingame" / "human-unsolvable.jsonl"  # passed our solver, unsolvable in play
 # Workshop levels no level run trains on: their loss (train.py --holdout) shows overfitting to
-# the Workshop part, which the val loss can't (its x20 copies fall in both train and val).
+# the Workshop part, which the val loss shows poorly.
 WS_TEST = ROOT / "data" / "ws5" / "test.jsonl"
 
 
@@ -416,21 +427,32 @@ def pipeline(d, steps=STEPS):
     if sys.platform == "win32":  # don't let Windows sleep between phases either
         ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
 
-    def phase(state, args, logname):
+    def phase(state, args, logname, may_pause=False):
         write_status(d, state=state, phase_started=now().isoformat(timespec="seconds"), log=logname)
         say(f"{state}: {' '.join(args[:2])}")
         with open(d / logname, "a", encoding="utf-8") as out:
             code = subprocess.call([PY, "-u", *args], cwd=ROOT, stdout=out, stderr=subprocess.STDOUT,
                                    creationflags=NO_WINDOW if sys.platform == "win32" else 0)
-        if code:
+        if code and not (may_pause and code == PAUSED_EXIT):
             raise RuntimeError(f"{state} failed (exit {code}); see {d.name}/{logname}")
+        return code
 
     game = s.get("ingame", True)
+    paused = False
     try:
         if "training" in steps:
-            until = (now() + datetime.timedelta(hours=s["hours"])).strftime("%Y-%m-%d %H:%M:%S")
+            # A resumed run (resume) trains on from last.pt for the time still owed.
+            left = s.get("train_left_s")
+            until = now() + datetime.timedelta(seconds=left if left is not None else s["hours"] * 3600)
+            until = until.strftime("%Y-%m-%d %H:%M:%S")
             write_status(d, train_until=until)
-            phase("training", s["train"] + ["--until", until], "train.log")
+            args = s["train"] + (["--resume"] if left is not None else []) + ["--until", until]
+            if phase("training", args, "train.log", may_pause=True) == PAUSED_EXIT:
+                paused = True
+                write_status(d, state="paused", paused=now().isoformat(timespec="seconds"), train_left_s=None)
+                say(f"paused after {trained_hours(d):.2f} of {s['hours']} h of training: run.py resume {name_of(d)}")
+                return
+            (d / "PAUSE").unlink(missing_ok=True)  # asked for as training ended: too late, carry on
         if not (d / "best.pt").exists():
             raise RuntimeError("training wrote no best.pt; see train.log")
         if "evaluating" in steps:
@@ -490,12 +512,21 @@ def pipeline(d, steps=STEPS):
                      ended=now().isoformat(timespec="seconds"), error=str(e))
         say(f"failed: {e}\n{traceback.format_exc()}")
     finally:
-        sys.path.insert(0, str(ROOT / "train"))
-        import record
+        if not paused:  # a paused run is recorded once it ends
+            sys.path.insert(0, str(ROOT / "train"))
+            import record
 
-        record.safely(d)
-        if (d / "away" / "best.pt").exists():
-            record.safely(d / "away")
+            record.safely(d)
+            if (d / "away" / "best.pt").exists():
+                record.safely(d / "away")
+
+
+def trained_hours(d):
+    """Hours of training d's last.pt holds (train.py's last.json); 0 if none."""
+    try:
+        return json.loads((d / "last.json").read_text())["trained_s"] / 3600
+    except (OSError, ValueError, KeyError):
+        return 0.0
 
 
 # --------------------------------------------------------------------------------------- status
@@ -519,6 +550,8 @@ def describe(d):
         if s.get("train_until"):
             left = (datetime.datetime.fromisoformat(s["train_until"]) - now()).total_seconds() / 60
             head += f", {max(left, 0):.0f} min left (training ends {hhmm(s['train_until'])})"
+        if s.get("resumed"):
+            head += f" (resumed {hhmm(s['resumed'])})"
         lines.append(head)
         steps = [l for l in tail(d / "train.log", 40).splitlines() if l.startswith("step ")]
         if steps:
@@ -533,6 +566,9 @@ def describe(d):
         lines.append(f"{name}: DONE at {hhmm(s['ended'])}")
     elif state == "stopped":
         lines.append(f"{name}: STOPPED at {hhmm(s['ended'])}")
+    elif state == "paused":
+        lines.append(f"{name}: PAUSED at {hhmm(s['paused'])} after {trained_hours(d):.2f} of {s['hours']} hours"
+                     " of training (evaluation and the other steps come after it resumes)")
     else:
         lines.append(f"{name}: {'DIED (process gone)' if state == 'died' else 'FAILED'} "
                      f"{s.get('error', '')}".rstrip())
@@ -606,6 +642,13 @@ def describe(d):
                     f"  .venv/Scripts/python train/run.py ingame {n}  and then wait for it the same way.")
     if state in ("failed", "died"):
         todo.append("Report the log lines above to the user. Don't start the run again until the cause is fixed.")
+    if state == "paused":
+        lines.append("  NEXT STEPS (do all of them):")
+        lines.append(f"    1. Tell the user runs/{n} is paused and how many hours of training are done (above)."
+                     " It holds neither the GPU nor the machine now.")
+        lines.append(f"    2. Only when the user says to carry on:  .venv/Scripts/python train/run.py resume {n}"
+                     f"  then  .venv/Scripts/python train/run.py wait {n}  (run_in_background), as after start.")
+        return "\n".join(lines)
     if s.get("broadcast"):
         todo = [f"Nothing: train/broadcast.py ({s['broadcast']}) started this run and carries on by itself."]
     elif solve:
@@ -662,6 +705,8 @@ def wait(a):
         time.sleep(30)
     print(describe(d))
     s = read_status(d) or {}
+    if s.get("state") == "paused":
+        sys.exit(3)
     if s.get("state") != "done":
         sys.exit(1)
     if s.get("ingame", True) and not complete(d):
@@ -688,9 +733,9 @@ def ingame(a):
 def stop(a):
     d = run_dir(a.name)
     s = read_status(d)
-    if not s or s.get("state") not in ACTIVE:
+    if not s or s.get("state") not in ACTIVE + ("paused",):
         sys.exit(f"runs/{a.name} isn't running")
-    if alive(s["pid"]):
+    if s.get("state") != "paused" and alive(s["pid"]):
         subprocess.call(["taskkill", "/T", "/F", "/PID", str(s["pid"])],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     write_status(d, state="stopped", ended=now().isoformat(timespec="seconds"))
@@ -699,6 +744,66 @@ def stop(a):
 
     record.safely(d)
     print(f"stopped runs/{a.name}; its last checkpoint is runs/{a.name}/best.pt (if it got to step 2000)")
+
+
+def pause(a):
+    """Ask a training run to pause: train.py saves last.pt and exits, and the run waits for resume."""
+    d = run_dir(a.name)
+    s = read_status(d) or {}
+    state = s.get("state")
+    if state == "paused":
+        sys.exit(f"runs/{a.name} is already paused. To carry on: train/run.py resume {a.name}")
+    if state not in ACTIVE or not alive(s.get("pid", 0)):
+        sys.exit(f"runs/{a.name} isn't running")
+    if state not in ("starting", "training"):
+        sys.exit(f"runs/{a.name} is past training ({state}): only training can pause. "
+                 f"Let it finish (train/run.py wait {a.name}), or stop it")
+    if s.get("broadcast"):
+        sys.exit(f"runs/{a.name} belongs to the broadcast {s['broadcast']}: don't pause it")
+    (d / "PAUSE").touch()
+    print(f"asked runs/{a.name} to pause; waiting for it to save last.pt (an eval under way finishes first)")
+    give_up = time.time() + 20 * 60
+    while time.time() < give_up:
+        s = read_status(d) or {}
+        if s.get("state") == "paused":
+            print(describe(d))
+            return
+        if s.get("state") not in ("starting", "training") or not alive(s.get("pid", 0)):
+            (d / "PAUSE").unlink(missing_ok=True)
+            sys.exit(f"runs/{a.name} left training before it could pause (now: {s.get('state')}); "
+                     f"it carries on with its other steps: train/run.py status {a.name}")
+        time.sleep(5)
+    sys.exit(f"runs/{a.name} hasn't paused after 20 minutes. The request stands (runs/{a.name}/PAUSE): "
+             f"check with  train/run.py status {a.name}")
+
+
+def resume(a):
+    """Carry on a paused run: train from last.pt for the time still owed, then the other steps."""
+    d = run_dir(a.name)
+    s = read_status(d)
+    if not s or s.get("state") != "paused":
+        sys.exit(f"runs/{a.name} isn't paused (state: {(s or {}).get('state', 'no such run')})")
+    busy = running()
+    if busy:
+        sys.exit(f"{name_of(busy[0][0])} is running (one run at a time). Wait for it, or pause or stop it first")
+    live = broadcasts()
+    if live:
+        sys.exit(f"the broadcast {live[0]} is going: wait for it, or train/broadcast.py stop {live[0]}")
+    if not (d / "last.pt").exists():
+        sys.exit(f"runs/{a.name}/last.pt is missing: nothing to resume from")
+    done = trained_hours(d)
+    left = max((s["hours"] - done) * 3600, 5 * 60)  # some minutes at least: training ends on an eval
+    build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bins"], cwd=ROOT)
+    if build.returncode or not GLADOS.exists():
+        sys.exit("`cargo build --release --bins` failed (output above): fix that first, nothing resumed")
+    (d / "PAUSE").unlink(missing_ok=True)
+    write_status(d, state="starting", resumed=now().isoformat(timespec="seconds"), train_left_s=left, error="")
+    p = detach(d)
+    ends = now() + datetime.timedelta(seconds=left)
+    after = 20 if s.get("task") == "solve" else 75
+    print(f"resumed runs/{a.name} (pid {p.pid}) after {done:.2f} of {s['hours']} hours of training")
+    print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=after):%H:%M}")
+    print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
 
 
 def list_runs(a):
@@ -772,6 +877,12 @@ def main():
     p = sub.add_parser("stop", help="stop a run")
     p.add_argument("name")
     p.set_defaults(fn=stop)
+    p = sub.add_parser("pause", help="pause a run's training (it keeps its place; resume carries on)")
+    p.add_argument("name")
+    p.set_defaults(fn=pause)
+    p = sub.add_parser("resume", help="carry on a paused run")
+    p.add_argument("name")
+    p.set_defaults(fn=resume)
     p = sub.add_parser("list", help="recent runs from train/runs.csv (--task solve: train/solver-runs.csv)")
     p.add_argument("-n", type=int, default=12)
     p.add_argument("--task", choices=("levels", "solve"), default="levels")
