@@ -51,6 +51,14 @@ your own initiative):
    step 2 above (`wait NAME` with `run_in_background`). It trains for the hours still owed and
    then does every other step as usual. If it refuses (another run going), tell the user why.
 
+**Training in parts.** When the user asks for part of a run now ("the first 5 hours of a 10-hour
+run"), start the whole run with `--pause-after`: `run.py start NAME --hours 10 --pause-after 5
+--note "..."` (hours of training before it pauses itself; between 0 and `--hours`). Then `wait
+NAME` as usual: it exits 3 when the run has paused, and you go on at step 2 above. On `resume`,
+`--pause-after H` (hours of training in all, more than are done) makes it pause again, e.g. a
+third of 9 hours at a time: `start --hours 9 --pause-after 3`, then `resume NAME --pause-after 6`,
+then `resume NAME`.
+
 A paused-and-resumed run equals one unbroken run of the same `--hours`: weights, optimizer and
 learning-rate schedule carry on. Two runs chained with `--from` do not (see Training time below).
 Don't use `stop` to pause: a stopped run can't be resumed. `stop NAME` on a paused run ends it

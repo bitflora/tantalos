@@ -9,8 +9,8 @@ run's weights. Every --eval-every steps: validation loss, then --score-n sampled
 (lowest validation loss). Log: <out>/log.jsonl. The run gets a row in train/runs.csv
 (train/record.py), with --note as its notes.
 
-Pausing (run.py pause/resume): a file <out>/PAUSE makes training save <out>/last.pt and exit with
-code 3 (PAUSED_EXIT) within a few steps. --resume carries on from last.pt: weights, optimizer, step,
+Pausing (run.py pause/resume): a file <out>/PAUSE, or reaching --pause-at hours of training,
+makes training save <out>/last.pt and exit with code 3 (PAUSED_EXIT) within a few steps. --resume carries on from last.pt: weights, optimizer, step,
 and the training time already done, so with --until set to the time still owed, the learning-rate
 schedule picks up where it stopped instead of starting over. <out>/last.json says, without torch,
 how far last.pt got (step, trained_s).
@@ -126,6 +126,9 @@ def main():
         "but at least 2.5; 0: no limit)",
     )
     ap.add_argument("--resume", action="store_true", help="continue from <out>/last.pt")
+    ap.add_argument("--pause-at", type=float, default=None,
+                    help="pause (as a PAUSE file would) once this many hours of training are done, "
+                    "counting the sessions before a --resume")
     ap.add_argument(
         "--away",
         nargs="*",
@@ -371,7 +374,8 @@ def main():
         opt.zero_grad(set_to_none=True)
         step += 1
 
-        if step % 10 == 0 and (out / "PAUSE").exists():
+        if step % 10 == 0 and ((out / "PAUSE").exists()
+                               or (args.pause_at is not None and trained_s() >= args.pause_at * 3600)):
             checkpoint(out / "last.pt", None)
             log.close()
             print(f"paused at step {step} after {trained_s() / 3600:.2f} h of training: "

@@ -7,6 +7,7 @@
     .venv/Scripts/python train/run.py stop v4-a
     .venv/Scripts/python train/run.py pause v4-a      # stop training for now, keep its place
     .venv/Scripts/python train/run.py resume v4-a     # carry on where it paused
+    .venv/Scripts/python train/run.py start v4-c --hours 10 --pause-after 5 --note "..."  # pauses itself at 5 h
     .venv/Scripts/python train/run.py list            # recent rows of train/runs.csv
     .venv/Scripts/python train/run.py note v4-a "what it showed"
     .venv/Scripts/python train/run.py ingame v4-a     # redo the Portal 2 steps if they were skipped
@@ -198,6 +199,10 @@ def start(a):
                  f"train/broadcast.py stop {live[0]}, or wait for it")
     if a.quick and not a.from_:
         sys.exit("--quick fine-tunes a model: give --from")
+    if a.pause_after is not None and not 0 < a.pause_after < a.hours:
+        sys.exit(f"--pause-after {a.pause_after}: give a number of hours between 0 and --hours ({a.hours})")
+    if a.pause_after is not None and (a.quick or a.broadcast):
+        sys.exit("--pause-after isn't for --quick or broadcast runs")
     solve = a.task == "solve"
     if solve and not a.data and not PLANS.exists():
         sys.exit(f"{PLANS.relative_to(ROOT).as_posix()} is missing: a solve run needs plan data. Make it with "
@@ -258,11 +263,16 @@ def start(a):
         d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours, task=a.task,
         ingame=not (a.no_ingame or solve or a.quick), init=str(init or ""), train=train, evaluate=evaluate,
         data=list(map(str, data)), vocab=str(vocab), extra=a.extra, quick=a.quick,
-        broadcast=a.broadcast or "",
+        broadcast=a.broadcast or "", pause_at=a.pause_after,
     )
     p = detach(d)
     ends = now() + datetime.timedelta(hours=a.hours)
     print(f"started runs/{a.name} (pid {p.pid}) from {init.relative_to(ROOT).as_posix() if init else 'scratch'}")
+    if a.pause_after is not None:
+        print(f"it pauses itself after {a.pause_after:g} of its {a.hours:g} hours of training, about "
+              f"{now() + datetime.timedelta(hours=a.pause_after):%H:%M}; then: train/run.py resume {a.name}")
+        print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}   (exits 3 when it has paused)")
+        return
     after = 20 if solve else 75
     print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=after):%H:%M}")
     print(f"check:  .venv/Scripts/python train/run.py status {a.name}")
@@ -447,9 +457,12 @@ def pipeline(d, steps=STEPS):
             until = until.strftime("%Y-%m-%d %H:%M:%S")
             write_status(d, train_until=until)
             args = s["train"] + (["--resume"] if left is not None else []) + ["--until", until]
+            if s.get("pause_at") is not None:
+                args += ["--pause-at", str(s["pause_at"])]
             if phase("training", args, "train.log", may_pause=True) == PAUSED_EXIT:
                 paused = True
-                write_status(d, state="paused", paused=now().isoformat(timespec="seconds"), train_left_s=None)
+                write_status(d, state="paused", paused=now().isoformat(timespec="seconds"), train_left_s=None,
+                             pause_at=None)
                 say(f"paused after {trained_hours(d):.2f} of {s['hours']} h of training: run.py resume {name_of(d)}")
                 return
             (d / "PAUSE").unlink(missing_ok=True)  # asked for as training ended: too late, carry on
@@ -552,6 +565,8 @@ def describe(d):
             head += f", {max(left, 0):.0f} min left (training ends {hhmm(s['train_until'])})"
         if s.get("resumed"):
             head += f" (resumed {hhmm(s['resumed'])})"
+        if s.get("pause_at") is not None:
+            head += f"; it pauses itself after {s['pause_at']:g} of {s['hours']:g} hours of training"
         lines.append(head)
         steps = [l for l in tail(d / "train.log", 40).splitlines() if l.startswith("step ")]
         if steps:
@@ -792,16 +807,25 @@ def resume(a):
     if not (d / "last.pt").exists():
         sys.exit(f"runs/{a.name}/last.pt is missing: nothing to resume from")
     done = trained_hours(d)
+    if a.pause_after is not None and not done < a.pause_after < s["hours"]:
+        sys.exit(f"--pause-after {a.pause_after}: give a number of hours between the {done:.2f} done and "
+                 f"the run's {s['hours']:g}. Nothing resumed")
     left = max((s["hours"] - done) * 3600, 5 * 60)  # some minutes at least: training ends on an eval
     build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bins"], cwd=ROOT)
     if build.returncode or not GLADOS.exists():
         sys.exit("`cargo build --release --bins` failed (output above): fix that first, nothing resumed")
     (d / "PAUSE").unlink(missing_ok=True)
-    write_status(d, state="starting", resumed=now().isoformat(timespec="seconds"), train_left_s=left, error="")
+    write_status(d, state="starting", resumed=now().isoformat(timespec="seconds"), train_left_s=left, error="",
+                 pause_at=a.pause_after)
     p = detach(d)
     ends = now() + datetime.timedelta(seconds=left)
     after = 20 if s.get("task") == "solve" else 75
     print(f"resumed runs/{a.name} (pid {p.pid}) after {done:.2f} of {s['hours']} hours of training")
+    if a.pause_after is not None:
+        print(f"it pauses itself again after {a.pause_after:g} hours of training in all, about "
+              f"{now() + datetime.timedelta(hours=a.pause_after - done):%H:%M}")
+        print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}   (exits 3 when it has paused)")
+        return
     print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=after):%H:%M}")
     print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
 
@@ -865,6 +889,8 @@ def main():
     p.add_argument("--quick", action="store_true",
                    help="a short fine-tune of --from with a small eval and a guard (train/broadcast.py's rounds)")
     p.add_argument("--broadcast", default=None, help=argparse.SUPPRESS)  # set by train/broadcast.py
+    p.add_argument("--pause-after", type=float, default=None,
+                   help="pause by itself after this many hours of training (resume carries on)")
     p.add_argument("--dry-run", action="store_true", help="print the train and evaluate commands, start nothing")
     p.set_defaults(fn=start)
     for cmd, fn, h in [("status", status, "what a run is doing"), ("wait", wait, "block until it ends")]:
@@ -882,6 +908,8 @@ def main():
     p.set_defaults(fn=pause)
     p = sub.add_parser("resume", help="carry on a paused run")
     p.add_argument("name")
+    p.add_argument("--pause-after", type=float, default=None,
+                   help="pause again once this many hours of training are done in all")
     p.set_defaults(fn=resume)
     p = sub.add_parser("list", help="recent runs from train/runs.csv (--task solve: train/solver-runs.csv)")
     p.add_argument("-n", type=int, default=12)
