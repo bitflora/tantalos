@@ -226,3 +226,22 @@ run `abtest.py score`, report, commit `train/playtests.jsonl`.
 - Dry run prints one train command with `--data ...data\v6\generated.jsonl
   ...data\v6\workshop-aug-x2.jsonl` and `--holdout ...data\ws5\test.jsonl`.
 - Share: Workshop **76.7%**, generated 23.3% (338,040 lines total).
+
+### Franken / paint-bomb maps re-converted (2026-10-26)
+
+- Task 4's `build --incremental` skipped the maps that had failed before `467ecd7`, so its
+  converter fixes never reached the data. Backed up the data files to `*.before-2026-10-26`,
+  removed the 4,590 maps whose last error was a Franken cube or paint bomb from
+  `out/workshop/report.jsonl`, and ran `build --incremental --budget 500000`: **2,675 converted**,
+  1,915 still unsupported (wall buttons, wall gel).
+- Scoring them in one `glados-score score` pass ran out of memory (16 GB, 12 threads; one paint-bomb
+  level asked for 4 GB). The first 1,261 results were kept; the rest were scored one level per
+  process, 6 at a time. One level, **3801150618**, still runs out of memory and is left out.
+- New verdicts: 434 solvable, 1,072 uncertain, 564 unsolvable, 582 invalid, 21 unparsed, 1 unsupported.
+- `finalize`, `ratings --annotate-only`, `ws3.py`, `ratings --annotate-only`, `augment.py`:
+  `out/workshop/levels.jsonl` 22,914 -> **25,588**; `data/ws5/train.jsonl` 16,336 -> **18,008**;
+  `data/ws5/test.jsonl` 2,134 -> **2,362** (all old ids still there, none moved); aug file
+  259,140 -> **285,730** lines (now `data/v5b/levels-workshop-aug-x2.jsonl`, renamed by other
+  work in progress), copied to `data/v6/workshop-aug-x2.jsonl`.
+- data/v6: 285,730 Workshop + 78,900 generated = 364,630 lines, Workshop **78.4%**. The dry run
+  lists exactly the two v6 files and `--holdout ...data\ws5\test.jsonl`.
