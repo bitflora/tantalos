@@ -86,8 +86,9 @@ LATER_MECH_GROUPS = MECHANICS[14:]
 # Where a level came from, not what's in it, so it can't be read off a sampled level: `src`
 # is the generator or a published Workshop puzzle (records with a `workshop_id`); `tier` is how
 # many players subscribed to that puzzle (`subscribers`, lifetime), so prompting with
-# `<src:ws> <tier:top>` asks for levels like the ones people played most.
-PROVENANCE = {"src": ["<src:gen>", "<src:ws>"], "tier": ["<tier:mid>", "<tier:top>"]}
+# `<src:ws> <tier:top>` asks for levels like the ones people played most. A 5-star puzzle is
+# `<tier:best>` instead, whether or not it has many subscribers.
+PROVENANCE = {"src": ["<src:gen>", "<src:ws>"], "tier": ["<tier:mid>", "<tier:top>", "<tier:best>"]}
 TOP_SUBSCRIBERS = 100
 # Verdicts. `published`: a Workshop puzzle our solver couldn't confirm (unsolvable or out of
 # budget). It passed the game's editor and was published, so it is taken as solvable, but its
@@ -233,8 +234,12 @@ def conditions(record):
         out.append(GROUPS[f][int(present)])
     workshop = "workshop_id" in record
     out.append(GROUPS["src"][int(workshop)])
-    if workshop and record.get("subscribers") is not None:
-        out.append(GROUPS["tier"][int(record["subscribers"] >= TOP_SUBSCRIBERS)])
+    if workshop and (record.get("stars") == 5 or record.get("subscribers") is not None):
+        if record.get("stars") == 5:
+            tier = 2
+        else:
+            tier = int(record["subscribers"] >= TOP_SUBSCRIBERS)
+        out.append(GROUPS["tier"][tier])
     return out
 
 
