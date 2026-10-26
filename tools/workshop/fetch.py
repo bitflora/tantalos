@@ -498,7 +498,6 @@ def cmd_finalize(a):
 
 def cmd_pipeline(a):
     """Download while converting and scoring completed maps, then finalize levels.jsonl."""
-    out = Path(a.out)
     ns = argparse.Namespace(out=a.out, glados=a.glados, budget=a.budget, p2c=a.p2c,
                             incremental=True)
     passes = [["download", "--workers", str(a.workers)]]
@@ -510,7 +509,7 @@ def cmd_pipeline(a):
             passes[-1] += ["--max", str(a.max)]
     for args in passes:
         print(f"[{time.strftime('%H:%M:%S')}] {' '.join(args)}", file=sys.stderr)
-        proc = subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()), *args],
+        proc = subprocess.Popen([sys.executable, "-u", str(Path(__file__).resolve()), "--out", a.out, *args],
                                 cwd=ROOT)
         while proc.poll() is None:
             try:

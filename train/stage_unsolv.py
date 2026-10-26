@@ -190,9 +190,9 @@ def main():
         print(f"{dst}  <- workshop {r['workshop_id']} {r['title']!r} ({rating(r)})" + (f"  EDITOR FLAGS {bad}" if bad else ""))
 
     lines = [f"# {len(rows)} more unsolvable Workshop levels, staged {day}", "",
-             f"Source: `data/ws5/train.jsonl`, picked by `train/stage_unsolv.py`. Still unsolvable with the "
-             f"current release build at 50k and 250k (`glados-score score --editor-rules off`). A published "
-             f"puzzle was solved by its author, so the verdict is a solver gap.", "",
+             "Source: `data/ws5/train.jsonl`, picked by `train/stage_unsolv.py`. Still unsolvable with the "
+             "current release build at 50k and 250k (`glados-score score --editor-rules off`). A published "
+             "puzzle was solved by its author, so the verdict is a solver gap.", "",
              "| staged file | workshop id | title | rating | tokens | items | editor flags | in game |",
              "|---|---|---|---|---:|---|---|---|"]
     for name, r, src, bad in rows:
