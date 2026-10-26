@@ -5,15 +5,24 @@ Generates Portal 2 puzzle-maker levels: a Rust generator/solver (`src/`, binarie
 
 ## Training runs
 
-Use `train/run.py` for every training run. Don't call train.py, evaluate.py, ingame.py,
+Use `train/run.py` for every training run. Don't call train.py, evaluate.py, ingame.py, abtest.py pick,
 pick.py, retrain.sh or loop.sh yourself, and don't change their settings, unless the user asks
 you to. `run.py start` already does every step of a run, in order: build the `glados-*.exe` binaries, train,
 evaluate, check the levels in Portal 2's own editor, train 15 minutes away from every level
 the game has rejected or a play-tester found unsolvable (`data/ingame/human-unsolvable.jsonl`) (into `runs/NAME/away`; evaluated and game-checked too, and the final
-model unless it scores over 3 points lower), pick 5 game-checked levels from the final model
-for play-testing (copied into the Puzzle Maker folder as `glados-NAME-NNNNN`), record in
+model unless it scores over 3 points lower), stage a blind A/B play-test (`train/abtest.py`: 4
+game-checked levels from the final model and 4 from its parent, or from rated Workshop levels
+for a fresh run, shuffled into the Puzzle Maker folder as `glados-ab-NAME-NN`), record in
 `train/runs.csv`. You don't run any of those steps yourself. `--from NAME` continues that
 run's final model.
+
+When the user reports how the A/B levels played, write each verdict (good, ok, trivial,
+boring, unsolvable, broken; plus what the solution used and notes, if they say) into
+`runs/NAME/playtest/results.csv`, then run
+`.venv/Scripts/python train/abtest.py score NAME --out runs/NAME/playtest`, tell the user the
+unblinded result, and commit `train/playtests.jsonl`. Never reveal or read out
+`playtest/key.json` before the verdicts are in. Ten levels only show big differences (2 of 10
+good against 6 of 10); don't call a run better on a smaller gap.
 
 A training run is exactly these steps:
 
@@ -59,15 +68,25 @@ Binaries (`src/bin/`, each prints its usage when run without arguments):
 `roundtrip`, `fixtures`), `glados-view`, `glados-workbench`, `glados-evolve`, and `reverse`.
 There is no `glados.exe` any more.
 
-Reading results: the main score is **EVAL solvable %** (share of sampled levels our solver can
-solve; higher is better). Differences under about 10 points are noise. Val loss: lower is
-better, but only comparable between runs on the same data. **Workshop test loss** (`ws` in
-`list`, `holdout_*` in runs.csv): loss on 256 held-out Workshop levels (data/ws5/test.jsonl);
-lower is better. Val loss can't show overfitting to the Workshop part (its x20 copies are in both
-train and val); this can. If it rises while val loss falls, the model is memorizing Workshop
-levels: report that. (2026-10-25: v5-cont-10h-d scored ~1.59 here against 0.24 on the Workshop
-levels it trained on.) A run that FAILED or DIED shows the last lines of its log; report them,
-don't retry blindly.
+Reading results. The goal (2026-10-25) is varied levels that use the mechanisms of highly rated
+Workshop levels, so the headline is the **RATED STYLE** line (`yield` in `list`, `rated_*` in
+runs.csv; train/rated.py, eval/report.md "Rated style"): 512 levels asked for Workshop-style
+levels at temperature 0.7. **Yield**: valid, novel, not solver-unsolvable levels per 1,000
+(higher is better; differences under ~50 are noise). **Strong**: solvable ones whose solution
+uses 2+ state-changing mechanics and at most 1 trick, per 1,000. **Profile gap**: mean
+difference in points between the samples' item-family mix and 5-star levels' (lower is better).
+Baseline, v5-cont-10h-d (2026-10-25, runs/v5-cont-10h-d/rated/): yield 207, strong 8, gap 23.5.
+**EVAL solvable %** (share of levels asked for `<verdict:solvable>` our solver solves) is now a
+guardrail, not the target; differences under about 10 points are noise. Val loss: lower is
+better, but only comparable between runs on the same data; since 2026-10-25 val is split by
+puzzle (a Workshop level's copies and mutants stay on one side), so it isn't comparable with
+earlier runs, and each eval also logs it per source (gen, mutant, ws). **Workshop test loss**
+(`ws` in `list`, `holdout_*` in runs.csv): loss on 256 held-out Workshop levels
+(data/ws5/test.jsonl); lower is better, comparable across runs. If it rises while val loss
+falls, the model is memorizing Workshop levels: report that. (2026-10-25: v5-cont-10h-d scored
+~1.59 here against 0.24 on the Workshop levels it trained on.) The blind A/B verdicts outrank
+all of these when they show a clear difference. A run that FAILED or DIED shows the last lines
+of its log; report them, don't retry blindly.
 
 Self-training: `train/harvest.py CHECKPOINT --n N` samples levels and keeps the solvable,
 portal-requiring, novel ones in `data/harvest/RUN.jsonl`; train on them by adding that file to

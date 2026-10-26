@@ -23,8 +23,10 @@ order, with nothing to remember:
      runs/NAME/away, evaluate that and check it in Portal 2 too. It is the final model unless
      its EVAL solvable share is over 3 points lower (then away/WORSE is written and best.pt
      stays final).
-  5. pick 5 levels from the final model for play-testing (pick.py), checked in Portal 2 too,
-     and copy them into the Puzzle Maker folder as glados-NAME-NNNNN
+  5. stage a blind A/B play-test (abtest.py): 4 levels from the final model and 4 from its
+     parent (--from), or from rated Workshop levels for a fresh run, checked in Portal 2 too,
+     shuffled into the Puzzle Maker folder as glados-ab-NAME-NN; the verdicts go in
+     runs/NAME/playtest/results.csv and `abtest.py score NAME --out runs/NAME/playtest` unblinds them
   6. record the run (and NAME/away) in train/runs.csv
 Everything lands in runs/NAME: status.json (what it's doing now), run.log (each phase),
 train.log, evaluate.log, ingame.log, pick.log, eval/report.md.
@@ -57,6 +59,7 @@ import ctypes
 import datetime
 import glob
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -231,7 +234,7 @@ def start(a):
     else:
         evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
         if a.quick:
-            evaluate += ["--n-cond", "8", "--generator-count", "0", "--neighbours", "64"]
+            evaluate += ["--n-cond", "8", "--generator-count", "0", "--neighbours", "64", "--rated-n", "0"]
     if a.dry_run:
         print("train:   ", " ".join(train))
         print("evaluate:", " ".join(evaluate))
@@ -375,14 +378,27 @@ def ingame_outcome(d):
 
 
 def picks_outcome(d):
-    """(done, summary) for the play-test levels pick.py copied in."""
+    """(done, summary) for the play-test levels abtest.py (pick.py before 2026-10-25) copied in."""
     try:
         picks = json.loads((d / "playtest" / "picks.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False, "none picked (see pick.log)"
-    names = ", ".join(f"glados-{d.name}-{p['file']}".removesuffix(".p2c") for p in picks)
+    names = ", ".join(p.get("name") or f"glados-{d.name}-{p['file']}".removesuffix(".p2c") for p in picks)
     checked = all(p.get("game") == "valid" for p in picks)
-    return checked, f"{names} ({'valid in Portal 2' if checked else 'NOT checked in Portal 2'})"
+    blind = (" (blind A/B: this run's model against "
+             + ("its parent" if (read_status(d) or {}).get("init") else "rated Workshop levels")
+             + f"; verdicts go in runs/{name_of(d)}/playtest/results.csv, then `abtest.py score`)"
+             if (d / "playtest" / "key.json").exists() else "")
+    return checked, f"{names} ({'valid in Portal 2' if checked else 'NOT checked in Portal 2'}){blind}"
+
+
+def has_verdicts(d):
+    """Has the user already written play-test verdicts for d's A/B set?"""
+    try:
+        with open(d / "playtest" / "results.csv", newline="", encoding="utf-8") as f:
+            return any(r.get("verdict", "").strip() for r in csv.DictReader(f))
+    except OSError:
+        return False
 
 
 def pipeline(d, steps=STEPS):
@@ -456,9 +472,14 @@ def pipeline(d, steps=STEPS):
         else:
             write_status(d, final=str(final_dir(d) / "best.pt"))
         if "picking" in steps:
-            try:  # always: 5 levels to play-test; a failure here never sinks the run
-                phase("picking", ["train/pick.py", str(d), "--checkpoint", str(final_dir(d) / "best.pt")]
-                      + ([] if game else ["--no-game"]), "pick.log")
+            try:  # always: a blind A/B set to play-test; a failure here never sinks the run
+                if has_verdicts(d):
+                    say("play-test set kept: it already has verdicts in playtest/results.csv")
+                else:
+                    shutil.rmtree(d / "playtest", ignore_errors=True)
+                    phase("picking", ["train/abtest.py", "pick", d.name, str(final_dir(d) / "best.pt"),
+                                      s.get("init") or "workshop", "--out", str(d / "playtest")]
+                          + (["--game"] if game else []), "pick.log")
             except RuntimeError as e:
                 say(f"{e} (carrying on)")
             say(f"play-test levels: {picks_outcome(d)[1]}")
@@ -520,6 +541,8 @@ def describe(d):
         e = entries[-1]
         best = min(x["val_loss"] for x in entries)
         line = f"  step {e['step']}: val loss {e['val_loss']:.4f} (best {best:.4f}, lower is better)"
+        if e.get("val_by_source"):
+            line += " [by source: " + ", ".join(f"{k} {v:.4f}" for k, v in e["val_by_source"].items()) + "]"
         held = [x["holdout_loss"] for x in entries if "holdout_loss" in x]
         if held:
             line += (f"; Workshop test loss {held[-1]:.4f} (best {min(held):.4f}; held-out Workshop "
@@ -534,9 +557,16 @@ def describe(d):
     if solve:
         lines += solve_lines(d)
     elif ev.exists():
-        v = json.loads(ev.read_text())["validity"]
+        e = json.loads(ev.read_text())
+        v = e["validity"]
         lines.append(f"  EVAL: {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse "
-                     f"(the main score; differences under ~10 points are noise)")
+                     f"(a guardrail since 2026-10-25, RATED STYLE is the headline; differences under ~10 points are noise)")
+        if e.get("rated"):
+            r = e["rated"]
+            gap = f"{r['profile_gap']:.1f}" if r["profile_gap"] is not None else "-"
+            lines.append(f"  RATED STYLE: yield {r['yield_per_1000']:.0f} / 1,000 (valid, novel, not unsolvable), "
+                         f"strong {r['strong_per_1000']:.0f} / 1,000, profile gap {gap} points vs 5-star "
+                         f"levels (higher yield and lower gap are better; yield differences under ~50 are noise)")
         lines.append(f"  report: runs/{name_of(d)}/eval/report.md")
     game = s.get("ingame", True)
     ig_done, ig_text = ingame_outcome(d)
@@ -584,10 +614,13 @@ def describe(d):
                     " (give the EVAL solved %, pass@8, the test-ws and published-liberal solved %, and how"
                     " they compare with earlier solve runs in  train/run.py list --task solve)")
     else:
-        todo.append("Report everything above to the user, including the play-test level names.")
+        todo.append("Report everything above to the user, including the play-test level names: a blind A/B"
+                    " set (don't say which level is which side). Ask for a verdict per level: good, ok,"
+                    " trivial, boring, unsolvable or broken.")
         todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
-                    " (give the EVAL solvable %, the Portal 2 game-valid %, before and after training away,"
-                    " which is the final model, and how they compare with earlier runs in  train/run.py list)")
+                    " (give the RATED STYLE yield and profile gap, the Workshop test loss, the EVAL solvable %,"
+                    " the Portal 2 game-valid %, before and after training away, which is the final model,"
+                    " and how they compare with earlier runs in  train/run.py list)")
     lines.append("  NEXT STEPS (do all of them):")
     lines += [f"    {i}. {t}" for i, t in enumerate(todo, 1)]
     return "\n".join(lines)
@@ -678,7 +711,7 @@ def list_runs(a):
     if solve:  # solved%: EVAL solved % (greedy, test-gen), the main score; pass: pass@8
         print(f"{'run':32} {'started':16} {'min':>4} {'solved%':>7} {'pass':>5} {'ws%':>5} {'val':>6}  from / notes")
     else:
-        print(f"{'run':32} {'started':16} {'min':>4} {'solv%':>5} {'val':>6} {'ws':>6}  from / notes")
+        print(f"{'run':32} {'started':16} {'min':>4} {'solv%':>5} {'val':>6} {'ws':>6} {'yield':>5}  from / notes")
     for r in rows:
         notes = (r["init"] + " | " if r["init"] else "") + r["notes"]
         if solve:
@@ -686,7 +719,8 @@ def list_runs(a):
                   f"{r['eval_pass_at_k'] or '-':>5} {r['ws_solved'] or '-':>5} {r['best_val'] or '-':>6}  {notes[:80]}")
         else:
             print(f"{r['run'][:32]:32} {r['started']:16} {r['minutes']:>4} {r['eval_solvable'] or '-':>5} "
-                  f"{r['best_val'] or '-':>6} {r.get('holdout_final') or '-':>6}  {notes[:82]}")
+                  f"{r['best_val'] or '-':>6} {r.get('holdout_final') or '-':>6} {r.get('rated_yield') or '-':>5}  "
+                  f"{notes[:76]}")
     live = running()
     if live:
         print(f"\nrunning now: runs/{name_of(live[0][0])}")

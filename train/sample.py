@@ -53,11 +53,14 @@ def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, 
     return lines
 
 
-def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None):
-    """One result dict per line, from `glados-score score`."""
+def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None, editor_rules=True, p2c_all=False):
+    """One result dict per line, from `glados-score score`. p2c_dir gets the solvable levels as
+    .p2c (every parsed one with p2c_all); editor_rules=False is how Workshop levels are scored."""
     args = [str(Path(glados).resolve()), "score", "--budget", str(budget)]
     if p2c_dir:
-        args += ["--p2c", str(p2c_dir)]
+        args += ["--p2c-all" if p2c_all else "--p2c", str(p2c_dir)]
+    if not editor_rules:
+        args += ["--editor-rules", "off"]
     # Empty lines would be skipped by glados and break the alignment.
     text = "\n".join(line if line.strip() else "<empty>" for line in lines) + "\n"
     out = subprocess.run(args, input=text, capture_output=True, text=True, check=True)

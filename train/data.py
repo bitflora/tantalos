@@ -413,11 +413,12 @@ class Vocab:
 class Levels:
     """All records of one split, as flat tensors."""
 
-    def __init__(self, level_ids, offsets, conds, any_ids):
+    def __init__(self, level_ids, offsets, conds, any_ids, sources=None):
         self.level_ids = level_ids  # int16, all levels end to end
         self.offsets = offsets  # int64, len N + 1
         self.conds = conds  # list of lists of ids, one per group
         self.any_ids = any_ids  # each group's `?`
+        self.sources = sources  # `source(record)` of each, or None
 
     def __len__(self):
         return len(self.conds)
@@ -454,16 +455,33 @@ class Levels:
         return x.to(device, non_blocking=True), y.to(device, non_blocking=True), targets
 
 
+def identity(record):
+    """What the validation split goes by: the Workshop puzzle a record comes from (its x20 copies,
+    mirrored versions and mutants all land on one side), else the level itself. Split by line,
+    copies of a Workshop level sat in both train and val, so val loss couldn't show the model
+    learning them by heart (2026-10-25)."""
+    wid = record.get("workshop_id") or record.get("mutated_from")
+    return f"ws {wid}" if wid is not None else record["tokens"]
+
+
+def source(record):
+    """`ws` (a Workshop level or a version of one), `mutant` (of a Workshop level) or `gen`."""
+    if record.get("workshop_id") is not None:
+        return "ws"
+    return "mutant" if record.get("mutated_from") is not None else "gen"
+
+
 def load(paths, vocab, block_size, val_share=0.05, seed=0):
     """Train and validation `Levels` from JSONL files, streamed. Records whose sequence
-    wouldn't fit in `block_size` are skipped. Each record goes to validation with probability
-    `val_share` (seeded)."""
+    wouldn't fit in `block_size` are skipped. A record goes to validation when the hash of its
+    `identity` (with the seed) falls in the first `val_share` of the range, so a puzzle's copies
+    stay together and the split doesn't depend on file order."""
     max_prefix = 2 + len(GROUPS)
-    rng = random.Random(seed)
+    cut = int(val_share * 2**32)
     skipped = 0
     splits = {
-        "train": (array("h"), array("q", [0]), []),
-        "val": (array("h"), array("q", [0]), []),
+        "train": (array("h"), array("q", [0]), [], []),
+        "val": (array("h"), array("q", [0]), [], []),
     }
     for p in paths:
         with open(p, encoding="utf-8") as f:
@@ -471,22 +489,24 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
                 if not line.strip():
                     continue
                 r = json.loads(line)
-                split = "val" if rng.random() < val_share else "train"
+                split = "val" if zlib.crc32(f"{seed} {identity(r)}".encode()) < cut else "train"
                 level = vocab.encode(r["tokens"].split())
                 if max_prefix + len(level) + 1 > block_size:
                     skipped += 1
                     continue
-                ids, offsets, conds = splits[split]
+                ids, offsets, conds, sources = splits[split]
                 ids.extend(level)
                 offsets.append(len(ids))
                 conds.append(vocab.encode(slots(conditions(r))))
+                sources.append(source(r))
     out = {}
-    for name, (ids, offsets, conds) in splits.items():
+    for name, (ids, offsets, conds, sources) in splits.items():
         out[name] = Levels(
             torch.frombuffer(ids, dtype=torch.int16) if ids else torch.zeros(0, dtype=torch.int16),
             torch.frombuffer(offsets, dtype=torch.int64),
             conds,
             vocab.encode(ANY.values()),
+            sources,
         )
     return out["train"], out["val"], skipped
 

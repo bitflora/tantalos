@@ -2,7 +2,7 @@
 
     python train/evaluate.py runs/first/best.pt --data data/levels.jsonl
 
-Four questions:
+Five questions:
 - Validity: of levels asked to be solvable, how many parse, are canonical, are solvable?
 - Conditioning: ask for each condition value in turn (alongside <verdict:solvable>, except for
   the verdict itself). How often does the level have it, against how often it has it unasked?
@@ -11,8 +11,10 @@ Four questions:
   each other are the baseline, since the generator breeds by mutation and has near neighbours too.
 - Model vs generator: solvable rate, solvable levels per second, and the plan length, portal,
   cube, item and score distributions of their solvable levels.
+- Rated style: asked for Workshop levels like the best-rated ones, how many come out valid,
+  novel and close to 5-star levels in mechanisms (train/rated.py)?
 
-Writes report.md, eval.json and samples.jsonl to <checkpoint dir>/eval (or --out).
+Writes report.md, eval.json, samples.jsonl and rated-samples.jsonl to <checkpoint dir>/eval (or --out).
 """
 
 import argparse
@@ -30,6 +32,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
+import rated  # noqa: E402
 import sample  # noqa: E402
 from data import GROUPS, PROVENANCE, conditions, groups_in  # noqa: E402
 from seeding import resolve  # noqa: E402
@@ -302,6 +305,11 @@ def main():
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--cpu", action="store_true", help="sample on the CPU (e.g. while training)")
+    ap.add_argument("--rated-n", type=int, default=512,
+                    help="levels for the rated-style section (train/rated.py; 0: skip)")
+    ap.add_argument("--rated-temperature", type=float, default=0.7,
+                    help="its sampling temperature, fixed so runs compare (0.7 cut broken levels "
+                    "from 58%% to 50%% against 1.0 on v5-cont-10h-d, 2026-10-25)")
     args = ap.parse_args()
     args.seed = resolve(args.seed)
 
@@ -417,6 +425,14 @@ def main():
         print(f"timing the generator on {args.generator_count} levels", flush=True)
         speed["generator"] = time_generator(args.glados, args.generator_count, args.seed + 1)
 
+    rated_summary = None
+    if args.rated_n:
+        rated_summary, rated_rows, rated_prompt = rated.run(
+            model, vocab, args.rated_n, args.glados, args.budget, args.rated_temperature)
+        rated_summary.update(prompt=rated_prompt, temperature=args.rated_temperature)
+        with open(out / "rated-samples.jsonl", "w", encoding="utf-8") as f:
+            f.writelines(json.dumps({k: v for k, v in r.items() if k != "desc"}) + "\n" for r in rated_rows)
+
     ev = {
         "checkpoint": str(args.checkpoint),
         "seed": args.seed,
@@ -432,8 +448,12 @@ def main():
         "generator": gen_stats.summary(),
         "speed": speed,
     }
+    if rated_summary:
+        ev["rated"] = rated_summary
     (out / "eval.json").write_text(json.dumps(ev, indent=2))
     text = report(ev)
+    if rated_summary:
+        text += "\n" + "\n".join(rated.section(rated_summary, rated_summary["prompt"], rated_summary["temperature"]))
     (out / "report.md").write_text(text, encoding="utf-8")
     print(text)
     print(f"wrote {out / 'report.md'}, eval.json and samples.jsonl")

@@ -56,6 +56,9 @@ FIELDS = [
     "eval_invalid",
     "holdout_best",
     "holdout_final",
+    "rated_yield",
+    "rated_strong",
+    "rated_gap",
     "ingame_checked",
     "game_valid_of_passed",
     "game_valid_of_solvable",
@@ -244,6 +247,11 @@ def measure(run):
             row["eval_parsed"] = pct(v["parsed"])
             row["eval_solvable"] = pct(v["solvable"])
             row["eval_invalid"] = pct(v["verdicts"].get("invalid", 0) / v["n"])
+            if e.get("rated"):  # train/rated.py: per 1,000 samples, and points
+                row["rated_yield"] = f"{e['rated']['yield_per_1000']:.0f}"
+                row["rated_strong"] = f"{e['rated']['strong_per_1000']:.0f}"
+                if e["rated"]["profile_gap"] is not None:
+                    row["rated_gap"] = f"{e['rated']['profile_gap']:.1f}"
     row.update(ingame_report(run / "eval" / "ingame" / "report.md"))
     return row, meta.get("note", "")
 

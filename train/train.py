@@ -101,9 +101,12 @@ def main():
         "--holdout",
         default=None,
         help="levels never trained on (run.py: data/ws5/test.jsonl, the held-out Workshop levels): "
-        "each eval logs their loss as holdout_loss. The val split can't show overfitting to the "
-        "Workshop part, whose x20 copies fall in both train and val",
+        "each eval logs their loss as holdout_loss: the same levels whatever the data, so it "
+        "compares across runs, and it shows overfitting to the Workshop part",
     )
+    ap.add_argument("--source-n", type=int, default=256,
+                    help="validation levels per source (generated, mutant, Workshop) whose loss each "
+                    "eval logs as val_by_source, the same ones every time, under their full conditions")
     ap.add_argument("--holdout-n", type=int, default=256,
                     help="how many of them, the same ones at every eval, under their full conditions")
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
@@ -188,6 +191,13 @@ def main():
         _, holdout, _ = load([args.holdout], vocab, args.block, val_share=1.0)
         holdout_picks = random.Random(args.seed).sample(range(len(holdout)), min(args.holdout_n, len(holdout)))
         print(f"holdout: {len(holdout_picks)} of the {len(holdout)} levels in {args.holdout}")
+    source_picks = {}
+    if not solve and val.sources:
+        pick_rng = random.Random(args.seed)
+        for src in sorted(set(val.sources)):
+            idx = [i for i, s in enumerate(val.sources) if s == src]
+            source_picks[src] = pick_rng.sample(idx, min(args.source_n, len(idx)))
+        print("val by source: " + ", ".join(f"{s} {len(p)} of {val.sources.count(s)}" for s, p in source_picks.items()))
 
     away = Away(args.away, vocab, args.block) if args.away else None
     if away is not None:
@@ -275,12 +285,12 @@ def main():
         return sum(losses) / len(losses)
 
     @torch.no_grad()
-    def holdout_loss():
-        """Mean loss per target over the held-out picks, every condition given (drop 0)."""
+    def fixed_loss(levels, picks):
+        """Mean loss per target over fixed picks of `levels`, every condition given (drop 0)."""
         model.eval()
         total = count = 0
-        for i in range(0, len(holdout_picks), args.batch):
-            x, y, n = holdout.batch(holdout_picks[i : i + args.batch], 0.0, device)
+        for i in range(0, len(picks), args.batch):
+            x, y, n = levels.batch(picks[i : i + args.batch], 0.0, device)
             with amp:
                 total += model(x, y)[1].item() * n
             count += n
@@ -354,7 +364,9 @@ def main():
             val_loss = evaluate()
             entry = {"step": step, "train_loss": loss.item(), "val_loss": val_loss}
             if holdout is not None:
-                entry["holdout_loss"] = holdout_loss()
+                entry["holdout_loss"] = fixed_loss(holdout, holdout_picks)
+            if source_picks:
+                entry["val_by_source"] = {s: fixed_loss(val, p) for s, p in source_picks.items()}
             if args.score_n and solve:
                 model.eval()
                 levels = [" ".join(vocab.decode(val.level(i))) for i in solve_picks]
@@ -403,6 +415,8 @@ def main():
                 extra += f"  gpu {entry['gpu_gb']:.1f} GB"
             if "holdout_loss" in entry:
                 extra = f"  holdout {entry['holdout_loss']:.4f}" + extra
+            if "val_by_source" in entry:
+                extra = "  (" + ", ".join(f"{s} {v:.4f}" for s, v in entry["val_by_source"].items()) + ")" + extra
             print(f"== step {step}: val {val_loss:.4f}{' (best)' if improved else ''}{extra}")
             t0, tokens = time.time(), 0
         if done:
