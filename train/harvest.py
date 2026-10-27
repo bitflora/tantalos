@@ -25,10 +25,16 @@ Put earlier harvests in `--data` here so later rounds only keep levels new to al
 (`uncertain`: editor-valid, not proven unsolvable), once each, to FILE: Goblin's self-play pool
 (docs/goblin-plan-2026-10-27.md), levels it can only get by beating the search.
 
+Speed: the GPU samples chunk c+1 while one long-lived `glados-score score` (sample.Scorer, at
+below-normal priority) scores chunk c, and a batch row starts a new level as soon as its last
+one ends (GPT.generate_refill). The progress lines say how long the GPU sampled and how long it
+then waited for the scorer: the larger one is the bottleneck.
+
 Pause and resume: each chunk's results are saved to `OUT.partial.jsonl` as soon as the chunk is
 scored (`OUT` is --out), and nothing else is written until the end. To pause, create the empty
-file `OUT.stop`: the harvest finishes its chunk, prints PAUSED and exits with code 3. (Ctrl-C or
-a crash loses only the chunk under way.) To resume, run the same command again: it carries on
+file `OUT.stop`: the harvest finishes the chunks under way (the one being scored and the one
+just sampled), prints PAUSED and exits with code 3. (Ctrl-C or a crash loses only those two.)
+To resume, run the same command again: it carries on
 from the saved chunks (and the seed it saved, unless you pass --seed) if checkpoint, --cond, --chunk,
 --temperature, --top-k and --budget are the same. --n may be raised to extend the harvest.
 """
@@ -173,16 +179,11 @@ def main():
         with open(partial, "w", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps({"header": header}) + "\n")
     t0 = time.time()
-    for start in range(0, args.n, args.chunk):
-        k = min(args.chunk, args.n - start)
-        if start in saved and saved[start]["k"] == k:
-            results = saved[start]["results"]
-        else:
-            torch.manual_seed(args.seed + start)  # each chunk reproducible by itself
-            lines = sample.generate(model, vocab, k, conds, (), args.temperature, args.top_k, args.batch)
-            results = sample.score(lines, args.glados, args.budget)
-            with open(partial, "a", encoding="utf-8", newline="\n") as f:
-                f.write(json.dumps({"start": start, "k": k, "results": results}) + "\n")
+    waited = sampling = 0.0
+    scorer = None
+    queued = []  # chunks sent to the scorer, oldest first
+
+    def tally(results):
         for r in results:
             counts["sampled"] += 1
             if r["verdict"] == "unparsed":
@@ -197,11 +198,46 @@ def main():
                 counts["needs portals"] += 1
                 candidates.append(r)
         print(f"  {counts['sampled']:>6} sampled in {time.time() - t0:.0f}s: "
-              f"{counts['solvable']} solvable, {counts['needs portals']} need portals", flush=True)
+              f"{counts['solvable']} solvable, {counts['needs portals']} need portals "
+              f"(GPU sampling {sampling:.0f}s, waiting for the scorer {waited:.0f}s)", flush=True)
+
+    def finish():
+        """Takes the oldest queued chunk's scores, saves them, counts them."""
+        nonlocal waited
+        start, k = queued.pop(0)
+        t = time.time()
+        results = scorer.take(k)
+        waited += time.time() - t
+        with open(partial, "a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps({"start": start, "k": k, "results": results}) + "\n")
+        tally(results)
+
+    # The GPU samples chunk c+1 while glados scores chunk c (sample.Scorer).
+    for start in range(0, args.n, args.chunk):
+        k = min(args.chunk, args.n - start)
+        if start in saved and saved[start]["k"] == k:
+            tally(saved[start]["results"])
+            continue
+        torch.manual_seed(args.seed + start)  # each chunk reproducible by itself
+        t = time.time()
+        lines = sample.generate(model, vocab, k, conds, (), args.temperature, args.top_k, args.batch, refill=True)
+        sampling += time.time() - t
+        scorer = scorer or sample.Scorer(args.glados, args.budget)
+        scorer.send(lines)
+        queued.append((start, k))
+        while len(queued) > 1:
+            finish()
         if stop.exists() and start + k < args.n:
+            while queued:
+                finish()
+            scorer.close()
             print(f"PAUSED after {counts['sampled']} of {args.n} levels: run the same command to resume",
                   flush=True)
             sys.exit(3)
+    while queued:
+        finish()
+    if scorer:
+        scorer.close()
 
     # Novelty: distinct, not in --data, and no near neighbour there.
     print(f"checking {len(candidates)} levels against {len(data)} data files", flush=True)

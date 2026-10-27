@@ -40,7 +40,8 @@ Both can be stopped and carried on; to pause, tell the user what you are doing, 
   resume: finished parts are kept (`parts/NAME.jsonl`) and a part under way carries on from its
   `.partial` file, losing at most the last 2,048 levels. Don't change options between the two runs.
 - **Task 2's harvest** (`harvest.py`): create the empty file `OUT.stop` (e.g.
-  `data/goblin/harvest/v6-b.stop`). It finishes its 1,024-level chunk, prints PAUSED and exits 3.
+  `data/goblin/harvest/v6-b.stop`). It finishes the chunks under way (the one being scored and
+  the one just sampled, 1,024 levels each), prints PAUSED and exits 3.
   Run the identical command again to resume (it reads `OUT.partial.jsonl`, keeps the saved seed).
   A `wait`-style background job that ends with exit 3 is a pause, not a failure.
 
@@ -79,7 +80,8 @@ first self-play pool. GPU (with some CPU) for hours.
    Note the seconds in its last progress line ("2048 sampled in Ns"). Expect about 5% kept (~100
    levels) and about 5% written to the pool. If under 2% kept, stop and report.
 2. Work out N = the number of levels it samples in 6 hours (2048 × 21600 / seconds, rounded down
-   to a multiple of 1024). Tell the user N and the expected kept count (5% of N), then run the
+   to a multiple of 1024). This is a little low: the harvest samples a chunk while it scores the
+   last one, and a 2-chunk test can't overlap its first sampling or its last scoring. Tell the user N and the expected kept count (5% of N), then run the
    same command in the background with `--n N --out data/goblin/harvest/v6-b.jsonl` (same
    `--keep-unsolved` file: it appends). Log to `out/goblin-harvest-2026-10-27.log`.
 3. When it ends: `.venv/Scripts/python train/goblin_data.py > out/goblin-build2-2026-10-27.log 2>&1`

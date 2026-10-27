@@ -9,8 +9,10 @@ solvable levels as .p2c with --p2c.
 
 import argparse
 import json
+import queue
 import subprocess
 import sys
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -42,9 +44,15 @@ def prompt(vocab, conds, prefix):
     return [BOS] + vocab.encode(cond) + [SEP] + vocab.encode(prefix)
 
 
-def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, batch=32):
-    """`n` token lines (prefix included)."""
+def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, batch=32, refill=False):
+    """`n` token lines (prefix included). `refill` starts a new level in a batch row as soon as
+    its last one ends (GPT.generate_refill): levels from the same distribution (greedy ones
+    identical), 1.6 times as fast for v6-fresh-12h at batch 64 (2026-10-27), but other samples
+    for a given seed than without it."""
     p = prompt(vocab, list(conds), list(prefix))
+    if refill:
+        outs = model.generate_refill(p, n, model.cfg.block_size, EOS, temperature, top_k, batch)
+        return [" ".join(list(prefix) + vocab.decode(o)) for o in outs]
     lines = []
     for start in range(0, n, batch):
         k = min(batch, n - start)
@@ -65,6 +73,63 @@ def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None, editor_rule
     text = "\n".join(line if line.strip() else "<empty>" for line in lines) + "\n"
     out = subprocess.run(args, input=text, capture_output=True, text=True, check=True)
     return [json.loads(line) for line in out.stdout.splitlines()]
+
+
+class Scorer:
+    """`score` as one long-lived `glados-score score` process, so the CPU scores levels while the
+    GPU samples the next ones: `send` a list of lines (returns at once), `take` that many results
+    later, in order. It runs at below-normal priority: it still gets every idle core, but the
+    sampling thread (which keeps the GPU fed) wins when they compete."""
+
+    def __init__(self, glados=DEFAULT_GLADOS, budget=50_000):
+        args = [str(Path(glados).resolve()), "score", "--budget", str(budget)]
+        flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 0
+        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                     encoding="utf-8", creationflags=flags)
+        self.inbox, self.results = queue.Queue(), queue.Queue()
+        # A thread each way, so neither pipe fills up while this one is busy sampling.
+        self.writer = threading.Thread(target=self._write, daemon=True)
+        self.reader = threading.Thread(target=self._read, daemon=True)
+        self.writer.start()
+        self.reader.start()
+
+    def _write(self):
+        try:
+            for lines in iter(self.inbox.get, None):
+                # Empty lines would be skipped by glados and break the alignment.
+                self.proc.stdin.write("".join((l if l.strip() else "<empty>") + "\n" for l in lines))
+                self.proc.stdin.flush()
+        except OSError:
+            pass  # glados stopped: take() and close() say so
+        finally:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+
+    def _read(self):
+        for line in self.proc.stdout:
+            self.results.put(json.loads(line))
+        self.results.put(None)
+
+    def send(self, lines):
+        self.inbox.put(list(lines))
+
+    def take(self, k):
+        out = []
+        for _ in range(k):
+            r = self.results.get()
+            if r is None:
+                raise RuntimeError(f"glados-score score stopped (exit code {self.proc.wait()}) "
+                                   f"after {len(out)} of {k} results")
+            out.append(r)
+        return out
+
+    def close(self):
+        self.inbox.put(None)
+        self.writer.join()
+        if self.proc.wait() != 0:
+            raise subprocess.CalledProcessError(self.proc.returncode, self.proc.args)
 
 
 def summarize(results):
