@@ -31,6 +31,19 @@ builder `train/goblin_data.py`, the new eval sets in `train/goblin_eval.py`,
   `runs/` are not in git; don't add them.
 - Report numbers as the scripts print them. Don't round a failure into a success.
 
+## Pausing Tasks 1 and 2
+
+Both can be stopped and carried on; to pause, tell the user what you are doing, then:
+
+- **Task 1 / Task 2's builds** (`goblin_data.py`): stop the process (Ctrl-C, or end the Python
+  process; its `glados-score` child exits when its input closes). Run the same command again to
+  resume: finished parts are kept (`parts/NAME.jsonl`) and a part under way carries on from its
+  `.partial` file, losing at most the last 2,048 levels. Don't change options between the two runs.
+- **Task 2's harvest** (`harvest.py`): create the empty file `OUT.stop` (e.g.
+  `data/goblin/harvest/v6-b.stop`). It finishes its 1,024-level chunk, prints PAUSED and exits 3.
+  Run the identical command again to resume (it reads `OUT.partial.jsonl`, keeps the saved seed).
+  A `wait`-style background job that ends with exit 3 is a pause, not a failure.
+
 ## Task 1 (ASK): build data/goblin without the harvest
 
 Why: the supervised data for the first Goblin run. CPU on every thread for several hours.

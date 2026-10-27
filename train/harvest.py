@@ -24,6 +24,13 @@ Put earlier harvests in `--data` here so later rounds only keep levels new to al
 `--keep-unsolved FILE` also writes the sampled levels the solver runs out of budget on
 (`uncertain`: editor-valid, not proven unsolvable), once each, to FILE: Goblin's self-play pool
 (docs/goblin-plan-2026-10-27.md), levels it can only get by beating the search.
+
+Pause and resume: each chunk's results are saved to `OUT.partial.jsonl` as soon as the chunk is
+scored (`OUT` is --out), and nothing else is written until the end. To pause, create the empty
+file `OUT.stop`: the harvest finishes its chunk, prints PAUSED and exits with code 3. (Ctrl-C or
+a crash loses only the chunk under way.) To resume, run the same command again: it carries on
+from the saved chunks (and the seed it saved, unless you pass --seed) if checkpoint, --cond, --chunk,
+--temperature, --top-k and --budget are the same. --n may be raised to extend the harvest.
 """
 
 import argparse
@@ -117,6 +124,7 @@ def main():
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     args = ap.parse_args()
+    args.seed_given = args.seed is not None
     args.seed = resolve(args.seed)
 
     run = Path(args.checkpoint).parent
@@ -135,11 +143,46 @@ def main():
     counts = Counter()
     candidates = []
     unsolved = {}
+    # Chunks already scored by an earlier run of this command (see the docstring).
+    partial = out.with_suffix(".partial.jsonl")
+    stop = out.with_suffix(".stop")
+    header = {"checkpoint": str(args.checkpoint), "cond": args.cond, "seed": args.seed,
+              "chunk": args.chunk, "temperature": args.temperature, "top_k": args.top_k,
+              "budget": args.budget}
+    saved = {}
+    if partial.exists():
+        with open(partial, encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f if l.strip().endswith("}")]
+        if rows and rows[0].get("header") == header:
+            saved = {r["start"]: r for r in rows[1:]}
+            print(f"resuming: {len(saved)} chunks of {args.chunk} already scored in {partial}", flush=True)
+        elif rows and args.seed_given:
+            sys.exit(f"{partial} was made with {rows[0].get('header')}, not {header}: "
+                     "delete it to start over, or pass the same options")
+        elif rows:
+            # No --seed given: take the saved one, and check the rest.
+            header["seed"] = rows[0]["header"]["seed"]
+            if rows[0]["header"] != header:
+                sys.exit(f"{partial} was made with {rows[0]['header']}, not {header}: "
+                         "delete it to start over, or pass the same options")
+            args.seed = header["seed"]
+            saved = {r["start"]: r for r in rows[1:]}
+            print(f"resuming with seed {args.seed}: {len(saved)} chunks already scored", flush=True)
+    stop.unlink(missing_ok=True)
+    if not saved:
+        with open(partial, "w", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps({"header": header}) + "\n")
     t0 = time.time()
     for start in range(0, args.n, args.chunk):
         k = min(args.chunk, args.n - start)
-        lines = sample.generate(model, vocab, k, conds, (), args.temperature, args.top_k, args.batch)
-        results = sample.score(lines, args.glados, args.budget)
+        if start in saved and saved[start]["k"] == k:
+            results = saved[start]["results"]
+        else:
+            torch.manual_seed(args.seed + start)  # each chunk reproducible by itself
+            lines = sample.generate(model, vocab, k, conds, (), args.temperature, args.top_k, args.batch)
+            results = sample.score(lines, args.glados, args.budget)
+            with open(partial, "a", encoding="utf-8", newline="\n") as f:
+                f.write(json.dumps({"start": start, "k": k, "results": results}) + "\n")
         for r in results:
             counts["sampled"] += 1
             if r["verdict"] == "unparsed":
@@ -155,6 +198,10 @@ def main():
                 candidates.append(r)
         print(f"  {counts['sampled']:>6} sampled in {time.time() - t0:.0f}s: "
               f"{counts['solvable']} solvable, {counts['needs portals']} need portals", flush=True)
+        if stop.exists() and start + k < args.n:
+            print(f"PAUSED after {counts['sampled']} of {args.n} levels: run the same command to resume",
+                  flush=True)
+            sys.exit(3)
 
     # Novelty: distinct, not in --data, and no near neighbour there.
     print(f"checking {len(candidates)} levels against {len(data)} data files", flush=True)
@@ -183,6 +230,7 @@ def main():
     if sims:
         print(f"nearest-neighbour similarity of the non-copies: mean {sum(sims) / len(sims):.2f}")
     print(f"wrote {len(kept)} levels to {out}")
+    partial.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
