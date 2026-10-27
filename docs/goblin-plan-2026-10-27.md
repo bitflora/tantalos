@@ -59,6 +59,8 @@ later; overnight CPU and GPU data jobs are fine when nothing is training.
 
 ## Next
 
+Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
+
 1. Overnight data jobs, one at a time, nothing training: `goblin_data.py --deep` (all parts),
    then `harvest.py runs/v6-fresh-12h/away/best.pt --cond "<verdict:solvable> <src:ws>"
    --out data/goblin/harvest/v6-solvable.jsonl --keep-unsolved data/goblin/pool/v6.jsonl`,
