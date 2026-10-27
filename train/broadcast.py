@@ -1,6 +1,7 @@
-"""The broadcast loop: the level net writes levels, the solver net writes their solutions, and
-Portal 2 plays them on stream; then both nets train on what the round found, and the next round
-asks for harder levels once the solver net keeps up (train/tier.py).
+"""The broadcast loop: the level net writes levels, Goblin (the net that writes plans; the solver
+net before 2026-10-27) writes their solutions, and Portal 2 plays them on stream; then both nets
+train on what the round found, and the next round asks for harder levels once Goblin keeps up
+(train/tier.py).
 
     .venv/Scripts/python train/broadcast.py start NAME [--rounds N] [--play-hours 2] [--no-train]
     .venv/Scripts/python train/broadcast.py status NAME
@@ -15,8 +16,8 @@ play.py puts the editor autosaves back. Never kill the process.
 A round, in out/broadcast/NAME/round-RR/:
 
 1. prep: sample levels from the level net at the round's tiers, keep the solvable, portal-
-   needing, novel ones (harvest.keep), write the solver net's greedy plan and pass@k samples for
-   each and check them (solve_eval.solve_levels), and check the kept levels in Portal 2's editor
+   needing, novel ones (harvest.keep), write Goblin's greedy plan and pass@k samples for
+   each and check them (goblin_eval.solve_levels), and check the kept levels in Portal 2's editor
    (portal2.check; rejects go to data/ingame/invalid.jsonl as in every training run).
 2. play: about half levels the net solved and half it didn't, easiest first. A solved plan is
    played as is (`glados-score route --plan`). A failed one is played as far as its steps fit, then
@@ -27,7 +28,7 @@ A round, in out/broadcast/NAME/round-RR/:
 4. feed back: data/harvest/broadcast-NAME-RR.jsonl (the editor-valid kept levels; ones played
    cleanly in the game x3) and data/plans/broadcast-NAME-RR.jsonl (the Rust solver's plans for
    them; ones the net failed x3).
-5. train (unless --no-train): `run.py start --quick` for the level net, then the solver net, on
+5. train (unless --no-train): `run.py start --quick` for the level net, then Goblin, on
    their usual data plus every broadcast file so far; each is kept only if its quick eval isn't
    worse than its parent (run.py's guard), and the next round uses the final models.
 6. the tier for the next round (tier.next_tier).
@@ -230,16 +231,16 @@ def sample_round(st, a, round_dir, gen_ckpt, tier):
     return kept, dict(sampled)
 
 
-def solve_round(st, a, kept, solve_ckpt):
-    """The solver net's greedy plan and `a.k` samples for each kept level, checked."""
+def goblin_round(st, a, kept, goblin_ckpt):
+    """Goblin's greedy plan and `a.k` samples for each kept level, checked."""
     import torch
     import sample
-    import solve_eval
+    import goblin_eval
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, vocab, _ = sample.load_checkpoint(solve_ckpt, device)
-    st.say(f"the solver net is solving {len(kept)} chambers")
-    solved = solve_eval.solve_levels(model, vocab, kept, a.k, 1.0, GLADOS, ["conservative"], 64)
+    model, vocab, _ = sample.load_checkpoint(goblin_ckpt, device)
+    st.say(f"Goblin is solving {len(kept)} chambers")
+    solved = goblin_eval.solve_levels(model, vocab, kept, a.k, 1.0, GLADOS, ["conservative"], 64)
     del model
     free_gpu()
     for r, s in zip(kept, solved):
@@ -248,7 +249,7 @@ def solve_round(st, a, kept, solve_ckpt):
         r["net"] = c["greedy"]
         r["net_pass"] = any(x.get("verdict") == "solved" for x in [c["greedy"]] + c["samples"])
     n = max(len(kept), 1)
-    st.say(f"the solver net solved {sum(r['net'].get('verdict') == 'solved' for r in kept) / n:.0%} greedily, "
+    st.say(f"Goblin solved {sum(r['net'].get('verdict') == 'solved' for r in kept) / n:.0%} greedily, "
            f"{sum(r['net_pass'] for r in kept) / n:.0%} in {a.k + 1} tries")
 
 
@@ -321,9 +322,9 @@ def route(p2c, plan=None):
 
 
 def mechanics(bits):
-    import solve_eval
+    import goblin_eval
 
-    return solve_eval.mechanics_of(bits or 0)
+    return goblin_eval.mechanics_of(bits or 0)
 
 
 def card(r, p2c, preview, i, n):
@@ -468,7 +469,7 @@ def feed_back(st, name, rnd, kept, episodes, gen_ckpt):
         for p in plans:
             for _ in range(FAILED_REPEAT if p.pop("net_failed") else 1):
                 f.write(json.dumps(p) + "\n")
-    st.say(f"{len(valid)} new chambers for the level net, {len(plans)} solutions for the solver net")
+    st.say(f"{len(valid)} new chambers for the level net, {len(plans)} solutions for Goblin")
     return harvest_file, plans_file
 
 
@@ -485,9 +486,9 @@ def train_one(st, d, name, rnd, task, parent, hours, data):
     cmd = [run.PY, str(ROOT / "train" / "run.py"), "start", rn, "--quick", "--from", str(parent),
            "--hours", f"{hours:g}", "--broadcast", name, "--note",
            f"broadcast {name} round {rnd}: {task} net on the round's harvest", "--data", *data]
-    if task == "solve":
-        cmd += ["--task", "solve"]
-    st.say(f"training the {'solver' if task == 'solve' else 'level'} net ({hours * 60:.0f} min)")
+    if task == "goblin":
+        cmd += ["--task", "goblin"]
+    st.say(f"training {'Goblin' if task == 'goblin' else 'the level net'} ({hours * 60:.0f} min)")
     p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     if p.returncode:
         st.say(f"training didn't start: {(p.stderr or p.stdout).strip()[-200:]}")
@@ -517,7 +518,7 @@ def train_one(st, d, name, rnd, task, parent, hours, data):
         return parent
     training["result"] = "kept the old model (the new one scored worse)" if worse else "promoted"
     st.set(training=training)
-    st.say(f"{'solver' if task == 'solve' else 'level'} net: {training['result']}")
+    st.say(f"{'Goblin' if task == 'goblin' else 'level net'}: {training['result']}")
     return Path(final)
 
 
@@ -555,7 +556,9 @@ def loop(d):
         ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
     httpd = serve(d, a.port)
     write_status(d, state="starting", pid=__import__("os").getpid())
-    models = read_json(d / "status.json").get("models") or {"gen": a.gen, "solve": a.solve}
+    models = read_json(d / "status.json").get("models") or {"gen": a.gen, "goblin": a.goblin}
+    if "solve" in models:  # a broadcast started before Goblin had its name
+        models["goblin"] = models.pop("solve")
     tier = read_json(d / "status.json").get("tier", a.tier)
     rnd = read_json(d / "status.json").get("round", 0)
     st.set(rounds=a.rounds or None, models={k: str(v) for k, v in models.items()},
@@ -572,7 +575,7 @@ def loop(d):
 
             st.phase("prep", "GLaDOS is designing test chambers", 15)
             kept, sampled = sample_round(st, a, round_dir, models["gen"], tier)
-            solve_round(st, a, kept, models["solve"])
+            goblin_round(st, a, kept, models["goblin"])
             st.phase("checking", "Checking the chambers in the editor", 10)
             files = write_p2c(kept, round_dir / "kept")
             if not a.no_check:
@@ -617,12 +620,12 @@ def loop(d):
                    "why": why}
 
             if not a.no_train and not stopping(d):
-                st.phase("training", "GLaDOS is learning", a.gen_hours * 60 + a.solve_hours * 60 + 25)
+                st.phase("training", "GLaDOS is learning", a.gen_hours * 60 + a.goblin_hours * 60 + 25)
                 level_data = [LEVEL_DATA] + [str(p.relative_to(ROOT)) for p in sorted(HARVEST.glob(f"broadcast-{name}-*.jsonl"))]
                 models["gen"] = train_one(st, d, name, rnd, "gen", models["gen"], a.gen_hours, level_data)
                 if not stopping(d):
                     plan_data = ["data/plans/train.jsonl"] + [str(p.relative_to(ROOT)) for p in sorted(PLANS.glob(f"broadcast-{name}-*.jsonl"))]
-                    models["solve"] = train_one(st, d, name, rnd, "solve", models["solve"], a.solve_hours, plan_data)
+                    models["goblin"] = train_one(st, d, name, rnd, "goblin", models["goblin"], a.goblin_hours, plan_data)
                 row["models_after"] = {k: str(v) for k, v in models.items()}
             row["minutes"] = round((time.time() - t_round) / 60)
             append_jsonl(d / "rounds.jsonl", row)
@@ -659,12 +662,12 @@ def start(a):
     if not OVERLAY.exists():
         sys.exit(f"{OVERLAY} is missing")
     gen = run.checkpoint_of(a.gen)
-    solve = run.checkpoint_of(a.solve)
+    goblin = run.checkpoint_of(a.goblin)
     subprocess.run(["cargo", "build", "--release", "--bins"], cwd=ROOT, check=True)
     d.mkdir(parents=True)
     args = {k: v for k, v in vars(a).items() if k not in ("cmd", "func")}
-    args.update(gen=str(gen), solve=str(solve))
-    write_status(d, state="starting", started=now(), args=args, models={"gen": str(gen), "solve": str(solve)},
+    args.update(gen=str(gen), goblin=str(goblin))
+    write_status(d, state="starting", started=now(), args=args, models={"gen": str(gen), "goblin": str(goblin)},
                  tier=a.tier, round=0)
     kw = dict(cwd=ROOT, stdin=subprocess.DEVNULL)
     log = open(d / "broadcast.log", "a", encoding="utf-8")
@@ -678,7 +681,7 @@ def start(a):
         p = subprocess.Popen(cmd, start_new_session=True, stdout=log, stderr=log, **kw)
     write_status(d, pid=p.pid)
     print(f"broadcast {a.name} started (pid {p.pid}); overlay at http://localhost:{a.port}/")
-    print(f"  level net {gen}\n  solver net {solve}\n  tier {tiers.NAMES[a.tier]}")
+    print(f"  level net {gen}\n  Goblin {goblin}\n  tier {tiers.NAMES[a.tier]}")
 
 
 def describe(d):
@@ -746,16 +749,17 @@ def main():
     s.add_argument("name")
     s.add_argument("--rounds", type=int, default=0, help="rounds to run (default: until stopped)")
     s.add_argument("--gen", default="v5-fresh-10h", help="level net: run name or checkpoint")
-    s.add_argument("--solve", default="solve-fresh-3h", help="solver net: run name or checkpoint")
+    s.add_argument("--goblin", "--solve", dest="goblin", default="solve-fresh-3h", help="Goblin: run name or checkpoint")
     s.add_argument("--tier", type=int, default=1, help="starting tier, 0-based (tier.py; default T2)")
     s.add_argument("--sample", type=int, default=2000, help="levels sampled per round")
     s.add_argument("--chunk", type=int, default=512, help="levels sampled and scored at a time")
     s.add_argument("--batch", type=int, default=64)
-    s.add_argument("--k", type=int, default=8, help="sampled solver-net plans per level (pass@k)")
+    s.add_argument("--k", type=int, default=8, help="sampled Goblin plans per level (pass@k)")
     s.add_argument("--queue", type=int, default=40, help="levels lined up to play per round")
     s.add_argument("--play-hours", type=float, default=2.0)
     s.add_argument("--gen-hours", type=float, default=0.5, help="level net training per round")
-    s.add_argument("--solve-hours", type=float, default=0.33, help="solver net training per round")
+    s.add_argument("--goblin-hours", "--solve-hours", dest="goblin_hours", type=float, default=0.33,
+                   help="Goblin training per round")
     s.add_argument("--restart-every", type=int, default=20, help="restart Portal 2 after this many levels")
     s.add_argument("--no-train", action="store_true", help="play only; still writes the feedback files")
     s.add_argument("--no-check", action="store_true", help="skip the editor check of the kept levels")

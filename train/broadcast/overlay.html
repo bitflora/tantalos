@@ -206,7 +206,7 @@ function render(st) {
   $("phase-text").textContent = st.phase_text || "";
   $("clock").textContent = clock(st.phase_ends);
   const m = st.models || {};
-  $("models").innerHTML = `level net <b>${esc(short(m.gen))}</b> · solver net <b>${esc(short(m.solve))}</b>`;
+  $("models").innerHTML = `level net <b>${esc(short(m.gen))}</b> · Goblin <b>${esc(short(m.goblin || m.solve))}</b>`;
   const sc = st.score || {};
   $("played").textContent = sc.played || 0;
   $("solved").textContent = pct(sc.net_solved || 0, sc.played || 0);
@@ -226,7 +226,7 @@ function render(st) {
     const net = lv.net || {};
     const solved = net.verdict === "solved";
     $("card-verdict").className = "verdict " + (net.verdict ? (solved ? "good" : "bad") : "");
-    $("card-verdict").textContent = !net.verdict ? "" : solved ? "The solver net has a solution"
+    $("card-verdict").textContent = !net.verdict ? "" : solved ? "Goblin has a solution"
       : `The net's plan breaks at step ${(net.steps_ok || 0) + 1}`;
     $("card-problem").textContent = solved ? "" : (net.problem || "");
     let html = stepList(lv.part === "reference" ? "The net's plan (played)" : "The net's plan", net.steps);
@@ -243,7 +243,7 @@ function render(st) {
     const tr = st.training;
     if (st.phase === "training" && tr) {
       $("stage-kicker").textContent = `Round ${st.round} · training`;
-      $("stage-title").textContent = `Teaching the ${tr.task === "solve" ? "solver" : "level"} net`;
+      $("stage-title").textContent = `Teaching ${tr.task === "goblin" || tr.task === "solve" ? "Goblin" : "the level net"}`;
       $("stage-sub").textContent = tr.result ? tr.result : `${tr.state || ""} · ${Math.round(tr.hours * 60)} minutes ${clock(st.phase_ends)}`;
       drawLoss(tr.losses);
     } else {

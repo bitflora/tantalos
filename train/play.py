@@ -1444,7 +1444,7 @@ class Game:
         return self.jumped
 
     def act_attempt(self, leg):
-        """The solver net's step that fits no move (`glados-score route --plan`): after the walk
+        """Goblin's step that fits no move (`glados-score route --plan`): after the walk
         toward it, a shot at the face it names (from the nearest cell that sees it, else from
         here), or nothing more. Never counts as done."""
         if leg.get("verb") == "fire" and leg.get("face"):
@@ -1897,7 +1897,7 @@ def play(game, head, legs, deadline=None, report=None, on_leg=None):
     can be played. Status: ok, unconfirmed (the action couldn't see that it worked, e.g. a
     turret still standing, but nothing the route tracks is wrong), retried (worked carefully),
     recovered (put right by teleporting), failed, or skipped (out of time). An "attempt" leg
-    (the solver net's step that fits no move) is played once, as is, and is net-failed.
+    (Goblin's step that fits no move) is played once, as is, and is net-failed.
     `on_leg(event, rec)`: "start" before each leg, "done" with its record after."""
     game.exit_normal = head["exit"]["normal"]
     game.exit_cell = head["exit"]["cell"]

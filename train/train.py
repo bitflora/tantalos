@@ -15,8 +15,9 @@ and the training time already done, so with --until set to the time still owed, 
 schedule picks up where it stopped instead of starting over. <out>/last.json says, without torch,
 how far last.pt got (step, trained_s).
 
---task solve trains the solver net instead: it reads a level and writes its plan (data/plans from
-train/plans.py; sequences in train/data.py). Its eval replays greedy plans for --score-n
+--task goblin trains Goblin instead (the solver net, task "solve", before 2026-10-27; --task solve
+still works): it reads a level and writes its plan (data/goblin from train/goblin_data.py;
+sequences in train/data.py). Its eval replays greedy plans for --score-n
 validation levels with `glados-score check` and logs the solved share. --init from a level model keeps
 the embeddings of the tokens both know (level words), and drops its conditions.
 
@@ -48,8 +49,9 @@ import record  # noqa: E402
 import sample  # noqa: E402
 
 PAUSED_EXIT = 3  # exit code when a PAUSE file stopped training (run.py looks for it)
-import solve_eval  # noqa: E402
-from data import COND_TOKENS, Away, Vocab, load, load_solve  # noqa: E402
+import goblin_eval  # noqa: E402
+from data import COND_TOKENS, Away, Vocab, load, load_goblin  # noqa: E402
+from record import GOBLIN, task_name  # noqa: E402
 from model import GPT, Config  # noqa: E402
 
 
@@ -58,10 +60,11 @@ def main():
     ap.add_argument("--data", nargs="+", required=True, help="JSONL files from `glados-data dataset`")
     ap.add_argument(
         "--task",
-        choices=("levels", "solve"),
+        type=task_name,
+        choices=("levels", GOBLIN),
         default="levels",
-        help="levels: write levels from conditions; solve: write a level's plan (data/plans, "
-        "train/plans.py), the solver net",
+        help="levels: write levels from conditions; goblin: write a level's plan (data/goblin, "
+        "train/goblin_data.py), Goblin",
     )
     ap.add_argument("--vocab", default=None, help="level vocab (default: vocab.txt beside the data)")
     ap.add_argument("--out", required=True)
@@ -102,7 +105,7 @@ def main():
         "--score-n",
         type=int,
         default=32,
-        help="levels sampled and scored per eval; with --task solve, validation levels whose "
+        help="levels sampled and scored per eval; with --task goblin, validation levels whose "
         "greedy plans `glados-score check` replays (0: off)",
     )
     ap.add_argument(
@@ -179,16 +182,16 @@ def main():
     vocab_file = args.vocab or Path(args.data[0]).parent / "vocab.txt"
     vocab = Vocab.build(vocab_file, args.task)
     t0 = time.time()
-    solve = args.task == "solve"
-    if solve:
+    goblin = args.task == GOBLIN
+    if goblin:
         if args.away:
             sys.exit("--away is for --task levels")
-        train, val, lengths = load_solve(args.data, vocab, args.block, seed=args.seed)
+        train, val, lengths = load_goblin(args.data, vocab, args.block, seed=args.seed)
         print(f"data: {len(train)} train ({len(train.offsets) - 1} plans), {len(val)} val; vocab {len(vocab)}; "
               f"loaded in {time.time() - t0:.0f}s")
         print(f"  {lengths.report()}; {lengths.unknown} with tokens not in {vocab_file}, dropped")
         # The same validation levels at every eval, so their solved shares compare.
-        solve_picks = random.Random(args.seed).sample(range(len(val)), min(args.score_n, len(val)))
+        goblin_picks = random.Random(args.seed).sample(range(len(val)), min(args.score_n, len(val)))
     else:
         train, val, skipped = load(args.data, vocab, args.block, seed=args.seed)
         print(
@@ -196,14 +199,14 @@ def main():
             f"vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s"
         )
     holdout = None
-    if args.holdout and not solve:
+    if args.holdout and not goblin:
         if Path(args.holdout).resolve() in {Path(p).resolve() for p in args.data}:
             sys.exit(f"--holdout {args.holdout} is also in --data: it wouldn't be held out")
         _, holdout, _ = load([args.holdout], vocab, args.block, val_share=1.0)
         holdout_picks = random.Random(args.seed).sample(range(len(holdout)), min(args.holdout_n, len(holdout)))
         print(f"holdout: {len(holdout_picks)} of the {len(holdout)} levels in {args.holdout}")
     source_picks = {}
-    if not solve and val.sources:
+    if not goblin and val.sources:
         pick_rng = random.Random(args.seed)
         for src in sorted(set(val.sources)):
             idx = [i for i, s in enumerate(val.sources) if s == src]
@@ -227,8 +230,8 @@ def main():
         # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
         # words and conditions can go anywhere), new ones start fresh, and so do new positions.
         lost = [t for t in init["vocab"] if t not in vocab.stoi]
-        if solve:
-            # A level model warm-starting the solver net: its conditions have no use here.
+        if goblin:
+            # A level model starting Goblin: its conditions have no use here.
             lost = [t for t in lost if t not in COND_TOKENS]
         if lost:
             sys.exit(f"{args.init} knows tokens this data doesn't have: {lost[:8]}")
@@ -288,7 +291,7 @@ def main():
     # A batch's loss is the mean over its targets. Sorted batches of long levels hold far more
     # targets than batches of short ones, so scale each by its share of the average count:
     # every target then weighs the same, as in random batches (whose counts vary little).
-    # (Records, not len(train): a solve level can hold several plans.)
+    # (Records, not len(train): a Goblin level can hold several plans.)
     per_batch = args.batch * (len(train.level_ids) / max(len(train.offsets) - 1, 1) + 1)
 
     @torch.no_grad()
@@ -396,16 +399,16 @@ def main():
                 entry["holdout_loss"] = fixed_loss(holdout, holdout_picks)
             if source_picks:
                 entry["val_by_source"] = {s: fixed_loss(val, p) for s, p in source_picks.items()}
-            if args.score_n and solve:
+            if args.score_n and goblin:
                 model.eval()
-                levels = [" ".join(vocab.decode(val.level(i))) for i in solve_picks]
-                prompts = [solve_eval.plan_prompt(vocab, lv, args.block) for lv in levels]
-                plans = solve_eval.generate_plans(model, vocab, prompts, top_k=1)
+                levels = [" ".join(vocab.decode(val.level(i))) for i in goblin_picks]
+                prompts = [goblin_eval.plan_prompt(vocab, lv, args.block) for lv in levels]
+                plans = goblin_eval.generate_plans(model, vocab, prompts, top_k=1)
                 model.train()
                 try:
                     items = [{"tokens": lv, "plan": p, "min_len": val.min_lens[i] if val.min_lens[i] >= 0 else None}
-                             for lv, p, i in zip(levels, plans, solve_picks)]
-                    entry["solve"] = solve_eval.summarize(solve_eval.check(items, args.glados))
+                             for lv, p, i in zip(levels, plans, goblin_picks)]
+                    entry["goblin"] = goblin_eval.summarize(goblin_eval.check(items, args.glados))
                 except (OSError, ValueError, subprocess.CalledProcessError) as e:
                     print(f"checking plans failed, carrying on: {e}")
             elif args.score_n:
@@ -436,8 +439,8 @@ def main():
                 if s
                 else ""
             )
-            if entry.get("solve"):
-                v = entry["solve"]
+            if entry.get("goblin"):
+                v = entry["goblin"]
                 extra += (f"  val levels: {v['solved']:.0%} solved (greedy), {v['optimal']:.0%} optimal, "
                           f"{v['parsed']:.0%} parse")
             if "gpu_gb" in entry:

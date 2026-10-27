@@ -63,7 +63,7 @@ python tools/workshop/annotations.py --set 100091397 --rating 4 --staged --notes
 ```
 
 `excluded` is honoured when the ws5 split is rebuilt (`ws3.py` moves the level to train) and when
-`data/plans/test-ws.jsonl` is rebuilt (`train/plans.py` skips it). It does not remove the level
+`data/plans/test-ws.jsonl` is rebuilt (`train/goblin_data.py` skips it). It does not remove the level
 from training.
 
 ## Mirrored and turned copies for training

@@ -17,7 +17,8 @@ model. Loss is only taken on the level tokens and <eos>.
 Checkpoints trained before a group existed don't have its tokens; `groups_in(vocab)` lists the
 groups a checkpoint knows, and prompts for it only fill those slots.
 
-The solver net (task `solve`, `load_solve`) reads a level and writes its plan (src/plan.rs):
+Goblin (task `goblin`, `load_goblin`; the solver net, task `solve`, before 2026-10-27) reads a
+level and writes its plan (src/plan.rs):
 
     <bos> <level tokens>... <sep> <plan tokens>... <eos>
 
@@ -398,10 +399,11 @@ class Vocab:
 
     @classmethod
     def build(cls, level_vocab_file, task="levels"):
-        """`levels`: special tokens, conditions, level words. `solve`: special tokens, level
-        words, then the plan words the level format doesn't have; no conditions."""
+        """`levels`: special tokens, conditions, level words. `goblin` (or its old name `solve`):
+        special tokens, level words, then the plan words the level format doesn't have; no
+        conditions."""
         level = Path(level_vocab_file).read_text().split()
-        if task == "solve":
+        if task in ("goblin", "solve"):
             return cls(SPECIAL + level + [w for w in PLAN_WORDS if w not in level])
         return cls(SPECIAL + COND_TOKENS + level)
 
@@ -516,8 +518,8 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
     return out["train"], out["val"], skipped
 
 
-class Solves(Levels):
-    """Levels with their plans (task `solve`), one split, as flat tensors. The level is the
+class GoblinPlans(Levels):
+    """Levels with their plans (task `goblin`), one split, as flat tensors. The level is the
     prompt; a plan and <eos> are what is learned. A level can have several plans (different
     shortest ones): each time it comes up, one of them is taken at random."""
 
@@ -551,7 +553,7 @@ class Solves(Levels):
 
 
 class LengthStats:
-    """Plan and whole-sequence lengths of solver-net records, and how many don't fit a block."""
+    """Plan and whole-sequence lengths of Goblin records, and how many don't fit a block."""
 
     def __init__(self, block_size):
         self.block_size = block_size
@@ -581,8 +583,8 @@ class LengthStats:
                 f"{self.too_long} ({self.too_long / n:.2%}) longer than block {self.block_size}, dropped")
 
 
-def load_solve(paths, vocab, block_size, val_share=0.05, seed=0):
-    """Train and validation `Solves` from data/plans JSONL ({tokens, plan, plans, min_len, ...};
+def load_goblin(paths, vocab, block_size, val_share=0.05, seed=0):
+    """Train and validation `GoblinPlans` from data/goblin (or data/plans) JSONL ({tokens, plan, plans, min_len, ...};
     `plans`, if there, lists every plan of the level, `plan` first), streamed, and the
     `LengthStats` of every record's first plan. Records too long for `block_size`, or with
     tokens the vocabulary lacks, are dropped, and so are other plans too long for it. A record
@@ -626,7 +628,7 @@ def load_solve(paths, vocab, block_size, val_share=0.05, seed=0):
         return torch.frombuffer(a, dtype=dtype) if a else torch.zeros(0, dtype=dtype)
 
     out = {
-        name: Solves(tensor(lv, torch.int16), tensor(lo, torch.int64), tensor(pl, torch.int16),
+        name: GoblinPlans(tensor(lv, torch.int16), tensor(lo, torch.int64), tensor(pl, torch.int16),
                      tensor(po, torch.int64), tensor(pg, torch.int64), ml.tolist())
         for name, (lv, lo, pl, po, pg, ml) in splits.items()
     }
@@ -637,7 +639,7 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(
-        description="Plan lengths in solver-net data (data/plans/*.jsonl), and how many records a block drops.")
+        description="Plan lengths in Goblin data (data/goblin/*.jsonl), and how many records a block drops.")
     ap.add_argument("files", nargs="+")
     ap.add_argument("--block", type=int, default=1024)
     a = ap.parse_args()

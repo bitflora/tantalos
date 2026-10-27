@@ -149,15 +149,15 @@ python tools/workshop/annotations.py --set ID --exclude
 ```
 
 Fields: `staged` (manual playtest), `rating` (0–5), `notes`, `excluded` (leave out of the ws5 test
-split; `tools/workshop/ws3.py` moves it to train on rebuild, `train/plans.py` leaves it out of
+split; `tools/workshop/ws3.py` moves it to train on rebuild, `train/goblin_data.py` leaves it out of
 `test-ws`). When the user asks for levels to play-test, `--excluded`/`--get` is the shared source
 of truth. Do not rewrite the level files for annotations.
 
 ## Broadcast (Twitch stream)
 
-`train/broadcast.py` runs the stream's loop in rounds: the level net writes levels, the solver net
+`train/broadcast.py` runs the stream's loop in rounds: the level net writes levels, Goblin
 solves them, Portal 2 plays them, and both nets train on them (its own `run.py start --quick` runs,
-named `bc-NAME-rRR-gen` / `-solve`; never start those yourself). See docs/streaming.md.
+named `bc-NAME-rRR-gen` / `-goblin`, `-solve` before 2026-10-27; never start those yourself). See docs/streaming.md.
 
 1. `.venv/Scripts/python train/broadcast.py start NAME` (e.g. `live-01`; add options only if the
    user names them). If it refuses, tell the user why and stop.
@@ -169,21 +169,24 @@ named `bc-NAME-rRR-gen` / `-solve`; never start those yourself). See docs/stream
   editor autosaves).
 - No training run can start while a broadcast is going, and the other way round.
 
-## Solver-net runs
+## Goblin runs
 
-The second kind of run trains the solver net: it reads a level and writes its solution as plan
-tokens (src/plan.rs). Same steps as above, with `--task solve` in step 1:
-`.venv/Scripts/python train/run.py start NAME --task solve --hours H --note "WHAT IT IS FOR"`.
-Name them `solve-...`, e.g. `solve-fresh-2h`. `--from` a level run starts from its weights (a
-new task, fresh learning rates); `--from` a solve run continues it.
+**Goblin** is the second net: it reads a level and writes its solution as plan tokens
+(src/plan.rs). It was called the solver net (task `solve`, runs `solve-...`) until 2026-10-27;
+"the solver" on its own still means the Rust BFS solver, which Goblin is not. `--task solve`,
+old checkpoints and `runs/solve-fresh-3h` still work. Same steps as above, with `--task goblin`
+in step 1:
+`.venv/Scripts/python train/run.py start NAME --task goblin --hours H --note "WHAT IT IS FOR"`.
+Name them `goblin-...`, e.g. `goblin-fresh-12h`. `--from` a level run starts from its weights (a
+new task, fresh learning rates); `--from` a Goblin run continues it.
 
-- It needs `data/plans/` (train.jsonl, test-gen.jsonl, test-ws.jsonl), made by `train/plans.py`:
-  CPU-heavy (every thread) for about 30-40 minutes, so only when the user asks, and not while a run is going. `start`
-  refuses without it; tell the user.
-- A solve run does: build, train, evaluate with `solve_eval.py` (about 15 minutes), record. It
+- It needs `data/goblin/` (train.jsonl and the test sets; `data/plans/` until that is built),
+  made by `train/goblin_data.py`: CPU-heavy (every thread) for hours, so only when the user
+  asks, and not while a run is going. `start` refuses without it; tell the user.
+- A Goblin run does: build, train, evaluate with `goblin_eval.py` (about 15 minutes), record. It
   has no Portal 2 steps, no training away and no play-test picks, so `wait` never exits 2.
-- Solve runs are recorded in `train/solver-runs.csv`, not runs.csv; see them with
-  `.venv/Scripts/python train/run.py list --task solve`. `note` finds the right file itself.
+- Goblin runs are recorded in `train/goblin-runs.csv`, not runs.csv; see them with
+  `.venv/Scripts/python train/run.py list --task goblin`. `note` finds the right file itself.
 - The main score is **EVAL solved %**: the share of 1,024 held-out generated levels (test-gen)
   whose greedy plan `glados-score check` accepts. Higher is better; differences under about 5 points
   are noise. Also reported: pass@8, optimal %, test-ws (Workshop levels our solver solves) and

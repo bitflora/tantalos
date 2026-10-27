@@ -63,7 +63,7 @@ pub enum Step {
 }
 
 /// Words plans use beyond the level format's numbers and directions. New words go last, so
-/// older solver nets' vocabularies stay a prefix (train/data.py `PLAN_WORDS`).
+/// older Goblin models' vocabularies stay a prefix (train/data.py `PLAN_WORDS`).
 pub const WORDS: [&str; 21] = [
     "walk", "fire", "enter", "pickup", "putdown", "toss", "throw", "press", "dash", "knock",
     "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "fetch",

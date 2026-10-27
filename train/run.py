@@ -49,19 +49,20 @@ are workshop-x20.jsonl, outside the pattern) unless --data; block 1024, batch 16
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
 in runs.csv did. Anything after `--` goes to train.py as is.
 
-Solver-net runs (`start NAME --task solve`) train the second net, which reads a level and
-writes its plan, on data/plans (train/plans.py makes it). Their steps: train, evaluate best.pt
-(solve_eval.py, about 15 minutes: plans for held-out levels, replayed by `glados-score check`), record
-in train/solver-runs.csv (`list --task solve` shows them).
-No Portal 2 steps, no training away, no play-test picks. The main score is EVAL solved %: the
-share of test-gen levels whose greedy plan solves. --from a level-writing run warm-starts from
-its weights with the fresh learning rates (a new task); --from a solve run continues it.
+Goblin runs (`start NAME --task goblin`) train the second net, Goblin, which reads a level and
+writes its plan (called the solver net, task "solve", before 2026-10-27; `--task solve` and old
+runs still work). They train on data/goblin (train/goblin_data.py makes it; data/plans until it
+exists). Their steps: train, evaluate best.pt (goblin_eval.py, about 15 minutes: plans for
+held-out levels, replayed by `glados-score check`), record in train/goblin-runs.csv (`list --task
+goblin` shows them). No Portal 2 steps, no training away, no play-test picks. The main score is
+EVAL solved %: the share of held-out levels whose greedy plan solves. --from a level-writing run
+starts from its weights with the fresh learning rates (a new task); --from a Goblin run continues it.
 
 Quick runs (`start NAME --quick --from OLD --hours H`, for train/broadcast.py's rounds) fine-tune
 OLD at a low rate (1e-4 down to 1e-5), evaluate on a smaller sample (level runs: no generator
-timing, fewer per-condition levels; solve runs: no published set, pass@4), and skip the Portal 2,
+timing, fewer per-condition levels; Goblin runs: no published set, pass@4), and skip the Portal 2,
 training-away and picking steps. Then a guard: if the EVAL score is more than 3 points (level
-runs; 5 for solve runs) under OLD's, WORSE is written and OLD stays the final model.
+runs; 5 for Goblin runs) under OLD's, WORSE is written and OLD stays the final model.
 
 Only one run at a time: they share the GPU. While a broadcast (train/broadcast.py) is going,
 only its own runs (--broadcast NAME) start.
@@ -82,6 +83,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
+sys.path.insert(0, str(ROOT / "train"))
+from record import GOBLIN, task_name  # noqa: E402
+
 PY = sys.executable
 GLADOS = ROOT / "target" / "release" / "glados-score.exe"
 ACTIVE = ("starting", "training", "evaluating", "ingame", "away", "picking")
@@ -184,7 +188,7 @@ def task_of(checkpoint):
     for p in (checkpoint.parent, checkpoint.parent.parent):
         s = read_status(p)
         if s:
-            return s.get("task", "levels")
+            return task_name(s.get("task"))
     return "levels"
 
 
@@ -206,23 +210,24 @@ def start(a):
         sys.exit(f"--pause-after {a.pause_after}: give a number of hours between 0 and --hours ({a.hours})")
     if a.pause_after is not None and (a.quick or a.broadcast):
         sys.exit("--pause-after isn't for --quick or broadcast runs")
-    solve = a.task == "solve"
-    if solve and not a.data and not PLANS.exists():
-        sys.exit(f"{PLANS.relative_to(ROOT).as_posix()} is missing: a solve run needs plan data. Make it with "
-                 "train/plans.py first (CPU-heavy, hours; not while a run is going). No run started")
+    goblin = a.task == GOBLIN
+    plans = goblin_plans()
+    if goblin and not a.data and not plans:
+        sys.exit(f"{GOBLIN_DATA.relative_to(ROOT).as_posix()} is missing: a Goblin run needs plan data. Make it with "
+                 "train/goblin_data.py first (CPU-heavy, hours; not while a run is going). No run started")
     data = []
-    for pattern in a.data or ([str(PLANS)] if solve else ["data/v5b/levels-*.jsonl"]):
+    for pattern in a.data or ([str(plans)] if goblin else ["data/v5b/levels-*.jsonl"]):
         hits = sorted(glob.glob(str(ROOT / pattern))) or sorted(glob.glob(pattern))
         if not hits:
             sys.exit(f"--data {pattern}: no such file")
         data += [Path(h).resolve() for h in hits]
     vocab = Path(a.vocab).resolve() if a.vocab else data[0].parent / "vocab.txt"
-    if solve and not a.vocab and not vocab.exists():
+    if goblin and not a.vocab and not vocab.exists():
         vocab = ROOT / "data" / "v5" / "vocab.txt"  # the level models' words, so --from works
     if not vocab.exists():
         sys.exit(f"{vocab} is missing: pass --vocab")
     init = checkpoint_of(a.from_) if a.from_ else None
-    # Continuing a run of the same task fine-tunes it; a level model starting the solver net
+    # Continuing a run of the same task fine-tunes it; a level model starting Goblin
     # learns a new task, at the fresh rates.
     warm = init is not None and task_of(init) == a.task
     lr, min_lr, warmup = ("2e-4", "2e-5", "200") if warm else ("1e-3", "1e-4", "300")
@@ -240,14 +245,14 @@ def start(a):
     ]
     if init:
         train += ["--init", str(init)]
-    if solve:
-        train += ["--task", "solve"]
+    if goblin:
+        train += ["--task", GOBLIN]
     else:
         train += holdout_args(data)
     train += a.extra
-    if solve:
-        tests = data[0].parent if (data[0].parent / "test-gen.jsonl").exists() else PLANS.parent
-        evaluate = ["train/solve_eval.py", str(d / "best.pt"), "--plans", str(tests)]
+    if goblin:
+        tests = data[0].parent if (data[0].parent / "test-gen.jsonl").exists() else (plans or OLD_PLANS).parent
+        evaluate = ["train/goblin_eval.py", str(d / "best.pt"), "--plans", str(tests)]
         if a.quick:
             evaluate += ["--n-published", "0", "--k", "4"]
     else:
@@ -264,7 +269,7 @@ def start(a):
     d.mkdir(parents=True)
     write_status(
         d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours, task=a.task,
-        ingame=not (a.no_ingame or solve or a.quick), init=str(init or ""), train=train, evaluate=evaluate,
+        ingame=not (a.no_ingame or goblin or a.quick), init=str(init or ""), train=train, evaluate=evaluate,
         data=list(map(str, data)), vocab=str(vocab), extra=a.extra, quick=a.quick,
         broadcast=a.broadcast or "", pause_at=a.pause_after,
     )
@@ -276,7 +281,7 @@ def start(a):
               f"{now() + datetime.timedelta(hours=a.pause_after):%H:%M}; then: train/run.py resume {a.name}")
         print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}   (exits 3 when it has paused)")
         return
-    after = 20 if solve else 75
+    after = 20 if goblin else 75
     print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=after):%H:%M}")
     print(f"check:  .venv/Scripts/python train/run.py status {a.name}")
     print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
@@ -298,8 +303,9 @@ def detach(d, *steps):
 
 
 STEPS = ("training", "evaluating", "ingame", "away", "away-ingame", "picking")
-SOLVE_STEPS = ("training", "evaluating")  # a solver-net run's
-PLANS = ROOT / "data" / "plans" / "train.jsonl"  # its training data (train/plans.py)
+GOBLIN_STEPS = ("training", "evaluating")  # a Goblin run's
+GOBLIN_DATA = ROOT / "data" / "goblin" / "train.jsonl"  # its training data (train/goblin_data.py)
+OLD_PLANS = ROOT / "data" / "plans" / "train.jsonl"  # what it was until data/goblin was built
 INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
 HUMAN = ROOT / "data" / "ingame" / "human-unsolvable.jsonl"  # passed our solver, unsolvable in play
 DEAD = ROOT / "data" / "ingame" / "dead.jsonl"  # evaluated levels whose exit can never be reached
@@ -315,7 +321,12 @@ def holdout_args(data):
     return ["--holdout", str(WS_TEST)]
 AWAY_MINUTES, AWAY_REPEAT, AWAY_WORSE = 15, 5, 0.03  # as runs/v5-away-invalid
 QUICK_LR = ("1e-4", "1e-5", "100")  # --quick: 30-minute warm starts at 1e-4 matched; 2e-4 diverged
-QUICK_WORSE = {"levels": 0.03, "solve": 0.05}  # --quick's guard against its parent
+QUICK_WORSE = {"levels": 0.03, GOBLIN: 0.05}  # --quick's guard against its parent
+
+
+def goblin_plans():
+    """A Goblin run's default training data: data/goblin, else the older data/plans (or None)."""
+    return next((p for p in (GOBLIN_DATA, OLD_PLANS) if p.exists()), None)
 
 
 def broadcasts():
@@ -332,17 +343,17 @@ def broadcasts():
 
 
 def eval_score(eval_dir, task):
-    """The EVAL score in eval_dir: solvable share (level runs) or greedy solved share (solve runs)."""
+    """The EVAL score in eval_dir: solvable share (level runs) or greedy solved share (Goblin runs)."""
     try:
         e = json.loads((Path(eval_dir) / "eval.json").read_text())
-        return e["headline"]["solved"] if task == "solve" else e["validity"]["solvable"]
+        return e["headline"]["solved"] if task_name(task) == GOBLIN else e["validity"]["solvable"]
     except (OSError, ValueError, KeyError):
         return None
 
 
 def quick_guard(d, s):
     """--quick: WORSE if this run's EVAL is too far under its parent's; returns (final model, line)."""
-    task = s.get("task", "levels")
+    task = task_name(s.get("task"))
     new = eval_score(d / "eval", task)
     old = eval_score(Path(s["init"]).parent / "eval", task)
     if new is None:
@@ -455,8 +466,8 @@ def pipeline(d, steps=STEPS):
     d = Path(d).resolve()
     s = write_status(d, pid=__import__("os").getpid())
     log = open(d / "run.log", "a", encoding="utf-8")
-    if s.get("task") == "solve" or s.get("quick"):
-        steps = [x for x in steps if x in SOLVE_STEPS]
+    if task_name(s.get("task")) == GOBLIN or s.get("quick"):
+        steps = [x for x in steps if x in GOBLIN_STEPS]
 
     def say(msg):
         log.write(f"[{now():%H:%M:%S}] {msg}\n")
@@ -629,13 +640,14 @@ def describe(d):
                      f"levels, lower is better; rising while val falls = memorizing)")
         if e.get("samples"):
             line += f"; samples {e['samples']['parsed']:.0%} parse, {e['samples']['solvable']:.0%} solvable"
-        if e.get("solve"):
-            line += f"; val levels {e['solve']['solved']:.0%} solved (greedy), {e['solve']['parsed']:.0%} parse"
+        g = e.get("goblin") or e.get("solve")
+        if g:
+            line += f"; val levels {g['solved']:.0%} solved (greedy), {g['parsed']:.0%} parse"
         lines.append(line)
     ev = d / "eval" / "eval.json"
-    solve = s.get("task") == "solve"
-    if solve:
-        lines += solve_lines(d)
+    goblin = task_name(s.get("task")) == GOBLIN
+    if goblin:
+        lines += goblin_lines(d)
     elif ev.exists():
         e = json.loads(ev.read_text())
         v = e["validity"]
@@ -651,7 +663,7 @@ def describe(d):
     game = s.get("ingame", True)
     ig_done, ig_text = ingame_outcome(d)
     pk_done, pk_text = picks_outcome(d)
-    if ev.exists() and not solve:
+    if ev.exists() and not goblin:
         lines.append(f"  in Portal 2: {ig_text if game or ig_done else 'not checked (Portal 2 checks were off for this run)'}")
     away = d / "away"
     if (away / "eval" / "eval.json").exists():
@@ -660,7 +672,7 @@ def describe(d):
         lines.append(f"  AFTER TRAINING AWAY from the levels Portal 2 rejected (runs/{name_of(away)}):"
                      f" EVAL {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse")
         lines.append(f"    in Portal 2: {aw_text if game or aw_done else 'not checked'}")
-    elif state == "done" and "data" in s and not solve and not s.get("quick"):
+    elif state == "done" and "data" in s and not goblin and not s.get("quick"):
         lines.append("  training away: didn't happen (see run.log)")
     if state == "done" and s.get("quick"):
         lines.append(f"  quick run: {s.get('guard', 'no guard result')}")
@@ -669,7 +681,7 @@ def describe(d):
         f = final_dir(d)
         why = " (training away made it worse)" if (away / "WORSE").exists() else ""
         lines.append(f"  final model: runs/{name_of(f)}/best.pt{why}")
-    if (state == "done" and not solve and not s.get("quick")) or (d / "playtest" / "picks.json").exists():
+    if (state == "done" and not goblin and not s.get("quick")) or (d / "playtest" / "picks.json").exists():
         lines.append(f"  play-test levels in the Puzzle Maker: {pk_text}")
     if state in ("failed", "died"):
         log = s.get("log", "train.log")
@@ -695,11 +707,11 @@ def describe(d):
         return "\n".join(lines)
     if s.get("broadcast"):
         todo = [f"Nothing: train/broadcast.py ({s['broadcast']}) started this run and carries on by itself."]
-    elif solve:
+    elif goblin:
         todo.append("Report everything above to the user.")
         todo.append(f'Record the conclusion:  .venv/Scripts/python train/run.py note {n} "WHAT IT SHOWED"'
                     " (give the EVAL solved %, pass@8, the test-ws and published-liberal solved %, and how"
-                    " they compare with earlier solve runs in  train/run.py list --task solve)")
+                    " they compare with earlier Goblin runs in  train/run.py list --task goblin)")
     else:
         todo.append("Report everything above to the user, including the play-test level names: a blind A/B"
                     " set (don't say which level is which side). Ask for a verdict per level: good, ok,"
@@ -713,8 +725,8 @@ def describe(d):
     return "\n".join(lines)
 
 
-def solve_lines(d):
-    """A solver-net run's evaluation (solve_eval.py's eval/eval.json), for describe()."""
+def goblin_lines(d):
+    """A Goblin run's evaluation (goblin_eval.py's eval/eval.json), for describe()."""
     try:
         e = json.loads((d / "eval" / "eval.json").read_text())
     except (OSError, ValueError):
@@ -761,8 +773,8 @@ def ingame(a):
     """Redo a finished run's Portal 2 steps: check its evaluation, pick checked play-test levels."""
     d = run_dir(a.name)
     s = read_status(d)
-    if s and s.get("task") == "solve":
-        sys.exit(f"runs/{a.name} is a solver-net run: it has no Portal 2 steps")
+    if s and task_name(s.get("task")) == GOBLIN:
+        sys.exit(f"runs/{a.name} is a Goblin run: it has no Portal 2 steps")
     if not s or not (d / "eval" / "samples.jsonl").exists():
         sys.exit(f"runs/{a.name} has no evaluation to check: did it finish?")
     busy = running()
@@ -848,7 +860,7 @@ def resume(a):
                  pause_at=a.pause_after)
     p = detach(d)
     ends = now() + datetime.timedelta(seconds=left)
-    after = 20 if s.get("task") == "solve" else 75
+    after = 20 if task_name(s.get("task")) == GOBLIN else 75
     print(f"resumed runs/{a.name} (pid {p.pid}) after {done:.2f} of {s['hours']} hours of training")
     if a.pause_after is not None:
         print(f"it pauses itself again after {a.pause_after:g} hours of training in all, about "
@@ -860,19 +872,19 @@ def resume(a):
 
 
 def list_runs(a):
-    solve = a.task == "solve"
-    path = ROOT / "train" / ("solver-runs.csv" if solve else "runs.csv")
+    goblin = a.task == GOBLIN
+    path = ROOT / "train" / ("goblin-runs.csv" if goblin else "runs.csv")
     if not path.exists():
         sys.exit(f"{path.relative_to(ROOT).as_posix()} doesn't exist yet: no runs recorded there")
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))[-a.n:]
-    if solve:  # solved%: EVAL solved % (greedy, test-gen), the main score; pass: pass@8
+    if goblin:  # solved%: EVAL solved % (greedy, the headline set), the main score; pass: pass@8
         print(f"{'run':32} {'started':16} {'min':>4} {'solved%':>7} {'pass':>5} {'ws%':>5} {'val':>6}  from / notes")
     else:
         print(f"{'run':32} {'started':16} {'min':>4} {'solv%':>5} {'val':>6} {'ws':>6} {'yield':>5}  from / notes")
     for r in rows:
         notes = (r["init"] + " | " if r["init"] else "") + r["notes"]
-        if solve:
+        if goblin:
             print(f"{r['run'][:32]:32} {r['started']:16} {r['minutes']:>4} {r['eval_solved'] or '-':>7} "
                   f"{r['eval_pass_at_k'] or '-':>5} {r['ws_solved'] or '-':>5} {r['best_val'] or '-':>6}  {notes[:80]}")
         else:
@@ -907,10 +919,10 @@ def main():
     p.add_argument("--hours", type=float, required=True, help="training time (evaluation comes after)")
     p.add_argument("--note", required=True, help="what the run is for (goes in train/runs.csv)")
     p.add_argument("--from", dest="from_", default=None, help="continue from this run (or .pt)")
-    p.add_argument("--task", choices=("levels", "solve"), default="levels",
-                   help="levels: the level-writing net; solve: the solver net (needs data/plans)")
+    p.add_argument("--task", type=task_name, choices=("levels", GOBLIN), default="levels",
+                   help="levels: the level-writing net; goblin: Goblin, the net that writes plans (needs data/goblin)")
     p.add_argument("--data", nargs="+", default=None,
-                   help="default: data/v5b/levels-*.jsonl, or data/plans/train.jsonl for --task solve")
+                   help="default: data/v5b/levels-*.jsonl, or data/goblin/train.jsonl for --task goblin")
     p.add_argument("--vocab", default=None, help="default: vocab.txt beside the first data file")
     p.add_argument("--no-ingame", action="store_true",
                    help="skip the Portal 2 checks. ONLY if the user says the game mustn't be launched")
@@ -940,11 +952,11 @@ def main():
     p.add_argument("--pause-after", type=float, default=None,
                    help="pause again once this many hours of training are done in all")
     p.set_defaults(fn=resume)
-    p = sub.add_parser("list", help="recent runs from train/runs.csv (--task solve: train/solver-runs.csv)")
+    p = sub.add_parser("list", help="recent runs from train/runs.csv (--task goblin: train/goblin-runs.csv)")
     p.add_argument("-n", type=int, default=12)
-    p.add_argument("--task", choices=("levels", "solve"), default="levels")
+    p.add_argument("--task", type=task_name, choices=("levels", GOBLIN), default="levels")
     p.set_defaults(fn=list_runs)
-    p = sub.add_parser("note", help="write a run's conclusion into train/runs.csv (or solver-runs.csv)")
+    p = sub.add_parser("note", help="write a run's conclusion into train/runs.csv (or goblin-runs.csv)")
     p.add_argument("name")
     p.add_argument("text")
     p.set_defaults(fn=note)

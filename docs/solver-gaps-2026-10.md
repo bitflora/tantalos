@@ -156,8 +156,8 @@ Limits:
 - Beams stay horizontal.
 - A plan that uses an angled spot still encodes the cube's facing as its nearest axis
   (`Spot::dir`; the real yaw is in `Spot::aim`). Plan tokens, `glados-score check` and the play
-  harness can't replay those plans yet. That only matters for the solver net's plan data
-  (`train/plans.py`), and only for levels solved through the angled pass.
+  harness can't replay those plans yet. That only matters for Goblin's plan data
+  (`train/goblin_data.py`), and only for levels solved through the angled pass.
 
 ## Turret exposure: tried, not worth it (2026-10-22)
 
@@ -322,7 +322,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     or a cell further out, `loop_falls`), walk in and fall back through at the speed of that
     fall, flying out of the other portal or (`refire`) of a face the player shoots on the way
     down from where they walked in. Not grounded by `glados-score route` yet (no plan word, no play
-    harness leg), so such plans are left out of solver-net data.
+    harness leg), so such plans are left out of Goblin's data.
   - The dropper's cube falls into goo in an alcove; the player catches it from the floor
     beside its fall. A dropper's cube that would fall into goo now lies in such a floor's
     region.

@@ -1,4 +1,4 @@
-"""Keep train/runs.csv (and train/solver-runs.csv): one row per training run, with its
+"""Keep train/runs.csv (and train/goblin-runs.csv): one row per training run, with its
 settings, results and notes.
 
     python train/record.py runs/v3c                       # add or refresh a run's row
@@ -9,9 +9,10 @@ goes: settings and losses after training, validity after evaluating, game-valid 
 the in-game check. Refreshing a row keeps its notes. A run started with `train.py --note` gets
 that note if its row has none yet.
 
-A solver-net run (train.py --task solve) gets its row in train/solver-runs.csv instead, with
-its own result columns (SOLVER_FIELDS): train_* from the eval during training, eval_* from
-solve_eval.py's headline set (test-gen; eval_solved is the greedy solved share, the main
+A Goblin run (train.py --task goblin; Goblin is the net that reads a level and writes its
+plan, called the solver net and task "solve" before 2026-10-27) gets its row in
+train/goblin-runs.csv instead, with its own result columns (GOBLIN_FIELDS): train_* from the
+eval during training, eval_* from goblin_eval.py's headline set (test-gen; eval_solved is the greedy solved share, the main
 score), and the greedy solved shares of its other sets.
 
 Everything else comes from the run directory: <run>/run.json (written by train.py at the
@@ -64,9 +65,9 @@ FIELDS = [
     "game_valid_of_solvable",
     "notes",
 ]
-SOLVER_CSV = ROOT / "train" / "solver-runs.csv"
+GOBLIN_CSV = ROOT / "train" / "goblin-runs.csv"
 SETTINGS = FIELDS[: FIELDS.index("train_parsed")]
-SOLVER_FIELDS = SETTINGS + [
+GOBLIN_FIELDS = SETTINGS + [
     "train_parsed",
     "train_solved",
     "eval_n",
@@ -79,14 +80,23 @@ SOLVER_FIELDS = SETTINGS + [
     "published_liberal_solved",
     "notes",
 ]
-# solve_eval.py's other sets, and the column of each one's greedy solved share.
-SOLVER_SETS = {"test-ws": "ws_solved", "published": "published_solved",
+# goblin_eval.py's other sets, and the column of each one's greedy solved share.
+GOBLIN_SETS = {"test-ws": "ws_solved", "published": "published_solved",
                "published-liberal": "published_liberal_solved"}
+
+
+GOBLIN = "goblin"
+
+
+def task_name(task):
+    """A run's task as it's called now: "goblin" for the old name "solve" (runs, checkpoints and
+    eval files from before 2026-10-27 keep it), "levels" when there is none."""
+    return GOBLIN if task in (GOBLIN, "solve") else (task or "levels")
 
 
 def table(task):
     """(CSV file, its fields) for a run of `task`."""
-    return (SOLVER_CSV, SOLVER_FIELDS) if task == "solve" else (CSV, FIELDS)
+    return (GOBLIN_CSV, GOBLIN_FIELDS) if task_name(task) == GOBLIN else (CSV, FIELDS)
 
 
 def key(run):
@@ -183,7 +193,7 @@ def measure(run):
 
     args, cfg, step = checkpoint_info(run)
     # Which CSV the row goes in: the checkpoint says, or run.json before there is one.
-    row["task"] = args.get("task") or meta.get("task") or "levels"
+    row["task"] = task_name(args.get("task") or meta.get("task"))
     if args:
         base = checkout(run)
         row["data"] = short_paths(args.get("data", []), base)
@@ -214,7 +224,7 @@ def measure(run):
         if s:
             row["train_parsed"] = pct(s["parsed"])
             row["train_solvable"] = pct(s["solvable"])
-        s = entries[-1].get("solve")
+        s = entries[-1].get("goblin") or entries[-1].get("solve")
         if s:
             row["train_parsed"] = pct(s["parsed"])
             row["train_solved"] = pct(s["solved"])
@@ -232,14 +242,14 @@ def measure(run):
     ev = run / "eval" / "eval.json"
     if ev.exists():
         e = json.loads(ev.read_text())
-        if e.get("task") == "solve":
+        if task_name(e.get("task")) == GOBLIN:
             h = e["headline"]
             row["eval_n"] = e["sets"][h["set"]]["n"]
             row["eval_parsed"] = pct(h["parsed"])
             row["eval_solved"] = pct(h["solved"])
             row["eval_pass_at_k"] = pct(h["pass_at_k"])
             row["eval_optimal"] = pct(h["optimal"])
-            for name, field in SOLVER_SETS.items():
+            for name, field in GOBLIN_SETS.items():
                 if name in e["sets"]:
                     row[field] = pct(e["sets"][name]["solved"])
         else:
@@ -272,7 +282,7 @@ def save_rows(rows, path=CSV, fields=FIELDS):
 
 
 def update(run, note=None):
-    """Add or refresh `run`'s row (in runs.csv, or solver-runs.csv for a solve run). `note`
+    """Add or refresh `run`'s row (in runs.csv, or goblin-runs.csv for a Goblin run). `note`
     replaces its notes; without one they're kept. Returns the row, with `task` added."""
     row, run_note = measure(run)
     path, fields = table(row["task"])
@@ -328,7 +338,7 @@ def main():
         ap.error("--note goes with one run")
     for run in a.runs:
         r = update(run, a.note)
-        score = (f"eval solved {r['eval_solved'] or '-'}" if r["task"] == "solve"
+        score = (f"eval solved {r['eval_solved'] or '-'}" if r["task"] == GOBLIN
                  else f"eval solvable {r['eval_solvable'] or '-'}")
         print(f"{r['run']}: {r['steps']} steps, val {r['best_val']}, {score}")
 

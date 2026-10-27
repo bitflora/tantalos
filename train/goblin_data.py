@@ -1,7 +1,7 @@
-"""Training data for the solver net: levels with the solver's plans, as plan tokens.
+"""Training data for Goblin (the net that writes plans): levels with the solver's plans, as plan tokens.
 
-    .venv/Scripts/python train/plans.py                  # every source, into data/plans/
-    .venv/Scripts/python train/plans.py --limit 2000 --out data/plans-try
+    .venv/Scripts/python train/goblin_data.py              # every source, into data/plans/
+    .venv/Scripts/python train/goblin_data.py --limit 2000 --out data/plans-try
 
 Solves the solvable levels of the usual data files again with `glados-score score --plan-only` (the
 solver throws its plans away when it labels data, so they are found again) and keeps the ones

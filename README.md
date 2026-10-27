@@ -380,7 +380,7 @@ sums one up. `--spike` checks the console, VScript, coordinates, movement and th
 instead of playing. It has played batches of generated levels in the game (see
 `out/play/REPORT.md`); `play.Session` lets other scripts drive the game a level at a time.
 
-`glados-score route --plan "TOKENS" FILE` routes a given plan (the solver net's) instead of the
+`glados-score route --plan "TOKENS" FILE` routes a given plan (Goblin's) instead of the
 solver's own. A plan that doesn't solve the level is routed as far as its steps fit, then an
 `attempt` leg tries the step that fits no move (a shot at the face it names, or a walk toward
 the cell); the head line's `net` says what `plan::check` found. play.py plays an attempt leg once
@@ -405,7 +405,7 @@ self-contained copy with the data inlined.
 `glados-view [--roots DIR]... [--port N] [--no-open] [--list]`: `--roots`/`--dir` add scan roots
 (default `fixtures`, `out`, `runs`), `--port` fixes the port (default: any free one), `--no-open`
 doesn't launch the browser, and `--list` just prints what it found. It works the same for a plan
-the Rust solver made (`glados-score route`) and for one the solver net wrote (`glados-score check --route`).
+the Rust solver made (`glados-score route`) and for one Goblin wrote (`glados-score check --route`).
 
 ## Triaging the downloaded Workshop levels
 `glados-workbench` is a local browser app for the levels `tools/workshop/fetch.py` downloaded. It
@@ -427,7 +427,7 @@ object per line, keyed by `workshop_id`):
 - **rating** — your 0–5 stars (0 = not rated).
 - **notes** — free text.
 - **excluded** — keep this level out of the ws5 **test** split. `tools/workshop/ws3.py` moves it
-  to train when it rebuilds `data/ws5`, and `train/plans.py` leaves it out of `data/plans/test-ws.jsonl`.
+  to train when it rebuilds `data/ws5`, and `train/goblin_data.py` leaves it out of `test-ws.jsonl`.
   It can still be used for training.
 
 The annotations are server-side, so agents and other tools read the same store as the browser:
@@ -445,12 +445,12 @@ python tools/workshop/annotations.py --set 100091397 --exclude
 the corpus and annotation summary without starting a server. The level files are never rewritten;
 only the annotation store is.
 
-## Plans as tokens (for a solver net)
+## Plans as tokens (for Goblin, the net that solves levels)
 `src/plan.rs` writes a route as plan tokens, one group per step in the level's own coordinates
 and without the walks: `fire blue 0 5 4 -x fire orange 7 0 1 +x pickup 2 2 1 enter orange
 putdown 2 6 3 exit` is the worked example. `glados-score score --plan` adds each solvable level's
 plan (`"plan"`, or `"plan_error"` when the route can't ground it), and
-`train/plans.py` builds `data/plans/` from the existing data that way. `glados-score check` replays
+`train/goblin_data.py` builds `data/goblin/` from the existing data that way. `glados-score check` replays
 plans a model writes: each step has to fit an action the solver could take next (any face of
 the right face class, any cell of the region it leads to), and the plan has to reach the exit.
 It reports `solved` (with `optimal` when given the level's `min_len`), `illegal` (the step

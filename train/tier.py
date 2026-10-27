@@ -3,10 +3,10 @@ level net is asked for, and when to move up or down.
 
 A tier is a set of the level net's own condition tokens (train/data.py GROUPS): the shortest
 plan's length bucket, the chain-depth bucket and portal trips. Each round samples mostly at the
-current tier, some at the next (so the harvest already holds harder levels when the solver net
+current tier, some at the next (so the harvest already holds harder levels when Goblin
 gets there) and some at the one before.
 
-After a round, `next_tier` looks at how the solver net did on that round's levels at the
+After a round, `next_tier` looks at how Goblin did on that round's levels at the
 current tier: it moves up once the net solves at least UP of them greedily and the level net
 still writes enough of them (YIELD: kept levels per sampled level at the tier), and down when
 the net solves fewer than DOWN.

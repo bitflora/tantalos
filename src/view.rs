@@ -8,7 +8,7 @@
 //!
 //! The page (`viewer.html`, embedded) draws the chamber in oblique 2.5D (Z up) and plays the
 //! route back: the walks, the portals, the cube and the player, driven by the `after` state of
-//! each leg. It works the same for a plan the Rust solver made and for one the solver net wrote.
+//! each leg. It works the same for a plan the Rust solver made and for one Goblin (the plan-writing net) wrote.
 //!
 //! Endpoints:
 //! - `GET /`                    the app (its data placeholder is `null`; it lists from the API)

@@ -17,7 +17,7 @@ The file is the canonical store: `train/workshop-annotations.jsonl`, one object 
      "updated":1792888260}
 
 `rating` is 0 (unrated) or 1-5; `complexity` is the same scale for how complex the level is; `human_solved` means the user solved it by hand. `excluded` means "leave this level out of the ws5 test split";
-`tools/workshop/ws3.py` moves it to train when rebuilding the split, and `train/plans.py`
+`tools/workshop/ws3.py` moves it to train when rebuilding the split, and `train/goblin_data.py`
 leaves it out of `test-ws.jsonl`.
 """
 

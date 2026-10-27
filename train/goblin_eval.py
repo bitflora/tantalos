@@ -1,6 +1,7 @@
-"""Evaluate a solver-net checkpoint (train.py --task solve): how often its plans solve levels.
+"""Evaluate a Goblin checkpoint (train.py --task goblin; the solver net, task "solve", before
+2026-10-27): how often its plans solve levels.
 
-    .venv/Scripts/python train/solve_eval.py runs/solve-fresh-2h/best.pt
+    .venv/Scripts/python train/goblin_eval.py runs/solve-fresh-3h/best.pt
 
 For each level it writes one greedy plan and --k sampled ones, and `glados-score check` replays
 them on our solver's model. The levels:
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from data import BOS, EOS, LEN_BUCKETS, MECHANICS, SEP, len_bucket  # noqa: E402
 from sample import DEFAULT_GLADOS, load_checkpoint  # noqa: E402
 from seeding import resolve  # noqa: E402
+from record import GOBLIN, task_name  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 HEADLINE = "test-gen"
@@ -182,7 +184,7 @@ def pct(x):
 
 
 def report(ck_path, sets, k, seconds):
-    lines = [f"# Solver-net evaluation: {ck_path}", ""]
+    lines = [f"# Goblin evaluation: {ck_path}", ""]
     head = sets.get(HEADLINE)
     if head:
         lines += [f"**Solved (greedy, {HEADLINE}): {pct(head['solved'])}** of {head['n']} levels "
@@ -237,7 +239,8 @@ def pick(records, n, seed):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checkpoint")
-    ap.add_argument("--plans", default="data/plans", help="directory with test-gen.jsonl and test-ws.jsonl")
+    ap.add_argument("--plans", default=None,
+                    help="directory with test-gen.jsonl and test-ws.jsonl (default: data/goblin, else data/plans)")
     ap.add_argument("--published", default="data/ws3/test.jsonl", help="Workshop levels; those with verdict published are used")
     ap.add_argument("--n-gen", type=int, default=1024, help="test-gen levels (0: all)")
     ap.add_argument("--n-ws", type=int, default=0, help="test-ws levels (0: all)")
@@ -257,8 +260,10 @@ def main():
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
     torch.manual_seed(args.seed)
     model, vocab, ck = load_checkpoint(args.checkpoint, device)
-    if ck.get("args", {}).get("task") != "solve":
-        sys.exit(f"{args.checkpoint} isn't a solver net (train.py --task solve)")
+    if task_name(ck.get("args", {}).get("task")) != GOBLIN:
+        sys.exit(f"{args.checkpoint} isn't a Goblin checkpoint (train.py --task goblin)")
+    if args.plans is None:
+        args.plans = "data/goblin" if (ROOT / "data" / "goblin" / "test-gen.jsonl").exists() else "data/plans"
     plans = ROOT / args.plans if not Path(args.plans).is_absolute() else Path(args.plans)
     published = ROOT / args.published if not Path(args.published).is_absolute() else Path(args.published)
 
@@ -291,7 +296,7 @@ def main():
     seconds = time.time() - t0
     head = HEADLINE if HEADLINE in sets else next(iter(sets))
     result = {
-        "task": "solve",
+        "task": GOBLIN,
         "checkpoint": str(args.checkpoint),
         "k": args.k,
         "headline": {"set": head, "solved": sets[head]["solved"], "parsed": sets[head]["parsed"],
