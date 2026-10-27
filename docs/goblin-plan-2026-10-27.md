@@ -12,6 +12,13 @@ So self-play's frontier is the levels the solver calls `uncertain`, and the ones
 liberal model solves (those need Portal 2 to confirm). Every fix to the Rust model raises
 Goblin's ceiling, and the replay buffer is re-checked for free.
 
+That is the first stage only. Later, a win is reaching the exit **in Portal 2**, not passing
+`check`. The Rust model then has two jobs, neither of them judge: the fast simulator that search
+runs in (the game can't branch or run thousands of plans), and a cheap filter that decides which
+plans are worth game time. Where model and game disagree, the game wins: a game-confirmed plan
+the model forbids is a model gap to fix, and a model-checked plan the game rejects is an exploit.
+The architecture changes in "Next" 4 are chosen so the model never becomes a hard ceiling.
+
 Where it started: one run, `solve-fresh-3h` (2026-10-18): 30.6% of test-gen solved greedily
 (pass@8 39.6%), 14.4% of test-ws, 0% of published Workshop levels; val loss still falling.
 54% solved at 3-4 step plans, 23% at 12+; failures mostly `fire`/`walk` steps that fit no move.
@@ -86,11 +93,52 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
      play.py batches with `route --plan --mode liberal`; clean plays become trusted; a failed
      conservative plan is a model exploit (docs/solver-gaps-2026-10.md, tests/playtested.rs, fix,
      re-check the buffer).
-   - **E4 AlphaGo proper** once E2 is stable: a value head (P(solved | level, prefix)) trained on
-     rollouts, best-first/MCTS search over steps with `glados-score env`, the policy trained on
-     the search's plans. Game checks stay on.
+   - **E4 AlphaGo proper** once E2 is stable: the value head and step-level search of "Next" 4
+     (items a and b), the policy trained on the search's plans, the value head on the outcomes.
+     Game checks stay on.
    - **E5 co-training the level net** after several stable rounds: expert iteration on levels
      at Goblin's frontier, rated prompt kept, judged by blind A/B play-tests.
+   - **E6 learned dynamics (MuZero-style)**, only if the game keeps accepting plans the Rust
+     model forbids, and only once there are thousands of clean in-game outcomes: "Next" 4e.
+4. Architecture changes toward AlphaGo (agreed 2026-10-27). Goblin today is a decoder-only
+   transformer (6 layers, 384 wide by default, `--layers 10` for the first run) with a policy
+   only, decoded greedily or best-of-N, no search. In order:
+   - **a. Value head** (with E4). A scalar head on the shared trunk, read at each step boundary
+     (the token before a plan verb, and at `exit`), trained alongside the policy (policy
+     cross-entropy plus value loss, as AlphaGo Zero). Two outputs, because there are two judges:
+     **P(model accepts | level, prefix)**, labelled by `check` on school rollouts (cheap,
+     millions), and **P(game reaches exit | level, prefix)**, labelled only by clean Portal 2
+     plays (expensive, authoritative; a harness failure, play.py's `exec`/`plan?` classes, is
+     not a label). The gap between the two marks likely exploits and picks which plans get game
+     time. Checkpoints without the head load with it freshly initialised.
+   - **b. Step-level search** (with E4). Tree nodes are whole steps (`fire C X Y Z D` is one
+     move, not five tokens). Candidates are the legal steps `glados-score env` lists (E2), plus
+     the policy's own top samples in liberal mode so a step the model forbids can still be
+     tried; prior = summed token log-probabilities of the step, leaves scored by the value head;
+     best-first first, MCTS (PUCT) if best-first stalls. Search runs in the Rust model; the best
+     few plans per level go to the game (E3), and what the game accepts goes to the buffer.
+   - **c. 3D position embeddings** (any time after the first Goblin run, step 2, as an A/B run
+     against it).
+     Today a cell's coordinates are just number tokens with 1D positions; add learned x, y and
+     z embeddings to each coordinate token (and to the plan's cell arguments), so the net knows
+     which cells are neighbours as AlphaGo's convolutions do. Derived at load time by parsing
+     the existing token text (the grammar of `glados-p2c tokens`), so data/goblin is not
+     rebuilt. A 3D-conv or patch encoder in front of the decoder only if the probe still shows
+     spatial mistakes (wrong walls, off-by-one cells) after this.
+   - **d. State tokens** (only if the value head can't learn from history alone). After each
+     step, a few coarse tokens for the state the env reaches: player cell, both portals, held
+     item, powered buttons/lasers. They come from replaying the existing plans through
+     `glados-score env` in `goblin_data.py --assemble` (no re-planning). Kept coarse because
+     they are the model's view: where the model is wrong, so are they; the game outcome stays
+     the label.
+   - **e. Learned dynamics** (E6). The net predicts the next state itself and is trained on
+     game outcomes, the Rust model becoming a prior rather than the simulator, so search can
+     reach plans the model forbids. Needs the data E3 and E4 collect; not before.
+   - Kept as is: x4 symmetry augmentation (AlphaGo used 8), model size (the 4 GB card is the
+     limit, and search buys more than parameters).
+
+None of these needs data/goblin rebuilt: c is parsed from the existing tokens, a and b take
+their labels from school rounds and the game, d is an `--assemble` pass at most.
 
 The reverse generator stays out (pedestals/buttons/goo only, a fixed hall-and-pockets layout
 Goblin would learn shortcuts from). Only if the 12+ bucket stays far behind after step 2: a <= 5%
