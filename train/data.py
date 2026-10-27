@@ -41,7 +41,7 @@ PAD, BOS, SEP, EOS = range(4)
 # an older vocabulary is a prefix of a newer one.
 PLAN_WORDS = ["walk", "fire", "enter", "pickup", "putdown", "toss", "throw", "press", "dash", "knock",
               "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "exit",
-              "fetch", "reach"]
+              "fetch", "reach", "loop", "grab", "double", "sweep"]
 
 LEN_BUCKETS = [(0, 0), (1, 2), (3, 4), (5, 7), (8, 11), (12, 10**9)]
 FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo", "turret", "gel", "wall", "balcony"]

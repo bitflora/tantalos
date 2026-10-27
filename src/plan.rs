@@ -21,8 +21,19 @@
 //! knock X Y Z               a turret's cell
 //! bounce|leap|plate|climb|funnel|ride X Y Z    where the player ends up
 //! dive blue|orange X Y Z    where the player lands, having dived into that floor portal
+//! loop blue|orange [X Y Z D] X Y Z   into that floor portal and back through it from above
+//!                           (optionally moving the other portal to the face X Y Z D on the way
+//!                           down), landing where the last cell is
+//! grab blue|orange X Y Z    reach through that portal for the cube in X Y Z
+//! double X Y Z X Y Z X Y Z  two timed pedestals' cells, pressed in turn, and where the dash ends
+//! sweep X Y Z D             put the held reflection cube into the funnel beside X Y Z, toward D,
+//!                           and run for the exit
 //! exit                      walk out (optional, last)
 //! ```
+//!
+//! `encode` writes a grounded route (the cells the player really walks to). `encode_actions`
+//! writes the solver's actions without a route, for plans the route can't ground: a region's
+//! middle cell for where the player ends up, a face of the right class for a portal.
 //!
 //! `check` replays such a plan on the solver's model: each step has to fit an action the
 //! solver could take next (the face in the action's face class, the cell in the region it
@@ -33,10 +44,10 @@
 use std::collections::HashSet;
 
 use crate::geom::{Cell, Dir};
-use crate::level::CubeKind;
+use crate::level::{CubeKind, Level};
 use crate::regions::Move;
 use crate::route::{Act, Route};
-use crate::solver::{Action, Color, CubeLoc, Model, State};
+use crate::solver::{Action, Color, CubeLoc, Mode, Model, Problem, State};
 use crate::tokens::{dir_token, parse_dir, MAX_NUM};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,14 +71,18 @@ pub enum Step {
     Funnel(Cell),
     Ride(Cell),
     Dive(Color, Cell),
+    Loop(Color, Option<(Cell, Dir)>, Cell),
+    Grab(Color, Cell),
+    Double(Cell, Cell, Cell),
+    Sweep(Cell, Dir),
 }
 
 /// Words plans use beyond the level format's numbers and directions. New words go last, so
 /// older Goblin models' vocabularies stay a prefix (train/data.py `PLAN_WORDS`).
-pub const WORDS: [&str; 21] = [
+pub const WORDS: [&str; 25] = [
     "walk", "fire", "enter", "pickup", "putdown", "toss", "throw", "press", "dash", "knock",
     "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "fetch",
-    "reach",
+    "reach", "loop", "grab", "double", "sweep",
 ];
 
 /// Every word a plan can use (`exit` and the numbers and directions are in `tokens::vocab`
@@ -143,6 +158,148 @@ pub fn encode(route: &Route) -> String {
         before = &leg.after;
     }
     out.join(" ")
+}
+
+/// The solver's `plan` as plan tokens without a route (see the module docs): for the plans
+/// `route` can't ground. `check` takes it back to the same actions, or to ones as good. Where
+/// the player ends up is the region of the state each action leads to (replayed), which can
+/// differ from the one the action names (a loop that comes down where a field moves them on).
+pub fn encode_actions(model: &Model, plan: &[Action]) -> String {
+    let states = crate::metrics::replay_part(model, plan);
+    let mut out: Vec<String> = Vec::new();
+    let mut put = |words: &[&str], cells: &[Cell]| {
+        out.extend(words.iter().map(|w| w.to_string()));
+        for c in cells {
+            out.extend(c.iter().map(|n| n.to_string()));
+        }
+    };
+    let cube = |loc: CubeLoc| cube_cell(model, loc);
+    let face = |class: usize| class_face(model, class);
+    for (i, a) in plan.iter().enumerate() {
+        let after = states.as_ref().map(|s| s[i + 1].region);
+        let at = |r: usize| region_cell(model, after.unwrap_or(r));
+        match *a {
+            Action::Move { to, kind, .. } => {
+                let verb = match kind {
+                    Move::Walk | Move::Drop { .. } | Move::Step | Move::Jump => "walk",
+                    Move::Bounce => "bounce",
+                    Move::Leap => "leap",
+                    Move::Plate => "plate",
+                    Move::Stairs => "climb",
+                    Move::Funnel => "funnel",
+                    Move::Ride => "ride",
+                };
+                put(&[verb], &[at(to)]);
+            }
+            Action::Fire { color, class, .. } => {
+                let (c, d) = face(class);
+                put(&["fire", color_word(color)], &[c]);
+                put(&[dir_token(d)], &[]);
+            }
+            Action::Enter { color } => put(&["enter", color_word(color)], &[]),
+            Action::PickUp { from, .. } => put(&["pickup"], &[cube(from)]),
+            Action::PutDown { at: loc } => {
+                put(&["putdown"], &[cube(loc)]);
+                if let CubeLoc::Spot(k) = loc {
+                    put(&[dir_token(model.beams.spots[k].dir)], &[]);
+                }
+            }
+            Action::Toss { to } => put(&["toss"], &[cube(to)]),
+            Action::Throw { color, to } => put(&["throw", color_word(color)], &[cube(to)]),
+            Action::Press { pedestal } => put(&["press"], &[model.pedestals[pedestal].cell]),
+            Action::Dash { pedestal, to, .. } => {
+                put(&["dash"], &[model.pedestals[pedestal].cell, at(to)])
+            }
+            Action::DoubleDash { first, second, to, .. } => put(
+                &["double"],
+                &[model.pedestals[first].cell, model.pedestals[second].cell, at(to)],
+            ),
+            Action::Fetch { pedestal, from, to, .. } => {
+                put(&["fetch"], &[model.pedestals[pedestal].cell, cube(from), at(to)])
+            }
+            Action::Reach { from, button, .. } => {
+                put(&["reach"], &[model.buttons[button].cell, cube(from)])
+            }
+            Action::Knock { turret } => put(&["knock"], &[model.turrets[turret].cell]),
+            Action::Dive { color, to, .. } => put(&["dive", color_word(color)], &[at(to)]),
+            Action::PortalReach { color, from, .. } => {
+                put(&["grab", color_word(color)], &[cube(from)])
+            }
+            Action::Loop { color, refire, to, .. } => {
+                put(&["loop", color_word(color)], &[]);
+                if let Some(class) = refire {
+                    let (c, d) = face(class);
+                    put(&[], &[c]);
+                    put(&[dir_token(d)], &[]);
+                }
+                put(&[], &[at(to)]);
+            }
+            Action::Sweep { sweep } => {
+                let w = &model.beams.sweeps[sweep];
+                put(&["sweep"], &[w.from]);
+                put(&[dir_token(w.dir)], &[]);
+            }
+        }
+    }
+    out.push("exit".into());
+    out.join(" ")
+}
+
+/// A region's cell for a plan: the one nearest its middle (the first of those, in the
+/// region's order).
+fn region_cell(model: &Model, r: usize) -> Cell {
+    let cells = &model.graph.regions[r].cells;
+    let n = cells.len().max(1) as f64;
+    let mid: [f64; 3] =
+        std::array::from_fn(|a| cells.iter().map(|c| c[a] as f64).sum::<f64>() / n);
+    let d = |c: &Cell| (0..3).map(|a| (c[a] as f64 - mid[a]).powi(2)).sum::<f64>();
+    *cells
+        .iter()
+        .min_by(|x, y| d(x).total_cmp(&d(y)))
+        .expect("a region has cells")
+}
+
+/// A cell that `loc_fits` takes for a cube at `loc`: for a loose cube, a cell of its region
+/// that isn't a button's (where it would count as on the button).
+fn cube_cell(model: &Model, loc: CubeLoc) -> Cell {
+    match loc {
+        CubeLoc::OnButton(b) => model.buttons[b].cell,
+        CubeLoc::Spot(k) => model.spot_cell(k),
+        CubeLoc::Loose(r) => {
+            let mid = region_cell(model, r);
+            let free = |c: &Cell| !model.buttons.iter().any(|b| b.cell == *c);
+            if free(&mid) {
+                return mid;
+            }
+            let d = |c: &Cell| (0..3).map(|a| (c[a] - mid[a]).abs()).sum::<i32>();
+            model.graph.regions[r]
+                .cells
+                .iter()
+                .filter(|c| free(c))
+                .min_by_key(|c| d(c))
+                .copied()
+                .unwrap_or(mid)
+        }
+        // Fizzled, or not put anywhere: any cell does.
+        CubeLoc::Gone | CubeLoc::Held => region_cell(model, 0),
+    }
+}
+
+/// A face of class `class`, one in no other class if there is one.
+fn class_face(model: &Model, class: usize) -> (Cell, Dir) {
+    let faces = &model.portals.classes[class].faces;
+    let only = |f: &&(Cell, Dir)| {
+        !model
+            .portals
+            .classes
+            .iter()
+            .any(|c| c.id != class && c.faces.contains(*f))
+    };
+    *faces
+        .iter()
+        .find(only)
+        .or(faces.first())
+        .expect("a class has faces")
 }
 
 struct Reader<'a> {
@@ -227,6 +384,22 @@ pub fn decode(text: &str) -> Result<Vec<Step>, String> {
             "funnel" => Step::Funnel(r.cell()?),
             "ride" => Step::Ride(r.cell()?),
             "dive" => Step::Dive(r.color()?, r.cell()?),
+            "loop" => {
+                let color = r.color()?;
+                let first = r.cell()?;
+                // A direction after the first cell: that cell is the face the other portal
+                // moves to, and the landing comes next.
+                match r.words.get(r.at).and_then(|t| parse_dir(t)) {
+                    Some(d) => {
+                        r.at += 1;
+                        Step::Loop(color, Some((first, d)), r.cell()?)
+                    }
+                    None => Step::Loop(color, None, first),
+                }
+            }
+            "grab" => Step::Grab(r.color()?, r.cell()?),
+            "double" => Step::Double(r.cell()?, r.cell()?, r.cell()?),
+            "sweep" => Step::Sweep(r.cell()?, r.dir()?),
             "exit" if r.at == r.words.len() => break,
             "exit" => return r.fail("exit before the end".into()),
             t => return r.fail(format!("expected a step, found {t:?}")),
@@ -261,6 +434,49 @@ pub struct Checked {
 /// to the same region, one of which fizzles the cube; a dash that ends in different states),
 /// and every way through the plan so far is followed until one reaches the goal.
 const CHECK_FRONTIER: usize = 100_000;
+
+/// `check` on a level's model, and for a plan that fails there, again on the model with angled
+/// laser spots for reflection cubes (`Model::new_angled`, made the first time it's needed):
+/// the two the solver itself tries such a level with.
+pub struct Checker<'a> {
+    level: &'a Level,
+    mode: Mode,
+    pub model: Model,
+    angled: Option<Option<Model>>,
+}
+
+impl<'a> Checker<'a> {
+    pub fn new(level: &'a Level, mode: Mode) -> Result<Checker<'a>, Vec<Problem>> {
+        Ok(Checker {
+            level,
+            mode,
+            model: Model::new(level, mode)?,
+            angled: None,
+        })
+    }
+
+    /// What `check` found, and the model it was found on.
+    pub fn check(&mut self, steps: &[Step]) -> (Checked, &Model) {
+        let c = check(&self.model, steps);
+        if c.solved || !self.model.could_angle() {
+            return (c, &self.model);
+        }
+        let (level, mode) = (self.level, self.mode);
+        let angled = self
+            .angled
+            .get_or_insert_with(|| Model::new_angled(level, mode).ok());
+        match angled.as_ref() {
+            Some(a) => {
+                let ca = check(a, steps);
+                if ca.solved {
+                    return (ca, a);
+                }
+            }
+            None => {}
+        }
+        (c, &self.model)
+    }
+}
 
 /// Replays `steps` on `model` (see the module docs). Follows every state the steps so far can
 /// lead to, step by step, so an ambiguous step can be settled by any later one.
@@ -367,6 +583,13 @@ pub fn step_text(step: &Step) -> String {
         Step::Funnel(x) => format!("funnel {}", c(x)),
         Step::Ride(x) => format!("ride {}", c(x)),
         Step::Dive(k, x) => format!("dive {} {}", color_word(*k), c(x)),
+        Step::Loop(k, None, x) => format!("loop {} {}", color_word(*k), c(x)),
+        Step::Loop(k, Some((f, d)), x) => {
+            format!("loop {} {} {} {}", color_word(*k), c(f), dir_token(*d), c(x))
+        }
+        Step::Grab(k, x) => format!("grab {} {}", color_word(*k), c(x)),
+        Step::Double(x, y, z) => format!("double {} {} {}", c(x), c(y), c(z)),
+        Step::Sweep(x, d) => format!("sweep {} {}", c(x), dir_token(*d)),
     }
 }
 
@@ -392,6 +615,10 @@ pub fn step_verb(step: &Step) -> &'static str {
         Step::Funnel(_) => "funnel",
         Step::Ride(_) => "ride",
         Step::Dive(..) => "dive",
+        Step::Loop(..) => "loop",
+        Step::Grab(..) => "grab",
+        Step::Double(..) => "double",
+        Step::Sweep(..) => "sweep",
     }
 }
 
@@ -437,6 +664,27 @@ fn fits(model: &Model, s: &State, a: &Action, next: &State, step: &Step) -> bool
         }
         (Step::Knock(c), Action::Knock { turret }) => model.turrets[turret].cell == c,
         (Step::Dive(k, c), Action::Dive { color, .. }) => k == color && lands(&c),
+        (Step::Loop(k, face, c), Action::Loop { color, refire, .. }) => {
+            k == color
+                && lands(&c)
+                && match (face, refire) {
+                    (None, None) => true,
+                    (Some(f), Some(class)) => model.portals.has_face(class, f),
+                    _ => false,
+                }
+        }
+        (Step::Grab(k, c), Action::PortalReach { color, from, .. }) => {
+            k == color && loc_fits(model, from, c, None, None)
+        }
+        (Step::Double(p, q, end), Action::DoubleDash { first, second, escaped, .. }) => {
+            model.pedestals[first].cell == p
+                && model.pedestals[second].cell == q
+                && (escaped || lands(&end))
+        }
+        (Step::Sweep(c, d), Action::Sweep { sweep }) => {
+            let w = &model.beams.sweeps[sweep];
+            w.from == c && w.dir == d
+        }
         _ => false,
     }
 }
@@ -453,8 +701,14 @@ fn loc_fits(
 ) -> bool {
     match loc {
         CubeLoc::OnButton(b) => model.buttons[b].cell == cell,
+        // Only a reflection cube's facing matters at a spot: any other cube there just stands
+        // in the beam, whichever of the cell's spots the solver happened to put it on (that
+        // choice depends on which way round the level is built).
         CubeLoc::Spot(k) => {
-            model.spot_cell(k) == cell && dir.is_none_or(|d| d == model.beams.spots[k].dir)
+            model.spot_cell(k) == cell
+                && dir.is_none_or(|d| {
+                    d == model.beams.spots[k].dir || kind.is_some_and(|k| k != CubeKind::Reflection)
+                })
         }
         CubeLoc::Loose(r) => {
             model.graph.region_of(cell) == Some(r)

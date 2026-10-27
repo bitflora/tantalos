@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use crate::editor::editor_flags;
 use crate::level::{ItemKind, Level};
 use crate::p2c::Puzzle;
+use crate::plan::{self, Step};
 use crate::tokens::{self, dir_token, parse_dir};
 
 /// One of the 8 symmetries: mirror x (if `mirror`), then `turns` quarter turns about +z
@@ -373,6 +374,46 @@ pub fn variant(p: &Puzzle, sym: Sym) -> Result<(Puzzle, Vec<String>), String> {
     }
     moved_level(&a, &b, sym).map_err(|e| format!("geometry in {name}: {e}"))?;
     Ok((q, toks))
+}
+
+/// A plan for a chamber of `size` (plan tokens, `plan.rs`) moved by `sym`, for the moved level:
+/// every cell and direction mapped. A trailing `exit` stays.
+pub fn apply_plan(text: &str, sym: Sym, size: [i32; 3]) -> Result<String, String> {
+    let c = |x: Cell| sym.cell(x, size);
+    let d = |x: Dir| sym.dir(x);
+    let steps: Vec<Step> = plan::decode(text)?
+        .into_iter()
+        .map(|s| match s {
+            Step::Walk(x) => Step::Walk(c(x)),
+            Step::Fire(k, x, e) => Step::Fire(k, c(x), d(e)),
+            Step::Enter(k) => Step::Enter(k),
+            Step::PickUp(x) => Step::PickUp(c(x)),
+            Step::PutDown(x, e) => Step::PutDown(c(x), e.map(d)),
+            Step::Toss(x) => Step::Toss(c(x)),
+            Step::Throw(k, x) => Step::Throw(k, c(x)),
+            Step::Press(x) => Step::Press(c(x)),
+            Step::Dash(x, y) => Step::Dash(c(x), c(y)),
+            Step::Fetch(x, y, z) => Step::Fetch(c(x), c(y), c(z)),
+            Step::Reach(x, y) => Step::Reach(c(x), c(y)),
+            Step::Knock(x) => Step::Knock(c(x)),
+            Step::Bounce(x) => Step::Bounce(c(x)),
+            Step::Leap(x) => Step::Leap(c(x)),
+            Step::Plate(x) => Step::Plate(c(x)),
+            Step::Climb(x) => Step::Climb(c(x)),
+            Step::Funnel(x) => Step::Funnel(c(x)),
+            Step::Ride(x) => Step::Ride(c(x)),
+            Step::Dive(k, x) => Step::Dive(k, c(x)),
+            Step::Loop(k, f, x) => Step::Loop(k, f.map(|(y, e)| (c(y), d(e))), c(x)),
+            Step::Grab(k, x) => Step::Grab(k, c(x)),
+            Step::Double(x, y, z) => Step::Double(c(x), c(y), c(z)),
+            Step::Sweep(x, e) => Step::Sweep(c(x), d(e)),
+        })
+        .collect();
+    let mut out: Vec<String> = steps.iter().map(plan::step_text).collect();
+    if text.split_whitespace().last() == Some("exit") {
+        out.push("exit".into());
+    }
+    Ok(out.join(" "))
 }
 
 /// The editor flags' item names and rules, sorted (their positions move).

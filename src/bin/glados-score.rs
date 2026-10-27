@@ -29,15 +29,19 @@ const USAGE: &str = "usage:
                                 optionally \"min_len\", from FILE or stdin; one JSON line per
                                 input, with a \"results\" list of one verdict per plan, in order
                                 (solved, illegal, unfinished, unknown, unparsed, invalid,
-                                unsupported). --route DIR: NNNNN.p2c and NNNNN.route.jsonl (as
+                                unsupported). A plan that fails is checked again with angled
+                                laser spots, as the solver retries such levels.
+                                --route DIR: NNNNN.p2c and NNNNN.route.jsonl (as
                                 route writes) for the first solved plan of a line
-  glados-score route [--plan TOKENS] <file.p2c>
+  glados-score route [--plan TOKENS [--mode conservative|liberal]] <file.p2c>
                                 the conservative plan made concrete for playing it in the game:
                                 where to stand, look, fire and walk (JSON lines, src/route.rs).
                                 --plan: route that plan instead (plan tokens, src/plan.rs); one
                                 that doesn't solve the level is routed as far as its steps fit,
                                 then an \"attempt\" leg tries the step that fits no move, and
-                                the head line's \"net\" says what the check found";
+                                the head line's \"net\" says what the check found. --mode
+                                liberal: check and route the plan by the liberal rules (a plan
+                                only they allow, to try in the game)";
 
 fn main() -> ExitCode {
     cli::main(USAGE, |args| match args.first().map(String::as_str) {
@@ -50,30 +54,43 @@ fn main() -> ExitCode {
 
 fn run_route(args: &[String]) -> Result<()> {
     let mut plan = None;
+    let mut mode = Mode::Conservative;
     let mut rest = Vec::new();
     for (flag, value) in flags(args, &mut rest)? {
         match flag {
             "--plan" => plan = Some(value),
+            "--mode" => {
+                mode = match value {
+                    "conservative" => Mode::Conservative,
+                    "liberal" => Mode::Liberal,
+                    _ => return Err(format!("--mode: conservative or liberal, not {value}").into()),
+                }
+            }
             _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
         }
     }
+    if plan.is_none() && mode == Mode::Liberal {
+        return Err("--mode liberal goes with --plan (the solver's own route is conservative)".into());
+    }
     match rest.as_slice() {
-        [file] => print_route(Path::new(file), plan),
+        [file] => print_route(Path::new(file), plan, mode),
         _ => Err(format!("route takes one .p2c file\n{USAGE}").into()),
     }
 }
 
-/// `route FILE [--plan TOKENS]`: the solver's plan, or the given one, made concrete.
+/// `route FILE [--plan TOKENS [--mode M]]`: the solver's plan, or the given one, made concrete.
 /// A given plan that doesn't solve the level is routed as far as it fits, then a try at the
-/// step that fits no move; the head line says what its check found (`"net"`).
-fn print_route(path: &Path, plan: Option<&str>) -> Result<()> {
+/// step that fits no move; the head line says what its check found (`"net"`). `mode`: the
+/// rules the given plan is checked and routed by (liberal: a plan only those rules allow, to
+/// be tried in the game).
+fn print_route(path: &Path, plan: Option<&str>, mode: Mode) -> Result<()> {
     let (_, puzzle) = load(path)?;
     let level = Level::from_puzzle(&puzzle);
     let at = |e: String| format!("{}: {e}", path.display());
     let r = match plan {
         None => route::route(&level, DEFAULT_MAX_STATES).map_err(at)?,
         Some(text) => {
-            let model = Model::new(&level, Mode::Conservative).map_err(|p| at(format!("{p:?}")))?;
+            let model = Model::new(&level, mode).map_err(|p| at(format!("{p:?}")))?;
             let (verdict, steps, mut r) = match plan::decode(text) {
                 Err(e) => {
                     let mut r = route::route_prefix(&level, &model, &[], None).map_err(at)?;
@@ -311,7 +328,7 @@ fn run_check(args: &[String]) -> Result<()> {
             Err(e) => return fail(n, "unparsed", &format!("level: {e}")),
         };
         let level = Level::from_puzzle(&puzzle);
-        let model = match Model::new(&level, mode) {
+        let mut checker = match plan::Checker::new(&level, mode) {
             Ok(m) => m,
             Err(problems) => {
                 let invalid = problems.iter().any(|p| matches!(p, Problem::Invalid(_)));
@@ -332,7 +349,7 @@ fn run_check(args: &[String]) -> Result<()> {
                     continue;
                 }
             };
-            let c = plan::check(&model, &steps);
+            let (c, used) = checker.check(&steps);
             // `steps_ok` is measured against `steps.len()`, so a plan that fits whole and
             // still doesn't reach the goal is unfinished, budget or not.
             let verdict = if c.solved {
@@ -363,7 +380,7 @@ fn run_check(args: &[String]) -> Result<()> {
                 json.push_str(&format!(",\"problem\":{}", dataset::json_str(why)));
             }
             if c.solved && want_route && routed.is_none() {
-                match route::route_plan(&level, &model, &c.plan) {
+                match route::route_plan(&level, used, &c.plan) {
                     Ok(r) => {
                         let lines = r.json_lines(puzzle.title(), level.size);
                         routed = Some((puzzle.clone(), lines));

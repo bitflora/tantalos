@@ -5,10 +5,10 @@ use glados::fixtures;
 use glados::generator::Genome;
 use glados::level::Level;
 use glados::p2c::Puzzle;
-use glados::plan::{check, decode, encode, step_text, vocab, Step};
+use glados::plan::{check, decode, encode, encode_actions, step_text, vocab, Step};
 use glados::rng::Rng;
 use glados::route::{route, route_plan, route_prefix};
-use glados::solver::{Mode, Model, Verdict};
+use glados::solver::{Action, Mode, Model, Verdict};
 
 const BUDGET: usize = 50_000;
 
@@ -95,6 +95,60 @@ fn shortest_plans_all_solve() {
     assert!(more > 15, "only {more} levels with more than one shortest plan");
 }
 
+/// Levels whose shortest plans need an action the route can't ground yet (data/v5b and
+/// data/ws5, 2026-10-27), and the step `encode_actions` writes for it.
+const UNGROUNDED: [(&str, &str); 4] = [
+    // A portal loop: into the floor portal, back down through it from the wall.
+    ("size 16 17 21 open 0 5 0 14 16 20 15 13 3 15 14 3 0 0 4 2 16 11 white +y 1 16 9 1 16 9       white -z 12 5 0 15 9 20 1 8 0 1 15 20 entry 13 16 0 -y exit 1 0 4 +y gel 13 8 0 +z bounce       stream on", "loop"),
+    // A loop that moves the other portal on the way down.
+    ("size 3 26 25 open 0 9 0 2 11 24 0 0 1 2 24 24 1 25 2 2 25 2 goo 0 5 0 2 7 0 white +x 2 12       21 2 16 23 white +y 1 24 5 1 25 5 1 24 19 1 25 19 white -z 0 9 0 2 25 1 entry 0 23 1 +x       exit 1 0 1 +y turret 0 22 1 3 panel 1 24 5 -y -z 3 on", "loop"),
+    // Reaching through a portal for the cube on a button.
+    ("size 11 8 5 open 4 0 0 5 1 4 6 0 0 6 0 4 2 3 0 5 4 4 0 0 2 7 7 4 9 0 2 10 7 4 8 6 2 10 7 4       white -x 0 7 2 10 7 4 white +y 4 1 0 10 3 4 white -y 4 0 0 5 4 0 2 3 0 10 4 0 3 3 1 10 4 4       entry 0 2 2 +x exit 10 7 2 -y fizzler 1 7 2 -y +z 2 on fizzler 9 7 2 -y +z 1 on dropper 5       3 4 reflection dropper 7 1 4 reflection button 2 5 2 weighted > exit button 5 0 0       weighted > field 0 button 7 0 2 weighted > exit pedestal 2 1 2 3 > field 1 funnel 2 0 2       +y on", "grab"),
+    // Two timed pedestals pressed in turn.
+    ("size 5 7 8 open 4 4 1 4 4 7 0 0 2 2 6 7 3 0 2 4 3 7 4 5 2 4 6 7 3 4 5 4 6 7 white -x 0 0 2       4 1 5 0 2 3 4 2 5 white +y 3 3 2 4 5 3 white -y 3 0 2 4 6 3 white -z 2 0 2 3 5 7 entry 4 6       2 -x exit 0 2 2 +x laserfield 3 3 2 -y +z 2 on dropper 3 6 7 companion pedestal 0 4 2 15       > exit pedestal 1 5 2 inf > exit pedestal 2 0 2 10 > glasspanel 0 turret 1 1 2 0 plate 2       3 2 +z 1 3 2 +z plate 4 5 2 +z 3 2 2 +z glasspanel 0 6 2 +z -y 6 off", "double"),
+];
+
+/// `encode_actions` writes plans the route can't ground (loops, reaching through a portal,
+/// double dashes) and every plan it can: decoded, they check as solved at the same length, and
+/// read back to the same tokens.
+#[test]
+fn plans_encode_from_actions() {
+    for (i, (text, verb)) in UNGROUNDED.iter().enumerate() {
+        let p = glados::tokens::decode(text).unwrap_or_else(|e| panic!("level {i}: {e}"));
+        let level = Level::from_puzzle(&p);
+        let model = Model::new(&level, Mode::Conservative).unwrap();
+        let (outcome, found) = model.shortest_plans(500_000, 8, 1);
+        assert!(matches!(outcome.verdict, Verdict::Solved(_)), "level {i}");
+        let mut used = false;
+        for plan in &found {
+            let tokens = encode_actions(&model, plan);
+            let steps = decode(&tokens).unwrap_or_else(|e| panic!("level {i}: {e}: {tokens}"));
+            let back: Vec<String> = steps.iter().map(step_text).collect();
+            assert_eq!(back.join(" ") + " exit", tokens, "level {i}");
+            let c = check(&model, &steps);
+            assert!(c.solved, "level {i}: {tokens}: {:?}", c.problem);
+            assert_eq!(c.plan.len(), plan.len(), "level {i}: {tokens}");
+            let ungrounded = plan.iter().any(|a| {
+                matches!(a, Action::Loop { .. } | Action::PortalReach { .. } | Action::DoubleDash { .. })
+            });
+            if ungrounded {
+                assert!(route_plan(&level, &model, plan).is_err(), "level {i}: grounds now: drop it here");
+                assert!(tokens.split(' ').any(|w| w == *verb), "level {i}: no {verb}: {tokens}");
+                used = true;
+            }
+        }
+        assert!(used, "level {i}: no shortest plan needs {verb}");
+    }
+    for (name, level, _, len) in plans() {
+        let model = Model::new(&level, Mode::Conservative).unwrap();
+        let Verdict::Solved(own) = model.solve(BUDGET).verdict else { unreachable!() };
+        let tokens = encode_actions(&model, &own);
+        let c = check(&model, &decode(&tokens).unwrap());
+        assert!(c.solved, "{name}: {tokens}: {:?}", c.problem);
+        assert_eq!(c.plan.len(), len, "{name}");
+    }
+}
+
 /// A cell no level here reaches.
 const NOWHERE: [i32; 3] = [31, 31, 31];
 
@@ -151,6 +205,10 @@ fn decoder_rejects_garbage() {
         "exit walk 1 2 3",
         "size 8 8 6",
         "putdown 1 2 3 +q",
+        "loop blue 1 2 3 +x",
+        "grab 1 2 3",
+        "double 1 2 3 4 5 6",
+        "sweep 1 2 3",
     ] {
         assert!(decode(bad).is_err(), "{bad:?} decoded");
     }
@@ -159,6 +217,14 @@ fn decoder_rejects_garbage() {
     assert_eq!(
         decode("putdown 1 2 3 +x enter blue exit").unwrap().len(),
         2
+    );
+    // A loop's optional face: a direction after the first cell.
+    assert_eq!(
+        decode("loop blue 1 2 3 +x 4 5 6 loop orange 7 8 9 exit").unwrap(),
+        vec![
+            Step::Loop(glados::solver::Color::Blue, Some(([1, 2, 3], glados::geom::Dir::PosX)), [4, 5, 6]),
+            Step::Loop(glados::solver::Color::Orange, None, [7, 8, 9]),
+        ]
     );
 }
 

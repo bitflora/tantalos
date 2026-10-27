@@ -1614,7 +1614,11 @@ impl<'a> Grounder<'a> {
             | Step::Climb(c)
             | Step::Funnel(c)
             | Step::Ride(c)
-            | Step::Dive(_, c) => {
+            | Step::Dive(_, c)
+            | Step::Loop(_, _, c)
+            | Step::Grab(_, c)
+            | Step::Double(c, _, _)
+            | Step::Sweep(c, _) => {
                 target = Some(c);
                 // The reachable cell nearest the target (height counts double: a cell under a
                 // ledge isn't near the top of it).

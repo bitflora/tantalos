@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use glados::cli::{self, flags, parse, Result};
-use glados::{augment, dataset, editor, level, mutate, tokens};
+use glados::{augment, dataset, editor, level, mutate, plan, tokens};
 
 const USAGE: &str = "usage:
   glados-data dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
@@ -22,15 +22,19 @@ const USAGE: &str = "usage:
                                 and differ from their parent, as JSONL with \"mutated_from\"
                                 (the parent's workshop_id, or its line) and \"edits\".
                                 --give-up N: drop a level with no mutant after N tries
-  glados-data augment [--syms r0,r90,...|all] [--check] [--budget N] [--editor-rules on|off]
-                      [--threads N] [--out FILE] [FILE]
+  glados-data augment [--syms r0,r90,...|all] [--check] [--plans] [--budget N]
+                      [--editor-rules on|off] [--threads N] [--out FILE] [FILE]
                                 the 8 mirrored/turned versions of each level of FILE (JSONL
                                 with \"tokens\", or stdin; src/augment.rs), one JSON line each:
                                 \"line\" (1-based), \"variant\" (r0 = the level itself, re-encoded),
                                 \"tokens\", \"n_tokens\", or \"error\". A version with the same tokens
                                 as an earlier one is left out. --check: label the level and each
                                 version (default budget 50000, editor rules off) and add both
-                                labels (\"a\", \"b\") and editor flag rules (\"editor_a\", \"editor_b\")";
+                                labels (\"a\", \"b\") and editor flag rules (\"editor_a\", \"editor_b\").
+                                --plans: move the line's plan tokens too (\"plan\", \"plans\",
+                                \"alt_plans\"; src/plan.rs) and keep each moved plan only if
+                                `check` solves the moved level with it; a version none of whose
+                                plans survive is an error (\"plans fail\")";
 
 fn main() -> ExitCode {
     cli::main(USAGE, |args| match args.first().map(String::as_str) {
@@ -169,7 +173,7 @@ fn run_mutate(args: &[String]) -> Result<()> {
 
 fn run_augment(args: &[String]) -> Result<()> {
     let mut syms = augment::Sym::ALL.to_vec();
-    let (mut check, mut budget, mut editor_rules) = (false, 50_000, false);
+    let (mut check, mut budget, mut editor_rules, mut with_plans) = (false, 50_000, false, false);
     let mut out_path = None;
     let mut threads = cli::threads();
     let mut rest = Vec::new();
@@ -177,6 +181,8 @@ fn run_augment(args: &[String]) -> Result<()> {
     for a in args {
         if a == "--check" {
             check = true;
+        } else if a == "--plans" {
+            with_plans = true;
         } else {
             rest.push(a.clone());
         }
@@ -211,23 +217,55 @@ fn run_augment(args: &[String]) -> Result<()> {
         let l = dataset::label_with(p, budget, 1, editor_rules);
         (format!("{{{}}}", l.json_fields()), format!("[{}]", flags.join(",")))
     };
+    // The line's plans, by field: moved by `sym` and kept if they solve the moved level `q`.
+    // (field, kept plans) per field the line has, and how many were dropped.
+    let move_plans = |line: &str, size: [i32; 3], q: &glados::p2c::Puzzle, sym: augment::Sym| {
+        let level = level::Level::from_puzzle(q);
+        let mut checker = plan::Checker::new(&level, glados::solver::Mode::Conservative).ok();
+        let mut fields = Vec::new();
+        let mut dropped = 0;
+        for key in ["plan", "plans", "alt_plans"] {
+            let texts = if key == "plan" {
+                mutate::json_field(line, key).map(|p| vec![p])
+            } else {
+                mutate::json_array(line, key)
+            };
+            let Some(texts) = texts else { continue };
+            let mut kept = Vec::new();
+            for t in texts {
+                let ok = augment::apply_plan(&t, sym, size).ok().filter(|m| {
+                    let steps = plan::decode(m).unwrap_or_default();
+                    checker.as_mut().is_some_and(|c| c.check(&steps).0.solved)
+                });
+                match ok {
+                    Some(m) => kept.push(m),
+                    None => dropped += 1,
+                }
+            }
+            fields.push((key, kept));
+        }
+        (fields, dropped)
+    };
     let start = std::time::Instant::now();
     let (mut levels, mut written, mut errors, mut same) = (0, 0, 0, 0);
+    let mut plans_dropped = 0;
     dataset::par_map_ordered(
         lines,
         threads,
-        |(i, line)| -> std::io::Result<Vec<String>> {
+        |(i, line)| -> std::io::Result<(Vec<String>, usize)> {
             let line = line?;
             let Some(toks) = mutate::json_field(&line, "tokens") else {
-                return Ok(vec![format!("{{\"line\":{i},\"error\":\"no tokens\"}}")]);
+                return Ok((vec![format!("{{\"line\":{i},\"error\":\"no tokens\"}}")], 0));
             };
             let original = match tokens::decode(&toks) {
                 Ok(p) => p,
-                Err(e) => return Ok(vec![format!("{{\"line\":{i},\"error\":{}}}", dataset::json_str(&e))]),
+                Err(e) => return Ok((vec![format!("{{\"line\":{i},\"error\":{}}}", dataset::json_str(&e))], 0)),
             };
             let base = check.then(|| label(&original));
+            let size = level::Level::from_puzzle(&original).size;
             let mut seen = std::collections::HashSet::new();
             let mut rows = Vec::new();
+            let mut dropped = 0;
             for &sym in &syms {
                 let head = format!("{{\"line\":{i},\"variant\":\"{}\"", sym.name());
                 match augment::variant(&original, sym) {
@@ -242,6 +280,22 @@ fn run_augment(args: &[String]) -> Result<()> {
                             dataset::json_str(&text),
                             t.len()
                         );
+                        if with_plans {
+                            let (fields, d) = move_plans(&line, size, &p, sym);
+                            dropped += d;
+                            if !fields.is_empty() && fields.iter().all(|(_, kept)| kept.is_empty()) {
+                                rows.push(format!("{head},\"error\":\"plans fail\"}}"));
+                                continue;
+                            }
+                            // "plan": the first plan that survives, from whichever field.
+                            if let Some(f) = fields.iter().find_map(|(_, kept)| kept.first()) {
+                                row.push_str(&format!(",\"plan\":{}", dataset::json_str(f)));
+                            }
+                            for (key, kept) in fields.iter().filter(|(k, _)| *k != "plan") {
+                                let list: Vec<String> = kept.iter().map(|k| dataset::json_str(k)).collect();
+                                row.push_str(&format!(",\"{key}\":[{}]", list.join(",")));
+                            }
+                        }
                         if let Some((a, ea)) = &base {
                             let (b, eb) = label(&p);
                             row.push_str(&format!(",\"a\":{a},\"b\":{b},\"editor_a\":{ea},\"editor_b\":{eb}"));
@@ -251,10 +305,11 @@ fn run_augment(args: &[String]) -> Result<()> {
                     }
                 }
             }
-            Ok(rows)
+            Ok((rows, dropped))
         },
         |r| -> Result<()> {
-            let rows = r?;
+            let (rows, dropped) = r?;
+            plans_dropped += dropped;
             levels += 1;
             for row in &rows {
                 writeln!(out, "{row}")?;
@@ -276,5 +331,8 @@ fn run_augment(args: &[String]) -> Result<()> {
         "augment: {levels} levels -> {written} versions, {same} left out as duplicates, {errors} errors, in {:.1?}",
         start.elapsed()
     );
+    if with_plans {
+        eprintln!("augment: {plans_dropped} moved plans dropped (they don't solve the moved level)");
+    }
     Ok(())
 }

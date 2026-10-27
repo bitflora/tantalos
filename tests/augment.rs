@@ -1,7 +1,7 @@
 //! Mirrored and turned copies of levels (`glados-data augment`, src/augment.rs): each of the 8
 //! versions is the same level moved, cell for cell and face for face, and plays the same.
 
-use glados::augment::{editor_rules, moved_level, placed, variant, Sym};
+use glados::augment::{apply_plan, editor_rules, moved_level, placed, variant, Sym};
 use glados::dataset::label_with_plan;
 use glados::fixtures;
 use glados::generator::Genome;
@@ -9,7 +9,8 @@ use glados::geom::{step, Dir};
 use glados::level::Level;
 use glados::p2c::Puzzle;
 use glados::rng::Rng;
-use glados::solver::{judge, Judgement};
+use glados::plan::{self, encode_actions, Checker};
+use glados::solver::{judge, Judgement, Mode, Model, Verdict};
 use glados::tokens::{decode, encode};
 use glados::turrets::{danger, TurretSight};
 
@@ -161,6 +162,47 @@ fn versions_play_the_same() {
             let Ok((q, _)) = variant(&orig, s) else { continue };
             assert_eq!(outcome(&q), want, "{name} {}", s.name());
         }
+    }
+}
+
+/// A level's shortest plans, moved with it (`apply_plan`), solve each version, at the same
+/// length: the same plan in the moved level's coordinates.
+#[test]
+fn plans_move_with_their_level() {
+    let (mut moved, mut solved) = (0, 0);
+    for (name, p) in levels().iter().step_by(2) {
+        let (orig, _) = canonical(p);
+        let level = Level::from_puzzle(&orig);
+        let Ok(model) = Model::new(&level, Mode::Conservative) else { continue };
+        let (outcome, found) = model.shortest_plans(BUDGET, 4, 5);
+        if !matches!(outcome.verdict, Verdict::Solved(_)) {
+            continue;
+        }
+        solved += 1;
+        let texts: Vec<String> = found.iter().map(|a| encode_actions(&model, a)).collect();
+        for s in Sym::ALL {
+            let Ok((q, _)) = variant(&orig, s) else { continue };
+            let ql = Level::from_puzzle(&q);
+            let mut checker = Checker::new(&ql, Mode::Conservative).unwrap();
+            for (text, plan) in texts.iter().zip(&found) {
+                let m = apply_plan(text, s, level.size).unwrap();
+                if s == Sym::IDENTITY {
+                    assert_eq!(&m, text, "{name}");
+                }
+                let (c, _) = checker.check(&plan::decode(&m).unwrap());
+                assert!(c.solved, "{name} {}: {m}: {:?}", s.name(), c.problem);
+                assert_eq!(c.plan.len(), plan.len(), "{name} {}", s.name());
+                moved += 1;
+            }
+        }
+    }
+    assert!(solved > 40 && moved > 500, "only {moved} plans of {solved} levels moved");
+    // Moving there and back gives the plan back.
+    let text = "fire blue 1 2 3 +x walk 4 5 6 putdown 1 0 2 -y loop orange 2 2 0 +z 3 3 1 sweep 0 1 2 -x exit";
+    for s in Sym::ALL {
+        let size = [7, 9, 8];
+        let there = apply_plan(text, s, size).unwrap();
+        assert_eq!(apply_plan(&there, s.inverse(), s.size(size)).unwrap(), text, "{}", s.name());
     }
 }
 

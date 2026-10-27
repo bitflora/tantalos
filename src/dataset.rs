@@ -219,8 +219,12 @@ pub fn plan_only(
     }
     match found.0.verdict {
         Verdict::Solved(plan) => {
-            let ground = |p: &[Action]| {
-                crate::route::route_plan(&level, &model, p).map(|r| crate::plan::encode(&r))
+            // A plan the route can't ground (a loop, a double dash, ...) is written from its
+            // actions instead: `check` takes either back.
+            let ground = |p: &[Action]| -> Result<String, String> {
+                Ok(crate::route::route_plan(&level, &model, p)
+                    .map(|r| crate::plan::encode(&r))
+                    .unwrap_or_else(|_| crate::plan::encode_actions(&model, p)))
             };
             Ok((
                 plan.len(),
