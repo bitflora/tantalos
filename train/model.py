@@ -46,11 +46,13 @@ class Block(nn.Module):
         self.dropout = cfg.dropout
         self.resid_drop = nn.Dropout(cfg.dropout)
 
-    def forward(self, x, cache=None):
+    def forward(self, x, cache=None, mask=None):
         """`cache` (a dict, for generation) keeps this layer's keys and values between calls:
         room for `cache["size"]` positions, allocated on the first call and filled in order.
         (Growing them with torch.cat reallocated both every token; during training on the
-        4 GB laptop GPU that ran into system memory, and 64 samples took two minutes.)"""
+        4 GB laptop GPU that ran into system memory, and 64 samples took two minutes.)
+        `mask` (bool, batch x 1 x new x all, True = may look): for padded batches; without
+        one, attention is causal."""
         b, t, c = x.shape
         q, k, v = self.qkv(self.ln1(x)).split(c, dim=2)
         q, k, v = (z.view(b, t, self.n_head, c // self.n_head).transpose(1, 2) for z in (q, k, v))
@@ -70,7 +72,8 @@ class Block(nn.Module):
             q,
             k,
             v,
-            is_causal=q.size(2) == k.size(2),
+            attn_mask=mask,
+            is_causal=mask is None and q.size(2) == k.size(2),
             dropout_p=self.dropout if self.training else 0.0,
         )
         x = x + self.resid_drop(self.proj(y.transpose(1, 2).reshape(b, t, c)))
@@ -105,14 +108,17 @@ class GPT(nn.Module):
     def n_params(self):
         return sum(p.numel() for p in self.parameters()) - self.pos.weight.numel()
 
-    def forward(self, idx, targets=None, caches=None, start=0):
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
         """`caches` (one dict per layer) and `start` (position of idx's first token) are for
-        generation: feed the prompt once, then one new token per call."""
+        generation: feed the prompt once, then one new token per call. A padded batch gives
+        each row's `positions` (batch x tokens) and the attention `mask` instead (Block)."""
         t = idx.shape[1]
-        assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
-        x = self.drop(self.tok(idx) + self.pos(torch.arange(start, start + t, device=idx.device)))
+        if positions is None:
+            assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
+            positions = torch.arange(start, start + t, device=idx.device)
+        x = self.drop(self.tok(idx) + self.pos(positions))
         for i, block in enumerate(self.blocks):
-            x = block(x, caches[i] if caches is not None else None)
+            x = block(x, caches[i] if caches is not None else None, mask)
         logits = self.head(self.ln_f(x))
         if targets is None:
             return logits, None
@@ -143,6 +149,9 @@ class GPT(nn.Module):
             if device.type == "cuda" and torch.cuda.is_bf16_supported()
             else nullcontext()
         )
+        if len({len(p) for p in prompts}) > 1:
+            with amp:
+                return self._generate_padded(prompts, max_new, stop, temperature, top_k, device)
         # Prompts of equal length run as one batch, so positions line up without padding.
         outs = [None] * len(prompts)
         by_len = {}
@@ -176,4 +185,56 @@ class GPT(nn.Module):
             for r, i in enumerate(rows):
                 seq = gen[r]
                 outs[i] = seq[: seq.index(stop)] if stop in seq else seq
+        return outs
+
+    def _generate_padded(self, prompts, max_new, stop, temperature, top_k, device):
+        """`generate` for prompts of different lengths, as one batch: each is padded on the left
+        to the longest, its pads hidden from attention, and its positions start at 0 at its
+        first real token, so each row comes out as it would alone. A row stops where it would
+        alone too: after `max_new` tokens or at the end of the block."""
+        b = len(prompts)
+        lens = torch.tensor([len(p) for p in prompts], device=device)
+        n = int(lens.max())
+        pads = n - lens
+        steps = min(max_new, self.cfg.block_size - int(lens.min()))
+        ids = torch.zeros((b, n), dtype=torch.long, device=device)
+        for r, p in enumerate(prompts):
+            ids[r, n - len(p):] = torch.tensor(p, device=device)
+        size = n + steps
+        caches = [{"size": size} for _ in self.blocks]
+        # Which cache slots hold real tokens: all but each row's pads.
+        real = torch.arange(size, device=device)[None, :] >= pads[:, None]
+        pos = (torch.arange(n, device=device)[None, :] - pads[:, None]).clamp(min=0)
+        causal = torch.ones((n, n), dtype=torch.bool, device=device).tril()
+        # A pad looks only at itself, so no row of the softmax is empty.
+        mask = (causal[None] & real[:, None, :n]) | torch.eye(n, dtype=torch.bool, device=device)[None]
+        logits, _ = self(ids, caches=caches, positions=pos, mask=mask[:, None])
+        done = torch.zeros(b, dtype=torch.bool, device=device)
+        # A row's last step: where it reaches max_new, or the end of the block.
+        last = torch.clamp(self.cfg.block_size - lens, max=max_new) - 1
+        new = []
+        for step in range(steps):
+            logits = logits[:, -1, :].float()
+            if top_k == 1:
+                nxt = logits.argmax(dim=-1, keepdim=True)
+            else:
+                logits = logits / max(temperature, 1e-5)
+                if top_k:
+                    kth = torch.topk(logits, min(top_k, logits.size(-1))).values[:, -1:]
+                    logits[logits < kth] = -float("inf")
+                nxt = torch.multinomial(F.softmax(logits, dim=-1), 1)
+            nxt[done] = stop
+            done |= nxt.squeeze(1) == stop
+            new.append(nxt)
+            done |= last <= step
+            if done.all() or step == steps - 1:
+                break
+            at = n + step
+            logits, _ = self(nxt, caches=caches, positions=(lens + step)[:, None],
+                             mask=real[:, None, None, : at + 1])
+        gen = torch.cat(new, dim=1).tolist() if new else [[] for _ in prompts]
+        outs = []
+        for r, seq in enumerate(gen):
+            seq = seq[: int(last[r]) + 1]
+            outs.append(seq[: seq.index(stop)] if stop in seq else seq)
         return outs

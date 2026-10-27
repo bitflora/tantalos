@@ -57,7 +57,8 @@ def plan_prompt(vocab, tokens, block_size):
 
 def generate_plans(model, vocab, prompts, temperature=1.0, top_k=None, rows=64):
     """One plan (a token string) per prompt. Prompts are sorted by length and generated `rows`
-    at a time, so equal lengths share a batch. top_k=1 is greedy."""
+    at a time, so a batch pads little (GPT.generate pads mixed lengths; 64 rows fit the 4 GB
+    card, 128 don't). top_k=1 is greedy."""
     order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))
     plans = [None] * len(prompts)
     for start in range(0, len(order), rows):
