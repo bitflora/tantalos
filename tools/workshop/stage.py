@@ -12,6 +12,15 @@ marks the level `staged` in `train/workshop-annotations.jsonl`. Each new copy is
 run can find it. A level already staged there (or in `train/unsolv-staged.jsonl`) is reused
 unless `--force` is given.
 
+Generated levels (the workbench's `--generated` mode) have no corpus to look up, so the
+workbench passes the tokens on stdin instead:
+
+    python tools/workshop/stage.py --id 3f0c... --tokens-stdin --title "v6-fresh-12h #12" \
+        --series gen --key id --registry train/generated-staged.jsonl \
+        --annotations train/generated-annotations.jsonl < level.txt
+
+which writes `glados-gen-NNNNN.p2c`, titled `gen <title>`.
+
 It never starts or touches Portal 2. It needs `target/release/glados-score.exe`; build it first
 (`cargo build --release`, not during a training run). The Puzzle Maker folder is the same one
 `train/playtest.py` uses; `--puzzles DIR` or `GLADOS_PUZZLES` overrides it. `--registry FILE`,
@@ -97,11 +106,11 @@ def registry_rows(path):
     return rows
 
 
-def existing_file(wid, puzzles, registries):
+def existing_file(wid, puzzles, registries, key="workshop_id"):
     """The newest staged file for `wid` that is still in the Puzzle Maker folder, if any."""
     for path in registries:
         for row in reversed(registry_rows(path)):
-            if str(row.get("workshop_id")) != wid:
+            if str(row.get(key)) != wid:
                 continue
             name = row.get("file")
             if name and (Path(puzzles) / name).is_file():
@@ -109,23 +118,23 @@ def existing_file(wid, puzzles, registries):
     return None
 
 
-def next_name(puzzles):
+def next_name(puzzles, series=SERIES):
     numbers = []
-    for path in Path(puzzles).glob(f"glados-{SERIES}-*.p2c"):
+    for path in Path(puzzles).glob(f"glados-{series}-*.p2c"):
         m = re.search(r"-(\d{5})\.p2c$", path.name)
         if m:
             numbers.append(int(m.group(1)))
     n = max(numbers, default=0) + 1
-    while (Path(puzzles) / f"glados-{SERIES}-{n:05d}.p2c").exists() or \
-            (Path(puzzles) / f"glados-{SERIES}-{n:05d}.jpg").exists():
+    while (Path(puzzles) / f"glados-{series}-{n:05d}.p2c").exists() or \
+            (Path(puzzles) / f"glados-{series}-{n:05d}.jpg").exists():
         n += 1
-    return f"glados-{SERIES}-{n:05d}.p2c"
+    return f"glados-{series}-{n:05d}.p2c"
 
 
-def safe_title(title, wid):
+def safe_title(title, wid, series=SERIES):
     title = re.sub(r"\s+", " ", str(title or "")).strip() or f"workshop {wid}"
     title = title.replace('"', "'")
-    return f"wb {title}"[:MAX_TITLE]
+    return f"{series} {title}"[:MAX_TITLE]
 
 
 def compile_p2c(tokens, budget):
@@ -158,33 +167,43 @@ def compile_p2c(tokens, budget):
 
 def stage(args):
     wid = str(args.id)
-    all_paths = [args.all, args.train, args.test]
-    record = find_level(wid, all_paths)
-    tokens = record["tokens"]
-    title = safe_title(record.get("title"), wid)
+    if args.tokens_stdin:
+        tokens = " ".join(sys.stdin.read().split())
+        if not tokens:
+            raise StageError("no tokens on stdin")
+        record = {"title": args.title or wid}
+    else:
+        all_paths = [args.all, args.train, args.test]
+        record = find_level(wid, all_paths)
+        tokens = record["tokens"]
+        if args.title:
+            record["title"] = args.title
+    title = safe_title(record.get("title"), wid, args.series)
+    # A generated level's annotation keeps the level itself (see annotations.py).
+    level_fields = {"tokens": tokens, "origin": args.origin} if args.tokens_stdin else {}
     puzzles = Path(args.puzzles)
     if not puzzles.is_dir():
         raise StageError(f"Puzzle Maker folder not found: {puzzles} (pass --puzzles DIR)")
-    registries = [args.registry, LEGACY_REGISTRY]
-    existing = existing_file(wid, puzzles, registries)
+    registries = [args.registry] + ([LEGACY_REGISTRY] if args.key == "workshop_id" else [])
+    existing = existing_file(wid, puzzles, registries, args.key)
     if existing and not args.force:
-        ann = annotations.update(wid, path=args.annotations, staged=True)
+        ann = annotations.update(wid, path=args.annotations, staged=True, **level_fields)
         return {
             "ok": True,
             "already": True,
-            "workshop_id": wid,
+            args.key: wid,
             "file": existing["file"],
             "path": str(puzzles / existing["file"]),
             "title": existing.get("title") or title,
-            "annotation": {"workshop_id": wid, **ann},
+            "annotation": {args.key: wid, **ann},
         }
 
-    name = next_name(puzzles)
+    name = next_name(puzzles, args.series)
     if args.dry_run:
         return {
             "ok": True,
             "dry_run": True,
-            "workshop_id": wid,
+            args.key: wid,
             "file": name,
             "path": str(puzzles / name),
             "title": title,
@@ -208,7 +227,7 @@ def stage(args):
         raise StageError(f"could not write the staged level: {e}")
 
     row = {
-        "workshop_id": wid,
+        args.key: wid,
         "title": record.get("title") or title,
         "file": name,
         "date": datetime.date.today().isoformat(),
@@ -220,23 +239,31 @@ def stage(args):
     registry.parent.mkdir(parents=True, exist_ok=True)
     with registry.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    ann = annotations.update(wid, path=args.annotations, staged=True)
+    ann = annotations.update(wid, path=args.annotations, staged=True, **level_fields)
     return {
         "ok": True,
         "already": False,
-        "workshop_id": wid,
+        args.key: wid,
         "file": name,
         "path": str(dst),
         "preview": str(dst.with_suffix(".jpg")),
         "title": title,
-        "annotation": {"workshop_id": wid, **ann},
+        "annotation": {args.key: wid, **ann},
     }
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--id", required=True, help="Workshop id to stage")
+    ap.add_argument("--id", required=True, help="Workshop id (or generated-level id) to stage")
+    ap.add_argument("--tokens-stdin", action="store_true",
+                    help="read the level's tokens from stdin instead of looking the id up")
+    ap.add_argument("--title", help="the level's title (default: the corpus title, or the id)")
+    ap.add_argument("--origin", help="with --tokens-stdin: where the level came from (run, file, line)")
+    ap.add_argument("--series", default=SERIES,
+                    help="file series: glados-SERIES-NNNNN.p2c, titled 'SERIES <title>' (default %(default)s)")
+    ap.add_argument("--key", default="workshop_id",
+                    help="id field in the registry and annotation store (default %(default)s)")
     ap.add_argument("--all", default=str(DEFAULT_ALL), help=f"corpus (default {DEFAULT_ALL})")
     ap.add_argument("--train", default=str(DEFAULT_TRAIN), help=f"ws5 train split (default {DEFAULT_TRAIN})")
     ap.add_argument("--test", default=str(DEFAULT_TEST), help=f"ws5 test split (default {DEFAULT_TEST})")

@@ -153,6 +153,25 @@ split; `tools/workshop/ws3.py` moves it to train on rebuild, `train/goblin_data.
 `test-ws`). When the user asks for levels to play-test, `--excluded`/`--get` is the shared source
 of truth. Do not rewrite the level files for annotations.
 
+### Generated levels in the workbench
+
+`target/release/glados-workbench --generated` opens the same app on the level net's own levels:
+the eval samples of the newest level run (`runs/RUN/eval/{samples,rated-samples}.jsonl` and
+`away/eval/`, joined with the Portal 2 editor check), or `--run NAME`, plus any `--levels FILE`
+(JSONL with `tokens`). A level's id is a hash of its tokens. The Stage button writes
+`glados-gen-NNNNN.p2c` (registry `train/generated-staged.jsonl`). Annotations are in
+`train/generated-annotations.jsonl` (keyed `id`, with the level's tokens and origin) and carry the
+user's play-test verdict: solvable, unsolvable or broken. **Unsolvable and broken also add the
+level to `data/ingame/human-unsolvable.jsonl`** (source `glados-workbench ...`), so the next run
+trains away from it; clearing the verdict removes that row. When the user reports how a
+generated level played, record it the same way:
+
+```bash
+python tools/workshop/annotations.py --generated --get ID
+python tools/workshop/annotations.py --generated --set ID --verdict unsolvable --notes "..."
+python tools/workshop/annotations.py --generated --set ID --verdict none
+```
+
 ## Broadcast (Twitch stream)
 
 `train/broadcast.py` runs the stream's loop in rounds: the level net writes levels, Goblin

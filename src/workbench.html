@@ -171,6 +171,13 @@
     #sidebar { width:270px; }
     .detail-grid { padding:10px; }
   }
+  /* Workshop-only and generated-only parts; body.gen is set from /api/config. */
+  body.gen .ws-only, body:not(.gen) .gen-only { display:none !important; }
+  .verdicts { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:3px; }
+  .verdicts button { font-size:12px; padding:3px 9px; }
+  .verdicts button.on[data-hv="solvable"] { background:#153a26; color:#7ef0a8; border-color:#245c3b; }
+  .verdicts button.on[data-hv="unsolvable"] { background:#3e1c1f; color:#ff9b9b; border-color:#6a2c31; }
+  .verdicts button.on[data-hv="broken"] { background:#33223f; color:#d8b4fe; border-color:#54366b; }
   ::-webkit-scrollbar { width:10px; height:10px; }
   ::-webkit-scrollbar-thumb { background:#3a404c; border-radius:6px; border:2px solid var(--bg); }
   ::-webkit-scrollbar-track { background:transparent; }
@@ -192,19 +199,36 @@
           <option value="unsupported">unsupported</option>
           <option value="published">published, solver disagrees</option>
         </select>
-        <select id="f-split" title="ws5 split">
+        <select id="f-split" class="ws-only" title="ws5 split">
           <option value="">all splits</option>
           <option value="test">test</option>
           <option value="train">train</option>
           <option value="none">not in ws5</option>
         </select>
-        <select id="f-stars" title="Workshop rating">
+        <select id="f-stars" class="ws-only" title="Workshop rating">
           <option value="">any Workshop rating</option>
           <option value="rated">rated (1★+)</option>
           <option value="3">3★ and up</option>
           <option value="4">4★ and up</option>
           <option value="5">5★</option>
           <option value="unrated">not enough ratings</option>
+        </select>
+        <select id="f-source" class="gen-only" title="Which file the level came from">
+          <option value="">all sources</option>
+        </select>
+        <select id="f-hv" class="gen-only" title="My play-test verdict">
+          <option value="">any play-test verdict</option>
+          <option value="none">not played yet</option>
+          <option value="any">played</option>
+          <option value="solvable">solvable</option>
+          <option value="unsolvable">unsolvable</option>
+          <option value="broken">broken</option>
+        </select>
+        <select id="f-game" class="gen-only" title="Portal 2 editor check">
+          <option value="">any game check</option>
+          <option value="valid">game: valid</option>
+          <option value="invalid">game: rejected</option>
+          <option value="none">not game-checked</option>
         </select>
         <select id="f-mine" title="My rating">
           <option value="">any of my ratings</option>
@@ -215,11 +239,12 @@
           <option value="rated">rated by me</option>
         </select>
         <select id="sort" class="wide" title="Sort">
-          <option value="workshop">sort: Workshop rating</option>
-          <option value="votes">sort: most ratings</option>
-          <option value="subscribers">sort: most subscribers</option>
-          <option value="favourited">sort: most favourited</option>
-          <option value="newest">sort: newest Workshop upload</option>
+          <option value="workshop" class="ws-only">sort: Workshop rating</option>
+          <option value="votes" class="ws-only">sort: most ratings</option>
+          <option value="subscribers" class="ws-only">sort: most subscribers</option>
+          <option value="favourited" class="ws-only">sort: most favourited</option>
+          <option value="newest" class="ws-only">sort: newest Workshop upload</option>
+          <option value="line" class="gen-only">sort: file order</option>
           <option value="smallest">sort: smallest level</option>
           <option value="largest">sort: largest level</option>
           <option value="title">sort: title</option>
@@ -231,16 +256,17 @@
       </div>
       <div class="chips">
         <label><input type="checkbox" id="f-staged"> staged</label>
-        <label><input type="checkbox" id="f-human"> human-solved</label>
-        <label><input type="checkbox" id="f-excluded"> excluded</label>
+        <label class="ws-only"><input type="checkbox" id="f-human"> human-solved</label>
+        <label class="ws-only"><input type="checkbox" id="f-excluded"> excluded</label>
         <label><input type="checkbox" id="f-notes"> has notes</label>
         <label><input type="checkbox" id="f-annotated"> annotated</label>
-        <label><input type="checkbox" id="f-testonly"> test split only</label>
+        <label class="ws-only"><input type="checkbox" id="f-testonly"> test split only</label>
       </div>
       <div class="row" style="margin-top:8px">
         <button id="rescan" title="Re-read the level files from disk">Rescan</button>
         <a id="export" href="/api/export" download="workshop-annotations.jsonl" title="Download all annotations as JSONL">Export notes</a>
-        <span class="hint" style="margin-left:auto">↑↓ to move · 1–5 rate · s staged · e exclude</span>
+        <span class="hint ws-only" style="margin-left:auto">↑↓ to move · 1–5 rate · s staged · e exclude</span>
+        <span class="hint gen-only" style="margin-left:auto">↑↓ move · 1–5 rate · s staged · v/u/b verdict</span>
       </div>
     </header>
     <ul id="list"></ul>
@@ -249,10 +275,15 @@
   <main id="main">
     <div id="welcome">
       <h2>Pick a level</h2>
-      <p>This reads every downloaded Workshop level, joins the Workshop rating and item metadata,
+      <p class="ws-only">This reads every downloaded Workshop level, joins the Workshop rating and item metadata,
         shows how our solver classified it, and draws its chamber.</p>
-      <p>Your notes, rating, playtest staging and test-data exclusion are saved to
+      <p class="ws-only">Your notes, rating, playtest staging and test-data exclusion are saved to
         <code>train/workshop-annotations.jsonl</code>.</p>
+      <p class="gen-only">These are levels the level net wrote: <span id="welcome-run"></span>.
+        Stage one, play it, then say whether it was solvable.</p>
+      <p class="gen-only">Your notes, ratings, staging and verdicts are saved to
+        <code id="welcome-store"></code>; an unsolvable or broken verdict also adds the level to
+        <code id="welcome-human"></code>, which the next training run trains away from.</p>
       <p>Use the filters on the left, or press <kbd>/</kbd> to search.</p>
     </div>
     <div id="detail"></div>
@@ -270,6 +301,7 @@ const state = {
   items: {},
   fetched: {},
   annotations: {},
+  config: { mode: "workshop" },
   filtered: [],
   shown: 500,
   selected: null,
@@ -279,7 +311,9 @@ const state = {
   view: { yaw: 0, zoom: 1, panX: 0, panY: 0, nearWalls: false },
 };
 const LIMIT = 500;
-const EMPTY_ANNOTATION = () => ({ staged:false, rating:0, complexity:0, human_solved:false, notes:"", excluded:false, updated:0 });
+const EMPTY_ANNOTATION = () => ({ staged:false, rating:0, complexity:0, human_solved:false, notes:"", excluded:false, human_verdict:"", updated:0 });
+const GEN = () => state.config.mode === "generated";
+const HUMAN_VERDICTS = ["solvable", "unsolvable", "broken"];
 
 // ---- small helpers --------------------------------------------------------
 const $ = s => document.querySelector(s);
@@ -320,9 +354,29 @@ function splitBadge(l) {
   if (l.split === "train") return `<span class="badge b-train">train</span>`;
   return "";
 }
+function gameOf(l) {
+  return (l.game && typeof l.game === "object" && l.game.verdict) || "";
+}
+function gameBadge(l) {
+  const g = gameOf(l);
+  if (!g) return "";
+  return g === "valid" ? `<span class="badge b-train" title="The Portal 2 editor accepted it">game ok</span>`
+    : `<span class="badge b-excluded" title="The Portal 2 editor: ${esc(g)}">game ${esc(g)}</span>`;
+}
+function humanBadge(a) {
+  const v = a.human_verdict;
+  if (!v) return "";
+  const cls = v === "solvable" ? "b-solvable" : v === "unsolvable" ? "b-unsolvable" : "b-invalid";
+  return `<span class="badge ${cls}" title="My play-test verdict">played: ${esc(v)}</span>`;
+}
+function searchText(l) {
+  return [l.title, l.id, l.verdict, l.solver_verdict, l.problem, l.setting, l.origin,
+    (l.sources || []).join(" "), (l.tags || []).join(" "), l.ann.notes, l.ann.human_verdict]
+    .filter(Boolean).join(" ").toLowerCase();
+}
 function annotationBadges(l) {
   const a = l.ann || EMPTY_ANNOTATION();
-  let out = "";
+  let out = humanBadge(a);
   if (a.staged) out += `<span class="badge b-staged">staged</span>`;
   if (a.excluded) out += `<span class="badge b-excluded">excluded</span>`;
   if (a.human_solved) out += `<span class="badge b-mine">human-solved</span>`;
@@ -351,20 +405,22 @@ async function getJson(url) {
 }
 
 async function loadAll() {
-  const [levels, ratings, items, fetched, annotations] = await Promise.all([
+  const [config, levels, ratings, items, fetched, annotations] = await Promise.all([
+    getJson("/api/config").catch(() => ({ mode: "workshop" })),
     getJson("/api/levels"), getJson("/api/ratings"), getJson("/api/items"),
     getJson("/api/fetched"), getJson("/api/annotations"),
   ]);
+  applyConfig(config);
   state.ratings = ratings || {};
   state.items = items || {};
   state.fetched = fetched || {};
   state.annotations = {};
-  for (const a of annotations || []) state.annotations[String(a.workshop_id)] = a;
+  for (const a of annotations || []) state.annotations[String(a.workshop_id ?? a.id)] = a;
   const keep = state.selected;
   state.selected = null;
   state.byId.clear();
   state.levels = (levels.levels || []).map(r => {
-    const id = String(r.workshop_id);
+    const id = String(r.id ?? r.workshop_id);
     const it = state.items[id] || {};
     const rt = state.ratings[id];
     const dl = state.fetched[id];
@@ -372,11 +428,10 @@ async function loadAll() {
     // The corpus record and the ws5 record may disagree on which field holds the verdict.
     l.dataset_verdict = r.verdict;
     l.solver = r.solver_verdict || r.verdict || "?";
-    l.ann = state.annotations[id] || EMPTY_ANNOTATION();
+    l.ann = Object.assign(EMPTY_ANNOTATION(), state.annotations[id] || {});
     if (rt) { l.stars = rt.stars; l.votes = rt.votes; }
     if (dl) { l.download = dl.status; l.download_bytes = dl.bytes; }
-    l.search = [l.title, id, l.verdict, l.solver_verdict, l.problem,
-      (it.tags || []).join(" "), l.ann.notes].filter(Boolean).join(" ").toLowerCase();
+    l.search = searchText(l);
     state.byId.set(id, l);
     return l;
   });
@@ -388,10 +443,40 @@ async function loadAll() {
   else if (state.filtered.length) select(state.filtered[0].id, { scroll:false });
 }
 
+// Switch the page between Workshop levels and the level net's own (glados-workbench --generated).
+let configApplied = false;
+function applyConfig(config) {
+  state.config = config || { mode: "workshop" };
+  const gen = GEN();
+  document.body.classList.toggle("gen", gen);
+  // Hidden <option>s are still selectable through .value, so steer the sort away from them.
+  document.querySelectorAll("#sort option").forEach(o => { o.hidden = o.disabled = gen ? o.classList.contains("ws-only") : o.classList.contains("gen-only"); });
+  if (gen) {
+    const run = state.config.run;
+    $("#sidebar h1").firstChild.textContent = "glados workbench · generated ";
+    document.title = "glados workbench · " + (run || "generated levels");
+    $("#search").placeholder = "Search run, setting, verdict, notes…";
+    $("#welcome-run").textContent = run ? `the eval samples of run ${run}` : "the --levels files";
+    $("#welcome-store").textContent = state.config.annotations || "";
+    $("#welcome-human").textContent = state.config.human_unsolvable || "";
+    $("#export").setAttribute("download", "generated-annotations.jsonl");
+    if (!configApplied) $("#sort").value = "verdict";
+  }
+  configApplied = true;
+}
+
 function renderFilterOptions() {
   // Keep the markup's options; counts are shown in the header.
   const n = state.levels.length;
   $("#count").textContent = `${num(n)} levels`;
+  if (GEN()) {
+    const sel = $("#f-source"), keep = sel.value;
+    const counts = {};
+    for (const l of state.levels) for (const s of l.sources || []) counts[s] = (counts[s] || 0) + 1;
+    sel.innerHTML = `<option value="">all sources</option>` + Object.keys(counts).sort().map(s =>
+      `<option value="${esc(s)}">${esc(s)} (${num(counts[s])})</option>`).join("");
+    if (keep in counts) sel.value = keep;
+  }
 }
 
 // ---- filtering and sorting ------------------------------------------------
@@ -416,9 +501,24 @@ function applyFilters() {
   const notes = $("#f-notes").checked;
   const annotated = $("#f-annotated").checked;
   const testonly = $("#f-testonly").checked;
+  const gen = GEN();
+  const source = $("#f-source").value;
+  const hv = $("#f-hv").value;
+  const game = $("#f-game").value;
 
   state.filtered = state.levels.filter(l => {
     if (q && !l.search.includes(q)) return false;
+    if (gen) {
+      if (source && !(l.sources || []).includes(source)) return false;
+      const v = l.ann.human_verdict || "";
+      if (hv === "none" && v) return false;
+      if (hv === "any" && !v) return false;
+      if (HUMAN_VERDICTS.includes(hv) && v !== hv) return false;
+      const g = gameOf(l);
+      if (game === "valid" && g !== "valid") return false;
+      if (game === "invalid" && (!g || g === "valid")) return false;
+      if (game === "none" && g) return false;
+    }
     if (verdict === "published") {
       if (l.dataset_verdict !== "published") return false;
     } else if (verdict && l.solver !== verdict) return false;
@@ -437,7 +537,7 @@ function applyFilters() {
     if (human && !l.ann.human_solved) return false;
     if (excluded && !l.ann.excluded) return false;
     if (notes && !l.ann.notes.trim()) return false;
-    if (annotated && !(l.ann.staged || l.ann.excluded || l.ann.rating || l.ann.complexity || l.ann.human_solved || l.ann.notes.trim())) return false;
+    if (annotated && !(l.ann.staged || l.ann.excluded || l.ann.rating || l.ann.complexity || l.ann.human_solved || l.ann.human_verdict || l.ann.notes.trim())) return false;
     return true;
   });
 
@@ -460,7 +560,11 @@ function applyFilters() {
     state.filtered.sort((a,b) => Number(b.n_tokens||0) - Number(a.n_tokens||0));
   } else if (sort === "verdict") {
     state.filtered.sort((a,b) => (VERDICT_ORDER[a.solver] ?? 9) - (VERDICT_ORDER[b.solver] ?? 9)
-      || (Number(b.stars||0)-Number(a.stars||0)) || byVotes(a,b));
+      || (gen ? (gameOf(a) === "valid" ? 0 : 1) - (gameOf(b) === "valid" ? 0 : 1) : 0)
+      || (Number(b.stars||0)-Number(a.stars||0)) || byVotes(a,b)
+      || compare(a,b,"source") || Number(a.line||0) - Number(b.line||0));
+  } else if (sort === "line") {
+    state.filtered.sort((a,b) => compare(a,b,"source") || Number(a.line||0) - Number(b.line||0));
   } else if (sort === "mine") {
     state.filtered.sort((a,b) => (Number(b.ann.rating||0)-Number(a.ann.rating||0))
       || (Number(b.ann.updated||0)-Number(a.ann.updated||0)));
@@ -484,6 +588,15 @@ function renderList() {
     const ws = Number(l.stars || 0);
     const votes = l.votes ? `${num(l.votes)} ratings` : "no ratings";
     const mine = l.ann.rating ? `<span class="mine">mine ${"★".repeat(l.ann.rating)}</span>` : "";
+    if (GEN()) {
+      return `<li data-id="${esc(l.id)}" class="${state.selected === l.id ? "active" : ""}">
+      <div class="top"><span class="title">${esc(l.title || l.id)}</span>${verdictBadge(l)}</div>
+      <div class="sub">${gameBadge(l)}${annotationBadges(l)}</div>
+      <div class="sub"><span>${num(l.n_tokens || 0)} tokens</span>
+        ${l.min_len !== undefined && l.min_len !== null ? `<span>${num(l.min_len)} steps</span>` : ""}
+        <span>${(l.sources || []).map(esc).join(", ")}</span></div>
+    </li>`;
+    }
     return `<li data-id="${esc(l.id)}" class="${state.selected === l.id ? "active" : ""}">
       <div class="top"><span class="title">${esc(l.title || "(untitled)")}</span>${verdictBadge(l)}</div>
       <div class="sub">
@@ -558,10 +671,11 @@ function renderDetail(l) {
       <div class="heading">
         <h2>${esc(l.title || "(untitled)")}</h2>
         <div class="sub">
-          <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(l.id)}"
+          <a class="ws-only" href="https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(l.id)}"
              target="_blank" rel="noreferrer">Workshop #${esc(l.id)}</a>
-          ${verdictBadge(l)}${splitBadge(l)}<span id="head-ann">${annotationBadges(l)}</span>
-          <span>${ws ? starsHtml(ws) + " " + num(votes) + " ratings" : "not enough ratings yet" + (votes ? " ("+num(votes)+")" : "")}</span>
+          <span class="gen-only">#${esc(l.id)}</span>
+          ${verdictBadge(l)}${splitBadge(l)}${gameBadge(l)}<span id="head-ann">${annotationBadges(l)}</span>
+          <span class="ws-only">${ws ? starsHtml(ws) + " " + num(votes) + " ratings" : "not enough ratings yet" + (votes ? " ("+num(votes)+")" : "")}</span>
         </div>
       </div>
       <div class="nav">
@@ -581,6 +695,14 @@ function renderDetail(l) {
       <div class="col">
         <section class="card">
           <h3>My annotation <span id="saved"></span></h3>
+          <div class="gen-only">
+            <div style="margin:0 0 3px;color:var(--dim);font-size:12px">My play-test verdict</div>
+            <div class="verdicts" id="a-hv">${HUMAN_VERDICTS.map(v =>
+              `<button data-hv="${v}" class="${a.human_verdict === v ? "on" : ""}"
+                title="${v} (key ${v[0]}); click again to clear">${v}</button>`).join("")}</div>
+            <p class="hint" style="margin-bottom:8px">Unsolvable or broken adds the level to
+              <code>${esc(state.config.human_unsolvable || "human-unsolvable.jsonl")}</code> for the away training; clearing it takes it out again.</p>
+          </div>
           <label class="bigcheck"><input type="checkbox" id="a-staged" ${a.staged ? "checked" : ""}>
             <span>Staged for manual playtesting<small>you have copied this level into the Puzzle Maker for a play test</small></span></label>
           <div style="margin:5px 0 2px;color:var(--dim);font-size:12px">My rating</div>
@@ -597,9 +719,9 @@ function renderDetail(l) {
                 title="complexity ${n}">${n}</button>`).join("")}</span>
             <button class="clear" id="a-cx-clear" title="Clear my complexity rating">clear</button>
           </div>
-          <label class="bigcheck"><input type="checkbox" id="a-human" ${a.human_solved ? "checked" : ""}>
+          <label class="bigcheck ws-only"><input type="checkbox" id="a-human" ${a.human_solved ? "checked" : ""}>
             <span>Solved by a human<small>you solved this level by hand in Portal 2</small></span></label>
-          <label class="bigcheck"><input type="checkbox" id="a-excluded" ${a.excluded ? "checked" : ""}>
+          <label class="bigcheck ws-only"><input type="checkbox" id="a-excluded" ${a.excluded ? "checked" : ""}>
             <span>Exclude from test data<small>kept out of the ws5 test split when the split or <code>data/plans</code> is rebuilt</small></span></label>
           <div style="margin-top:9px;color:var(--dim);font-size:12px">Notes</div>
           <textarea id="a-notes" placeholder="What is interesting, broken, or worth remembering?">${esc(a.notes)}</textarea>
@@ -610,13 +732,23 @@ function renderDetail(l) {
           <h3>Facts</h3>
           <div class="facts">
             ${fact("Solver verdict", verdictBadge(l))}
+            ${GEN() ? `
+            ${fact("Run", value(l.run))}
+            ${fact("Sources", (l.sources || []).map(s => `<span class="tag">${esc(s)}</span>`).join(" "))}
+            ${fact("File line", value(l.line))}
+            ${fact("Asked for", l.setting ? `<code>${esc(l.setting)}</code>` : "—")}
+            ${fact("Rated-style outcome", value(l.outcome))}
+            ${fact("Game check", gameOf(l) ? gameBadge(l) : "not checked")}
+            ${fact("Novel", l.novel === true ? "yes" : l.novel === false ? "no (near a training level)" : "—")}
+            ${fact("Nearest Workshop", l.nearest_ws === undefined || l.nearest_ws === null ? "—" : Number(l.nearest_ws).toFixed(3))}
+            ${fact("Tricks", l.tricks ? esc(JSON.stringify(l.tricks)) : "—")}` : `
             ${fact("Dataset verdict", value(l.dataset_verdict || l.verdict))}
             ${fact("ws5 split", l.split === "test" ? `<span class="badge b-test">test</span>`
               : l.split === "train" ? `<span class="badge b-train">train</span>` : "not in ws5")}
             ${fact("Workshop rating", ws ? `${starsHtml(ws)} <span class="hint">${num(votes)} ratings</span>`
               : `not enough ratings yet${votes ? ` <span class="hint">(${num(votes)} ratings)</span>` : ""}`)}
             ${fact("Subscribers", num(l.subscribers))}
-            ${fact("Favourited", num(l.favourited))}
+            ${fact("Favourited", num(l.favourited))}`}
             ${fact("Shortest plan", (l.min_len === null || l.min_len === undefined) ? "—" : num(l.min_len) + " actions")}
             ${fact("Needs portals", l.needs_portals === true ? "yes" : l.needs_portals === false ? "no" : "—")}
             ${fact("Level tokens", num(l.n_tokens))}
@@ -624,7 +756,7 @@ function renderDetail(l) {
             ${fact("Items in view", `<span id="f-items">${items}</span>`)}
           </div>
         </section>
-        <section class="card">
+        <section class="card ws-only">
           <h3>Workshop metadata</h3>
           <div class="facts">
             ${fact("Tags", tagsHtml(l.tags))}
@@ -683,6 +815,10 @@ function renderDetail(l) {
     </div>`;
 
   // Annotation controls.
+  $("#a-hv").addEventListener("click", e => {
+    const b = e.target.closest("[data-hv]"); if (!b) return;
+    setHumanVerdict(l, b.dataset.hv);
+  });
   $("#a-staged").addEventListener("change", e => setStaged(l, e.target.checked));
   $("#a-excluded").addEventListener("change", e => { a.excluded = e.target.checked; persist(l); });
   $("#a-stars").addEventListener("click", e => {
@@ -727,6 +863,17 @@ function renderDetail(l) {
 
   setupCanvas();
   if (state.geom) { updateGeomFields(); }
+}
+
+// Toggle: picking the verdict a level already has clears it.
+function setHumanVerdict(l, v) {
+  flushNotes();
+  l.ann.human_verdict = (l.ann.human_verdict === v) ? "" : v;
+  document.querySelectorAll("#a-hv [data-hv]").forEach(b =>
+    b.classList.toggle("on", b.dataset.hv === l.ann.human_verdict));
+  renderAnnotationSummary(l);
+  renderList();
+  persist(l);
 }
 
 function paintStars(n) {
@@ -791,7 +938,7 @@ async function stageLevel(l) {
     });
     const d = await r.json().catch(() => ({ ok: false, error: "bad response from the server" }));
     if (!d.ok) throw new Error(d.error || "staging failed");
-    if (d.annotation) l.ann = Object.assign({}, d.annotation);
+    if (d.annotation) l.ann = Object.assign(EMPTY_ANNOTATION(), d.annotation);
     else l.ann.staged = true;
     state.annotations[l.id] = l.ann;
     const cb = $("#a-staged"); if (cb) cb.checked = true;
@@ -820,16 +967,16 @@ function persist(l) {
     human_solved: l.ann.human_solved ? "1" : "0",
     notes: l.ann.notes || "",
     excluded: l.ann.excluded ? "1" : "0",
+    human_verdict: l.ann.human_verdict || "",
   });
   fetch("/api/annotate", { method:"POST", body })
     .then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t || ("HTTP " + r.status)); }); return r.json(); })
     .then(a => {
       if (seq < saveApplied) return;
       saveApplied = seq;
-      l.ann = Object.assign({}, a);
+      l.ann = Object.assign(EMPTY_ANNOTATION(), a);
       state.annotations[l.id] = l.ann;
-      l.search = [l.title, l.id, l.verdict, l.solver_verdict, l.problem,
-        (l.tags || []).join(" "), l.ann.notes].filter(Boolean).join(" ").toLowerCase();
+      l.search = searchText(l);
       setSaved("saved", "ok");
       renderList();
       if (state.selected === l.id) renderAnnotationSummary(l);
@@ -911,6 +1058,7 @@ function fieldsFor(l) {
   const out = {};
   for (const k of Object.keys(l)) {
     if (["ann","search","id","download","download_bytes"].includes(k)) continue;
+    if (k === "solver" || k === "dataset_verdict") continue;
     out[k] = l[k];
   }
   out.annotation = l.ann;
@@ -1196,7 +1344,7 @@ function renderLegend() {
 // ---- wiring ---------------------------------------------------------------
 function wire() {
   $("#search").addEventListener("input", () => { state.shown = LIMIT; applyFilters(); });
-  for (const id of ["#f-verdict","#f-split","#f-stars","#f-mine","#sort"]) {
+  for (const id of ["#f-verdict","#f-split","#f-stars","#f-mine","#f-source","#f-hv","#f-game","#sort"]) {
     $(id).addEventListener("change", () => { state.shown = LIMIT; applyFilters(); });
   }
   for (const id of ["#f-staged","#f-human","#f-excluded","#f-notes","#f-annotated","#f-testonly"]) {
@@ -1236,7 +1384,9 @@ function wire() {
     else if (e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "k") { e.preventDefault(); navStep(-1); }
     else if (e.key === "s" || e.key === "S") {
       const l = current(); if (l) setStaged(l, !l.ann.staged);
-    } else if (e.key === "e" || e.key === "E") {
+    } else if (GEN() && ["v","u","b"].includes(e.key.toLowerCase())) {
+      const l = current(); if (l) setHumanVerdict(l, { v:"solvable", u:"unsolvable", b:"broken" }[e.key.toLowerCase()]);
+    } else if ((e.key === "e" || e.key === "E") && !GEN()) {
       const l = current(); if (l) { l.ann.excluded = !l.ann.excluded; persist(l); renderDetail(l); }
     } else if (/^[0-5]$/.test(e.key)) {
       const l = current(); if (l) { l.ann.rating = Number(e.key); persist(l); renderDetail(l); }

@@ -10,8 +10,16 @@
 //! flag is read by `tools/workshop/ws3.py` (so a rebuilt split moves it out of test) and by
 //! `train/plans.py` (so `test-ws` leaves it out).
 //!
+//! `--generated` points the same app at the level net's own levels instead: a run's eval
+//! samples (`runs/RUN/eval/{samples,rated-samples}.jsonl`, and the same under `away/`; the
+//! newest level run by default) plus any `--levels FILE`. A level's id is a hash of its tokens.
+//! Annotations go to `train/generated-annotations.jsonl` and carry a human verdict (solvable,
+//! unsolvable, broken); an unsolvable or broken one is also written to
+//! `data/ingame/human-unsolvable.jsonl`, which `train/run.py` trains away from.
+//!
 //! Endpoints:
 //! - `GET /`                    the app
+//! - `GET /api/config`          which mode the app is in (workshop or generated), and its files
 //! - `GET /api/levels`          every level, merged across the corpus and the ws5 splits
 //! - `GET /api/ratings`         Workshop `{id: {stars, votes}}`
 //! - `GET /api/items`           Workshop item metadata (`items.jsonl`) by id
@@ -19,7 +27,7 @@
 //! - `GET /api/annotations`     our annotations, one object per level
 //! - `GET /api/level?id=ID`     one level's tokens and decoded geometry
 //! - `POST /api/annotate`       update one annotation (form fields: id, staged, rating,
-//!                              notes, excluded)
+//!                              complexity, human_solved, human_verdict, notes, excluded)
 //! - `POST /api/stage`          compile one level and copy it into the Puzzle Maker folder
 //!                              (form fields: id, force); marks it staged
 //! - `GET /api/rescan`          re-read the files, then return the levels
@@ -50,7 +58,15 @@ const USAGE: &str = "usage:
                          test data; annotations are saved to
                          train/workshop-annotations.jsonl.
                          (defaults: out/workshop/levels.jsonl, data/ws5/{train,test}.jsonl,
-                         out/workshop/{ratings,items,fetched}.jsonl)";
+                         out/workshop/{ratings,items,fetched}.jsonl)
+  glados-workbench --generated [--run NAME] [--levels FILE]... [--annotations FILE]
+                   [--human-unsolvable FILE] [--port N] [--no-open] [--list]
+                         the same app for the level net's own levels: the eval samples of a
+                         run (default: the newest level run in runs/) and any --levels files
+                         (JSONL with a tokens field). Rate, note, stage, and give a human
+                         verdict; annotations are saved to train/generated-annotations.jsonl,
+                         and unsolvable/broken levels are added to
+                         data/ingame/human-unsolvable.jsonl (trained away from).";
 
 const DEFAULT_ALL: &str = "out/workshop/levels.jsonl";
 const DEFAULT_TRAIN: &str = "data/ws5/train.jsonl";
@@ -59,6 +75,13 @@ const DEFAULT_RATINGS: &str = "out/workshop/ratings.jsonl";
 const DEFAULT_ITEMS: &str = "out/workshop/items.jsonl";
 const DEFAULT_FETCHED: &str = "out/workshop/fetched.jsonl";
 const DEFAULT_ANNOTATIONS: &str = "train/workshop-annotations.jsonl";
+const DEFAULT_GEN_ANNOTATIONS: &str = "train/generated-annotations.jsonl";
+const DEFAULT_GEN_REGISTRY: &str = "train/generated-staged.jsonl";
+const DEFAULT_HUMAN_UNSOLVABLE: &str = "data/ingame/human-unsolvable.jsonl";
+const DEFAULT_RUNS: &str = "runs";
+/// Where `human-unsolvable.jsonl` rows written by this app say they came from; only these
+/// rows are ever removed again.
+const HUMAN_SOURCE: &str = "glados-workbench";
 
 /// The files the app reads.
 #[derive(Clone)]
@@ -70,6 +93,20 @@ pub struct Paths {
     pub items: PathBuf,
     pub fetched: PathBuf,
     pub annotations: PathBuf,
+    /// Set in `--generated` mode: read the level net's levels instead of the Workshop's.
+    pub generated: Option<Generated>,
+}
+
+/// The files of `--generated` mode.
+#[derive(Clone)]
+pub struct Generated {
+    /// The run whose eval samples are read (its name under `runs/`), if any.
+    pub run: Option<String>,
+    pub run_dir: Option<PathBuf>,
+    /// More JSONL files with a `tokens` field.
+    pub extra: Vec<PathBuf>,
+    /// Where unsolvable/broken verdicts are added for the away training.
+    pub human_unsolvable: PathBuf,
 }
 
 impl Default for Paths {
@@ -82,6 +119,7 @@ impl Default for Paths {
             items: DEFAULT_ITEMS.into(),
             fetched: DEFAULT_FETCHED.into(),
             annotations: DEFAULT_ANNOTATIONS.into(),
+            generated: None,
         }
     }
 }
@@ -94,7 +132,9 @@ struct Record {
     fields: BTreeMap<String, String>,
     tokens: String,
     split: Option<&'static str>,
-    sources: Vec<&'static str>,
+    sources: Vec<String>,
+    /// Generated levels: "RUN SOURCE line N" of the first file that had it.
+    origin: String,
 }
 
 /// The user's own triage record for a level.
@@ -108,12 +148,37 @@ pub struct Annotation {
     pub human_solved: bool,
     pub notes: String,
     pub excluded: bool,
+    /// Generated levels: "", "solvable", "unsolvable" or "broken", from a human play-test.
+    pub human_verdict: String,
+    /// Generated levels: the level itself and where it came from, so the store stands alone
+    /// after the run is deleted. Not part of `is_empty`.
+    pub tokens: String,
+    pub origin: String,
     pub updated: i64,
 }
+
+const HUMAN_VERDICTS: [&str; 3] = ["solvable", "unsolvable", "broken"];
 
 impl Annotation {
     fn is_empty(&self) -> bool {
         !self.staged && self.rating == 0 && self.complexity == 0 && !self.human_solved && self.notes.is_empty() && !self.excluded
+            && self.human_verdict.is_empty()
+    }
+
+    /// A verdict that sends the level to `human-unsolvable.jsonl`.
+    fn is_bad(&self) -> bool {
+        self.human_verdict == "unsolvable" || self.human_verdict == "broken"
+    }
+}
+
+impl Paths {
+    /// The annotation store's id field: Workshop ids, or our token hashes.
+    fn id_key(&self) -> &'static str {
+        if self.generated.is_some() {
+            "id"
+        } else {
+            "workshop_id"
+        }
     }
 }
 
@@ -137,6 +202,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut port = 0u16;
     let mut open = true;
     let mut list = false;
+    let mut generated = false;
+    let mut run_name: Option<String> = None;
+    let mut levels: Vec<PathBuf> = Vec::new();
+    let mut annotations: Option<PathBuf> = None;
+    let mut human_unsolvable = PathBuf::from(DEFAULT_HUMAN_UNSOLVABLE);
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let value = |it: &mut std::slice::Iter<String>| {
@@ -145,13 +215,18 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 .ok_or_else(|| format!("{flag} needs a value"))
         };
         match flag.as_str() {
-            "--all" | "--levels" => paths.all = PathBuf::from(value(&mut it)?),
+            "--all" => paths.all = PathBuf::from(value(&mut it)?),
+            // The corpus in Workshop mode (an old alias of --all); more files with --generated.
+            "--levels" => levels.push(PathBuf::from(value(&mut it)?)),
+            "--generated" => generated = true,
+            "--run" => run_name = Some(value(&mut it)?),
+            "--human-unsolvable" => human_unsolvable = PathBuf::from(value(&mut it)?),
             "--train" => paths.train = PathBuf::from(value(&mut it)?),
             "--test" => paths.test = PathBuf::from(value(&mut it)?),
             "--ratings" => paths.ratings = PathBuf::from(value(&mut it)?),
             "--items" => paths.items = PathBuf::from(value(&mut it)?),
             "--fetched" => paths.fetched = PathBuf::from(value(&mut it)?),
-            "--annotations" => paths.annotations = PathBuf::from(value(&mut it)?),
+            "--annotations" => annotations = Some(PathBuf::from(value(&mut it)?)),
             "--port" => {
                 let v = value(&mut it)?;
                 port = v
@@ -165,6 +240,44 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 return Ok(());
             }
             _ => return Err(format!("unknown flag {flag}\n{USAGE}")),
+        }
+    }
+    if generated {
+        let run_dir = match &run_name {
+            Some(name) => {
+                let dir = Path::new(DEFAULT_RUNS).join(name);
+                if !dir.is_dir() {
+                    return Err(format!("no run {name} (no folder {})", dir.display()));
+                }
+                Some(dir)
+            }
+            None if levels.is_empty() => Some(newest_level_run(Path::new(DEFAULT_RUNS)).ok_or(
+                "no level run with eval samples in runs/ (pass --run NAME or --levels FILE)",
+            )?),
+            None => None,
+        };
+        let run = run_dir.as_ref().map(|d| {
+            d.strip_prefix(DEFAULT_RUNS)
+                .unwrap_or(d)
+                .to_string_lossy()
+                .replace('\\', "/")
+        });
+        paths.annotations = annotations.unwrap_or_else(|| DEFAULT_GEN_ANNOTATIONS.into());
+        paths.generated = Some(Generated {
+            run,
+            run_dir,
+            extra: levels,
+            human_unsolvable,
+        });
+    } else {
+        if run_name.is_some() {
+            return Err("--run needs --generated".into());
+        }
+        if let Some(last) = levels.pop() {
+            paths.all = last;
+        }
+        if let Some(a) = annotations {
+            paths.annotations = a;
         }
     }
     let state = State::load(&paths)?;
@@ -222,12 +335,34 @@ fn print_summary(state: &State) {
         .map(|(k, n)| format!("{k} {n}"))
         .collect::<Vec<_>>()
         .join(", ");
+    match &state.paths.generated {
+        Some(g) => println!(
+            "glados-workbench: {} generated levels from {} ({by_verdict})",
+            state.records.len(),
+            generated_files(g)
+                .iter()
+                .filter(|(p, _)| p.is_file())
+                .map(|(p, _)| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => println!(
+            "glados-workbench: {} levels ({by_verdict})",
+            state.records.len()
+        ),
+    }
+    let mut verdicts: BTreeMap<&str, usize> = BTreeMap::new();
+    for a in state.annotations.values() {
+        if !a.human_verdict.is_empty() {
+            *verdicts.entry(&a.human_verdict).or_default() += 1;
+        }
+    }
+    let human = verdicts
+        .iter()
+        .map(|(k, n)| format!(", {n} {k}"))
+        .collect::<String>();
     println!(
-        "glados-workbench: {} levels ({by_verdict})",
-        state.records.len()
-    );
-    println!(
-        "  {} annotations ({staged} staged, {excluded} excluded) -> {}",
+        "  {} annotations ({staged} staged, {excluded} excluded{human}) -> {}",
         annotated,
         state.paths.annotations.display()
     );
@@ -252,13 +387,29 @@ fn open_browser(url: &str) {
 
 impl State {
     fn load(paths: &Paths) -> Result<State, String> {
-        let records = load_levels(paths)?;
+        let records = match &paths.generated {
+            Some(g) => load_generated_levels(g)?,
+            None => load_levels(paths)?,
+        };
         if records.is_empty() {
-            return Err(format!(
-                "no levels found: expected {} (or pass --all/--train/--test)",
-                paths.all.display()
-            ));
+            return Err(match &paths.generated {
+                Some(g) => format!(
+                    "no levels with tokens found in {}",
+                    generated_files(g)
+                        .iter()
+                        .map(|(p, _)| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => format!(
+                    "no levels found: expected {} (or pass --all/--train/--test)",
+                    paths.all.display()
+                ),
+            });
         }
+        // The Workshop metadata means nothing for our own levels.
+        let workshop = paths.generated.is_none();
+        let meta = |load: &dyn Fn() -> String| if workshop { load() } else { "{}".to_string() };
         let mut index = HashMap::new();
         for (i, r) in records.iter().enumerate() {
             index.insert(r.id.clone(), i);
@@ -276,9 +427,9 @@ impl State {
             records,
             index,
             levels_json,
-            ratings_json: load_ratings(&paths.ratings),
-            items_json: load_map(&paths.items, "id"),
-            fetched_json: load_map(&paths.fetched, "id"),
+            ratings_json: meta(&|| load_ratings(&paths.ratings)),
+            items_json: meta(&|| load_map(&paths.items, "id")),
+            fetched_json: meta(&|| load_map(&paths.fetched, "id")),
             annotations,
             paths: paths.clone(),
             staging: false,
@@ -331,6 +482,7 @@ fn add_level_file(
             tokens: String::new(),
             split: None,
             sources: Vec::new(),
+            origin: String::new(),
         });
         for (k, v) in &fields {
             if *k != "tokens" {
@@ -343,11 +495,166 @@ fn add_level_file(
         if let Some(s) = split {
             rec.split = Some(s);
         }
-        if !rec.sources.contains(&source) {
-            rec.sources.push(source);
+        if !rec.sources.iter().any(|s| s == source) {
+            rec.sources.push(source.to_string());
         }
     }
     Ok(())
+}
+
+/// The newest run started by `train/run.py` (by its status.json `started`) that is a level
+/// run with eval samples, like `run.py newest()` but skipping Goblin runs.
+fn newest_level_run(runs: &Path) -> Option<PathBuf> {
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<(String, PathBuf)>) {
+        let status = dir.join("status.json");
+        if let Ok(text) = std::fs::read_to_string(&status) {
+            let fields = object_fields(&text);
+            let task = field(&fields, "task").map(|v| json_unescape(v.trim().trim_matches('"')));
+            let level_run = matches!(task.as_deref(), None | Some("levels"));
+            let has_samples = ["eval/samples.jsonl", "eval/rated-samples.jsonl"]
+                .iter()
+                .any(|f| dir.join(f).is_file());
+            if let (true, true, Some(started)) = (level_run, has_samples, field(&fields, "started")) {
+                out.push((json_unescape(started.trim().trim_matches('"')), dir.to_path_buf()));
+            }
+        }
+        if depth == 0 {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                if e.file_type().map_or(false, |t| t.is_dir()) {
+                    walk(&e.path(), depth - 1, out);
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(runs, 2, &mut found);
+    found.into_iter().max().map(|(_, dir)| dir)
+}
+
+/// Every file `--generated` reads, with the source name it is shown under.
+fn generated_files(g: &Generated) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    if let Some(dir) = &g.run_dir {
+        for (sub, prefix) in [(dir.join("eval"), ""), (dir.join("away").join("eval"), "away-")] {
+            out.push((sub.join("samples.jsonl"), format!("{prefix}eval")));
+            out.push((sub.join("rated-samples.jsonl"), format!("{prefix}rated")));
+        }
+    }
+    for p in &g.extra {
+        let name = p
+            .file_stem()
+            .map_or_else(|| p.display().to_string(), |s| s.to_string_lossy().into_owned());
+        out.push((p.clone(), name));
+    }
+    out
+}
+
+/// A level's token string with its spacing normalised, for hashing and comparing.
+fn normalize_tokens(tokens: &str) -> String {
+    tokens.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A generated level's id: 64-bit FNV-1a of its normalised tokens, as 16 hex digits. The same
+/// level gets the same id in every file and run, so its annotation follows it.
+fn token_id(tokens: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in normalize_tokens(tokens).bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// The level net's levels: a run's eval and rated samples (and its away run's), plus any
+/// `--levels` files. Levels without tokens are skipped; the same level in several files is one
+/// record listing every source. The Portal 2 editor check (`eval/ingame/results.jsonl`) is
+/// joined by tokens into a `game` field.
+fn load_generated_levels(g: &Generated) -> Result<Vec<Record>, String> {
+    let run = g.run.clone().unwrap_or_default();
+    let mut merged: BTreeMap<String, Record> = BTreeMap::new();
+    for (path, source) in generated_files(g) {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        // `--levels` files are named after themselves, not the run.
+        let from_run = !g.extra.contains(&path);
+        for (n, line) in BufReader::new(file).lines().enumerate() {
+            let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
+            let fields = object_fields(&line);
+            let tokens = field(&fields, "tokens")
+                .map(|v| normalize_tokens(&json_unescape(v.trim_matches('"'))))
+                .unwrap_or_default();
+            if tokens.is_empty() || tokens == "null" {
+                continue;
+            }
+            let id = token_id(&tokens);
+            let line_no = field(&fields, "line")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(n + 1);
+            let label = if from_run { format!("{run} {source}") } else { source.clone() };
+            let rec = merged.entry(id.clone()).or_insert_with(|| {
+                let setting = field(&fields, "setting")
+                    .map(|v| json_unescape(v.trim_matches('"')))
+                    .filter(|s| !s.is_empty() && s != "null");
+                let title = match setting {
+                    Some(s) => format!("{label} #{line_no} · {s}"),
+                    None => format!("{label} #{line_no}"),
+                };
+                let mut base = BTreeMap::new();
+                base.insert("title".to_string(), json_str(&title));
+                base.insert("run".to_string(), json_str(if from_run { &run } else { "" }));
+                base.insert("source".to_string(), json_str(&source));
+                base.insert("line".to_string(), line_no.to_string());
+                Record {
+                    id: id.clone(),
+                    fields: base,
+                    tokens: tokens.clone(),
+                    split: None,
+                    sources: Vec::new(),
+                    origin: format!("{label} line {line_no}"),
+                }
+            });
+            for (k, v) in &fields {
+                // `sample` is the raw text the tokens were parsed from: big and redundant.
+                if matches!(*k, "tokens" | "sample" | "line" | "title" | "source" | "run") {
+                    continue;
+                }
+                rec.fields.entry((*k).to_string()).or_insert_with(|| v.trim().to_string());
+            }
+            // The eval file says `verdict`, the rated file `outcome`; the page reads
+            // `solver_verdict`.
+            if !rec.fields.contains_key("solver_verdict") {
+                if let Some(v) = field(&fields, "verdict").or_else(|| field(&fields, "outcome")) {
+                    rec.fields.insert("solver_verdict".into(), v.trim().to_string());
+                }
+            }
+            if !rec.sources.iter().any(|s| *s == source) {
+                rec.sources.push(source.clone());
+            }
+        }
+    }
+    if let Some(dir) = &g.run_dir {
+        for sub in ["eval/ingame/results.jsonl", "away/eval/ingame/results.jsonl"] {
+            let Ok(file) = std::fs::File::open(dir.join(sub)) else {
+                continue;
+            };
+            for line in BufReader::new(file).lines().flatten() {
+                let fields = object_fields(&line);
+                let (Some(tokens), Some(game)) = (field(&fields, "tokens"), field(&fields, "game")) else {
+                    continue;
+                };
+                let id = token_id(&json_unescape(tokens.trim_matches('"')));
+                if let Some(rec) = merged.get_mut(&id) {
+                    rec.fields.insert("game".into(), game.trim().to_string());
+                }
+            }
+        }
+    }
+    Ok(merged.into_values().collect())
 }
 
 /// The compact record the page gets: everything in the file except the tokens, plus which
@@ -372,6 +679,7 @@ fn record_json(r: &Record) -> String {
     ));
     parts.push(format!("\"in_ws5\":{}", r.split.is_some()));
     parts.push(format!("\"has_tokens\":{}", !r.tokens.is_empty()));
+    parts.push(format!("\"id\":{}", json_str(&r.id)));
     format!("{{{}}}", parts.join(","))
 }
 
@@ -434,19 +742,22 @@ fn load_annotations(path: &Path) -> Result<HashMap<String, Annotation>, String> 
         Ok(file) => file,
         Err(_) => return Ok(out),
     };
+    let text = |fields: &[(&str, &str)], key: &str| {
+        field(fields, key)
+            .map(|v| json_unescape(v.trim_matches('"')))
+            .unwrap_or_default()
+    };
     for (n, line) in BufReader::new(file).lines().enumerate() {
         let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
         if line.trim().is_empty() {
             continue;
         }
         let fields = object_fields(&line);
-        let Some(raw_id) = field(&fields, "workshop_id") else {
-            return Err(format!("{}:{}: no workshop_id", path.display(), n + 1));
+        // The Workshop store is keyed by `workshop_id`, the generated-level store by `id`.
+        let Some(raw_id) = field(&fields, "workshop_id").or_else(|| field(&fields, "id")) else {
+            return Err(format!("{}:{}: no workshop_id or id", path.display(), n + 1));
         };
         let id = json_unescape(raw_id.trim_matches('"'));
-        let notes = field(&fields, "notes")
-            .map(|v| json_unescape(v.trim_matches('"')))
-            .unwrap_or_default();
         out.insert(
             id,
             Annotation {
@@ -458,8 +769,11 @@ fn load_annotations(path: &Path) -> Result<HashMap<String, Annotation>, String> 
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
                 human_solved: field(&fields, "human_solved").map_or(false, |v| v == "true"),
-                notes,
+                notes: text(&fields, "notes"),
                 excluded: field(&fields, "excluded").map_or(false, |v| v == "true"),
+                human_verdict: text(&fields, "human_verdict"),
+                tokens: text(&fields, "tokens"),
+                origin: text(&fields, "origin"),
                 updated: field(&fields, "updated")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
@@ -469,7 +783,11 @@ fn load_annotations(path: &Path) -> Result<HashMap<String, Annotation>, String> 
     Ok(out)
 }
 
-fn save_annotations(path: &Path, map: &HashMap<String, Annotation>) -> Result<(), String> {
+fn save_annotations(
+    path: &Path,
+    key: &str,
+    map: &HashMap<String, Annotation>,
+) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir)
@@ -484,27 +802,36 @@ fn save_annotations(path: &Path, map: &HashMap<String, Annotation>) -> Result<()
         if a.is_empty() {
             continue;
         }
-        text.push_str(&format!(
-            "{{\"workshop_id\":{},\"staged\":{},\"rating\":{},\"complexity\":{},\"human_solved\":{},\"notes\":{},\"excluded\":{},\"updated\":{}}}\n",
-            json_str(id),
-            a.staged,
-            a.rating.clamp(0, 5),
-            a.complexity.clamp(0, 5),
-            a.human_solved,
-            json_str(&a.notes),
-            a.excluded,
-            a.updated
-        ));
+        text.push_str(&annotation_json(key, id, a, true));
+        text.push('\n');
     }
+    write_atomic(path, &text)
+}
+
+fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     let tmp = path.with_extension("jsonl.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(())
 }
 
-fn annotation_json(id: &str, a: &Annotation) -> String {
+/// One annotation as JSON. The generated-level fields are only written when set, so the
+/// Workshop store keeps its old shape; `full` adds the level's tokens (the file has them, the
+/// page doesn't need them).
+fn annotation_json(key: &str, id: &str, a: &Annotation, full: bool) -> String {
+    let mut extra = String::new();
+    if !a.human_verdict.is_empty() {
+        extra.push_str(&format!(",\"human_verdict\":{}", json_str(&a.human_verdict)));
+    }
+    if !a.origin.is_empty() {
+        extra.push_str(&format!(",\"origin\":{}", json_str(&a.origin)));
+    }
+    if full && !a.tokens.is_empty() {
+        extra.push_str(&format!(",\"tokens\":{}", json_str(&a.tokens)));
+    }
     format!(
-        "{{\"workshop_id\":{},\"staged\":{},\"rating\":{},\"complexity\":{},\"human_solved\":{},\"notes\":{},\"excluded\":{},\"updated\":{}}}",
+        "{{{}:{},\"staged\":{},\"rating\":{},\"complexity\":{},\"human_solved\":{},\"notes\":{},\"excluded\":{}{extra},\"updated\":{}}}",
+        json_str(key),
         json_str(id),
         a.staged,
         a.rating.clamp(0, 5),
@@ -516,27 +843,100 @@ fn annotation_json(id: &str, a: &Annotation) -> String {
     )
 }
 
-fn annotations_json(map: &HashMap<String, Annotation>) -> String {
+fn annotations_json(key: &str, map: &HashMap<String, Annotation>) -> String {
     let mut ids: Vec<&String> = map.keys().collect();
     ids.sort();
     ids.retain(|id| map.get(*id).map_or(false, |a| !a.is_empty()));
     format!(
         "[{}]",
         ids.iter()
-            .map(|id| annotation_json(id, &map[*id]))
+            .map(|id| annotation_json(key, id, &map[*id], false))
             .collect::<Vec<_>>()
             .join(",")
     )
 }
 
 /// The same store in the on-disk JSONL form, for `GET /api/export`.
-fn annotations_jsonl(map: &HashMap<String, Annotation>) -> String {
+fn annotations_jsonl(key: &str, map: &HashMap<String, Annotation>) -> String {
     let mut ids: Vec<&String> = map.keys().collect();
     ids.sort();
     ids.retain(|id| map.get(*id).map_or(false, |a| !a.is_empty()));
     ids.iter()
-        .map(|id| annotation_json(id, &map[*id]) + "\n")
+        .map(|id| annotation_json(key, id, &map[*id], true) + "\n")
         .collect()
+}
+
+/// Make `human-unsolvable.jsonl` agree with a generated level's human verdict: drop the rows
+/// this app wrote for these tokens, then, if `row_note` is given, add one row back (unless a
+/// row someone else wrote already covers the level). Rows not written by this app are never
+/// touched.
+fn sync_human_unsolvable(
+    path: &Path,
+    tokens: &str,
+    origin: &str,
+    row_note: Option<&str>,
+) -> Result<(), String> {
+    let tokens = normalize_tokens(tokens);
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    // Other rows are kept byte for byte, line endings included; a new row matches them.
+    let eol = if old.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut kept = String::new();
+    let mut covered = false;
+    let mut changed = false;
+    for raw in old.split_inclusive('\n') {
+        let line = raw.trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields = object_fields(line);
+        let same = field(&fields, "tokens")
+            .map_or(false, |v| normalize_tokens(&json_unescape(v.trim_matches('"'))) == tokens);
+        let ours = field(&fields, "source")
+            .map_or(false, |v| json_unescape(v.trim_matches('"')).starts_with(HUMAN_SOURCE));
+        if same && ours {
+            changed = true;
+            continue;
+        }
+        covered |= same;
+        kept.push_str(raw);
+        if !raw.ends_with('\n') {
+            kept.push_str(eol);
+        }
+    }
+    if let (Some(note), false) = (row_note, covered) {
+        kept.push_str(&format!(
+            "{{\"tokens\":{},\"verdict\":\"unsolvable\",\"source\":{},\"checked\":{},\"note\":{}}}{eol}",
+            json_str(&tokens),
+            json_str(&format!("{HUMAN_SOURCE} {origin}")),
+            json_str(&today()),
+            json_str(note)
+        ));
+        changed = true;
+    }
+    if !changed {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        if !dir.as_os_str().is_empty() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+    }
+    write_atomic(path, &kept)
+}
+
+/// Today's UTC date as YYYY-MM-DD (days-to-civil, Howard Hinnant's algorithm).
+fn today() -> String {
+    let days = now_secs().div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + (m <= 2) as i64;
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn handle(mut stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
@@ -578,6 +978,10 @@ fn handle(mut stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
 
     match (method, path) {
         ("GET", "/") => reply(&mut stream, "text/html; charset=utf-8", APP)?,
+        ("GET", "/api/config") => {
+            let body = config_json(&state.lock().unwrap().paths);
+            reply(&mut stream, "application/json", &body)?;
+        }
         ("GET", "/api/levels") => {
             let body = state.lock().unwrap().levels_json.clone();
             reply(&mut stream, "application/json", &body)?;
@@ -603,7 +1007,7 @@ fn handle(mut stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 if let Ok(annotations) = load_annotations(&path) {
                     guard.annotations = annotations;
                 }
-                annotations_json(&guard.annotations)
+                annotations_json(guard.paths.id_key(), &guard.annotations)
             };
             reply(&mut stream, "application/json", &body)?;
         }
@@ -614,7 +1018,7 @@ fn handle(mut stream: TcpStream, state: &Mutex<State>) -> std::io::Result<()> {
                 if let Ok(annotations) = load_annotations(&path) {
                     guard.annotations = annotations;
                 }
-                annotations_jsonl(&guard.annotations)
+                annotations_jsonl(guard.paths.id_key(), &guard.annotations)
             };
             reply(&mut stream, "application/x-ndjson", &body)?;
         }
@@ -708,11 +1112,23 @@ fn annotate(state: &Mutex<State>, body: &str) -> Result<String, String> {
         .unwrap_or(old.complexity)
         .clamp(0, 5);
     let human_solved = param(body, "human_solved").map_or(old.human_solved, |v| v == "1");
-    let notes = param(body, "notes").unwrap_or(old.notes);
+    let notes = param(body, "notes").unwrap_or_else(|| old.notes.clone());
     if notes.len() > 100_000 {
         return Err("notes are limited to 100,000 characters".into());
     }
     let excluded = param(body, "excluded").map_or(old.excluded, |v| v == "1");
+    let human_verdict = param(body, "human_verdict").unwrap_or(old.human_verdict.clone());
+    if !human_verdict.is_empty() && !HUMAN_VERDICTS.contains(&human_verdict.as_str()) {
+        return Err(format!("unknown human verdict {human_verdict}"));
+    }
+    // A generated level's annotation keeps the level itself, so it outlives the run's files.
+    let (tokens, origin) = match (&guard.paths.generated, guard.index.get(&id)) {
+        (Some(_), Some(&i)) => {
+            let r = &guard.records[i];
+            (r.tokens.clone(), r.origin.clone())
+        }
+        _ => (old.tokens.clone(), old.origin.clone()),
+    };
     let a = Annotation {
         staged,
         rating,
@@ -720,17 +1136,50 @@ fn annotate(state: &Mutex<State>, body: &str) -> Result<String, String> {
         human_solved,
         notes,
         excluded,
+        human_verdict,
+        tokens,
+        origin,
         updated: now_secs(),
     };
+    if let Some(g) = &guard.paths.generated {
+        if (a.is_bad() || old.is_bad()) && !a.tokens.is_empty() {
+            let note = a.is_bad().then(|| {
+                let mut note = format!("Human play-test (workbench): {}.", a.human_verdict);
+                if !a.notes.trim().is_empty() {
+                    note.push(' ');
+                    note.push_str(a.notes.trim());
+                }
+                note
+            });
+            sync_human_unsolvable(&g.human_unsolvable, &a.tokens, &a.origin, note.as_deref())?;
+        }
+    }
     let mut next = guard.annotations.clone();
     if a.is_empty() {
         next.remove(&id);
     } else {
         next.insert(id.clone(), a.clone());
     }
-    save_annotations(&guard.paths.annotations, &next)?;
+    save_annotations(&guard.paths.annotations, guard.paths.id_key(), &next)?;
     guard.annotations = next;
-    Ok(annotation_json(&id, &a))
+    Ok(annotation_json(guard.paths.id_key(), &id, &a, false))
+}
+
+/// What the page needs to know about the mode it is in.
+fn config_json(paths: &Paths) -> String {
+    let (mode, run, human) = match &paths.generated {
+        Some(g) => (
+            "generated",
+            g.run.as_deref().map_or("null".to_string(), json_str),
+            json_str(&g.human_unsolvable.display().to_string()),
+        ),
+        None => ("workshop", "null".to_string(), "null".to_string()),
+    };
+    format!(
+        "{{\"mode\":{},\"run\":{run},\"annotations\":{},\"human_unsolvable\":{human}}}",
+        json_str(mode),
+        json_str(&paths.annotations.display().to_string())
+    )
 }
 
 /// Stage one level with `tools/workshop/stage.py`. The script does the p2c compile, the copy
@@ -745,13 +1194,22 @@ fn stage_request(state: &Mutex<State>, body: &str) -> Result<String, String> {
             return Err("another level is being staged".into());
         }
         let i = *guard.index.get(&id).ok_or_else(|| format!("no level {id}"))?;
-        if guard.records.get(i).map_or(true, |r| r.tokens.is_empty()) {
+        let Some(rec) = guard.records.get(i).filter(|r| !r.tokens.is_empty()) else {
             return Err("this level has no token sequence to stage".into());
-        }
+        };
+        let level = guard.paths.generated.is_some().then(|| {
+            let title = rec
+                .fields
+                .get("title")
+                .map(|t| json_unescape(t.trim_matches('"')))
+                .unwrap_or_else(|| id.clone());
+            (rec.tokens.clone(), title, rec.origin.clone())
+        });
         guard.staging = true;
-        guard.paths.clone()
+        (guard.paths.clone(), level)
     };
-    let result = stage_level(&paths, &id, force);
+    let (paths, level) = paths;
+    let result = stage_level(&paths, &id, force, level);
     let mut guard = state.lock().unwrap();
     guard.staging = false;
     if result.is_ok() {
@@ -763,7 +1221,14 @@ fn stage_request(state: &Mutex<State>, body: &str) -> Result<String, String> {
     result
 }
 
-fn stage_level(paths: &Paths, id: &str, force: bool) -> Result<String, String> {
+/// `level` is a generated level's (tokens, title, origin): the tokens go to stage.py on stdin, since
+/// the script can't look it up by id.
+fn stage_level(
+    paths: &Paths,
+    id: &str,
+    force: bool,
+    level: Option<(String, String, String)>,
+) -> Result<String, String> {
     let root = repo_root()?;
     let script = root.join("tools").join("workshop").join("stage.py");
     if !script.is_file() {
@@ -774,20 +1239,45 @@ fn stage_level(paths: &Paths, id: &str, force: bool) -> Result<String, String> {
     cmd.arg(&script)
         .arg("--id")
         .arg(id)
-        .arg("--all")
-        .arg(&paths.all)
-        .arg("--train")
-        .arg(&paths.train)
-        .arg("--test")
-        .arg(&paths.test)
         .arg("--annotations")
         .arg(&paths.annotations);
+    match &level {
+        Some((_, title, origin)) => {
+            cmd.args(["--tokens-stdin", "--key", "id", "--series", "gen", "--title", title])
+                .args(["--origin", origin])
+                .arg("--registry")
+                .arg(DEFAULT_GEN_REGISTRY);
+        }
+        None => {
+            cmd.arg("--all")
+                .arg(&paths.all)
+                .arg("--train")
+                .arg(&paths.train)
+                .arg("--test")
+                .arg(&paths.test);
+        }
+    }
     if force {
         cmd.arg("--force");
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("can't run {}: {e}", python.display()))?;
+    let out = match &level {
+        Some((tokens, _, _)) => {
+            cmd.stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = cmd
+                .spawn()
+                .map_err(|e| format!("can't run {}: {e}", python.display()))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(tokens.as_bytes())
+                    .map_err(|e| format!("stage.py stdin: {e}"))?;
+            }
+            child.wait_with_output()
+        }
+        None => cmd.output(),
+    }
+    .map_err(|e| format!("can't run {}: {e}", python.display()))?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let json = stdout
@@ -1107,10 +1597,14 @@ mod tests {
                 notes: "a \"note\"\nwith a newline".into(),
                 excluded: true,
                 updated: 7,
+                ..Annotation::default()
             },
         );
         map.insert("empty".into(), Annotation::default());
-        save_annotations(&path, &map).unwrap();
+        save_annotations(&path, "workshop_id", &map).unwrap();
+        // The Workshop store keeps its old shape: no generated-level fields.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("human_verdict") && !text.contains("tokens"), "{text}");
         let back = load_annotations(&path).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back["42"].notes, "a \"note\"\nwith a newline");
@@ -1156,6 +1650,82 @@ mod tests {
     }
 
     #[test]
+    fn generated_levels_merge_by_tokens() {
+        let dir = std::env::temp_dir().join(format!("glados-wb-gen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let run = dir.join("runs").join("r1");
+        std::fs::create_dir_all(run.join("eval").join("ingame")).unwrap();
+        std::fs::write(
+            run.join("eval").join("samples.jsonl"),
+            concat!(
+                "{\"line\": 1, \"tokens\": \"size 1 1 1\", \"verdict\": \"solvable\", \"setting\": \"baseline\", \"sample\": \"x\"}\n",
+                "{\"line\": 2, \"tokens\": \"\", \"verdict\": \"unparsed\"}\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("eval").join("rated-samples.jsonl"),
+            "{\"i\": 0, \"line\": 5, \"tokens\": \"size  1 1 1\", \"outcome\": \"uncertain\", \"novel\": true}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("eval").join("ingame").join("results.jsonl"),
+            "{\"tokens\": \"size 1 1 1\", \"game\": {\"verdict\": \"valid\"}}\n",
+        )
+        .unwrap();
+        let g = Generated {
+            run: Some("r1".into()),
+            run_dir: Some(run.clone()),
+            extra: Vec::new(),
+            human_unsolvable: dir.join("human.jsonl"),
+        };
+        let records = load_generated_levels(&g).unwrap();
+        assert_eq!(records.len(), 1, "the unparsed line is skipped, the copies merge");
+        let r = &records[0];
+        assert_eq!(r.id, token_id("size 1 1 1"));
+        assert_eq!(r.sources, vec!["eval".to_string(), "rated".to_string()]);
+        assert_eq!(r.fields["solver_verdict"], "\"solvable\"");
+        assert_eq!(r.fields["novel"], "true");
+        assert_eq!(r.fields["game"], "{\"verdict\": \"valid\"}");
+        assert!(!r.fields.contains_key("sample"));
+        assert_eq!(r.origin, "r1 eval line 1");
+        assert_eq!(newest_level_run(&dir.join("runs")), None, "no status.json yet");
+        std::fs::write(run.join("status.json"), "{\n  \"started\": \"2026-10-26T10:47:17\",\n  \"task\": \"levels\"\n}").unwrap();
+        assert_eq!(newest_level_run(&dir.join("runs")), Some(run.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn human_unsolvable_rows_come_and_go() {
+        let dir = std::env::temp_dir().join(format!("glados-wb-human-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("human-unsolvable.jsonl");
+        // CRLF, like the real file: rows we don't touch must come back byte for byte.
+        let foreign = "{\"tokens\": \"size 2 2 2\", \"verdict\": \"unsolvable\", \"source\": \"runs/x\"}\r\n";
+        std::fs::write(&path, foreign).unwrap();
+        sync_human_unsolvable(&path, "size 1 1 1", "r1 eval line 1", Some("broken")).unwrap();
+        sync_human_unsolvable(&path, "size 1  1 1", "r1 eval line 1", Some("broken, again")).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(text.contains("\"source\":\"glados-workbench r1 eval line 1\""));
+        assert!(text.contains("broken, again") && text.contains(&format!("\"checked\":\"{}\"", today())));
+        // A level someone else already recorded gets no second row, and keeps theirs.
+        sync_human_unsolvable(&path, "size 2 2 2", "r1 eval line 9", Some("dup")).unwrap();
+        sync_human_unsolvable(&path, "size 2 2 2", "r1 eval line 9", None).unwrap();
+        sync_human_unsolvable(&path, "size 1 1 1", "", None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), foreign);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn today_is_a_date() {
+        let t = today();
+        assert_eq!(t.len(), 10);
+        assert!(t.as_str() >= "2026-01-01" && &t[4..5] == "-", "{t}");
+    }
+
+    #[test]
     fn detail_decodes_the_tokens() {
         let puzzle = crate::fixtures::flat_room();
         let text = tokens::encode(&puzzle).unwrap().join(" ");
@@ -1165,7 +1735,8 @@ mod tests {
                 fields: BTreeMap::new(),
                 tokens: text.clone(),
                 split: None,
-                sources: vec!["workshop"],
+                sources: vec!["workshop".into()],
+                origin: String::new(),
             }],
             index: HashMap::from([("1".to_string(), 0)]),
             levels_json: String::new(),
