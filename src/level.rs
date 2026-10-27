@@ -55,7 +55,7 @@
 //!   "Flying a Timing", play-tested, has a lift from a goo voxel up to a walkway a voxel over
 //!   its track).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::geom::{rotate, step, up_from_angles, Cell, Dir};
 use crate::p2c::{Props, Puzzle, Voxels};
@@ -1326,6 +1326,26 @@ impl Level {
     pub fn cells(&self) -> impl Iterator<Item = Cell> + '_ {
         let [sx, sy, sz] = self.size;
         (0..sz).flat_map(move |z| (0..sy).flat_map(move |y| (0..sx).map(move |x| [x, y, z])))
+    }
+
+    /// Whether `b` can be reached from `a` through open voxels at all, whatever is in the way
+    /// (glass, fields, goo, devices). Nothing but walls stops it, so two cells it says aren't
+    /// connected are walled apart for good: no player, cube, beam or portal shot gets across.
+    pub fn open_connected(&self, a: Cell, b: Cell) -> bool {
+        let mut seen = HashSet::from([a]);
+        let mut stack = vec![a];
+        while let Some(c) = stack.pop() {
+            if c == b {
+                return true;
+            }
+            for d in Dir::ALL {
+                let n = step(c, d);
+                if !self.solid(n) && seen.insert(n) {
+                    stack.push(n);
+                }
+            }
+        }
+        false
     }
 
     pub fn first(&self, kind: &ItemKind) -> Option<&PlacedItem> {

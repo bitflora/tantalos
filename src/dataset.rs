@@ -28,6 +28,9 @@ pub enum Label {
     /// Uses something the solver doesn't model.
     Unsupported(String),
     Unsolvable,
+    /// Unsolvable for certain, without a search: the exit can never be reached
+    /// (`Model::exit_dead`, which says why). Its verdict is "unsolvable", with `"dead"`.
+    Dead(String),
     /// Only liberal rules solve it (in this many actions), or the budget ran out (`None`).
     Uncertain(Option<usize>),
     /// Conservative rules solve it in `min_len` actions; `needs_portals` if they can't
@@ -44,7 +47,7 @@ impl Label {
         match self {
             Label::Invalid(_) => "invalid",
             Label::Unsupported(_) => "unsupported",
-            Label::Unsolvable => "unsolvable",
+            Label::Unsolvable | Label::Dead(_) => "unsolvable",
             Label::Uncertain(_) => "uncertain",
             Label::Solvable { .. } => "solvable",
         }
@@ -58,6 +61,7 @@ impl Label {
                 s.push_str(&format!(",\"problem\":{}", json_str(why)));
             }
             Label::Unsolvable => {}
+            Label::Dead(why) => s.push_str(&format!(",\"dead\":{}", json_str(why))),
             Label::Uncertain(len) => {
                 if let Some(n) = len {
                     s.push_str(&format!(",\"liberal_len\":{n}"));
@@ -205,6 +209,9 @@ pub fn plan_only(
             Label::Invalid(text(invalid))
         }
     })?;
+    if let Some(why) = &model.exit_dead {
+        return Err(Label::Dead(why.clone()));
+    }
     let mut found = model.shortest_plans(budget, k, seed);
     if !matches!(found.0.verdict, Verdict::Solved(_)) && model.could_angle() {
         model = Model::new_angled(&level, Mode::Conservative).expect("same problems");
@@ -276,6 +283,9 @@ fn label_full(
             return (label, None, false);
         }
     };
+    if let Some(why) = &model.exit_dead {
+        return (Label::Dead(why.clone()), None, false);
+    }
     let mut space = model.explore_to_verdict(budget);
     if !matches!(space.verdict(), Verdict::Solved(_)) && model.could_angle() {
         model = Model::new_angled(&level, Mode::Conservative).expect("same problems");

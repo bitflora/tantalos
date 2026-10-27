@@ -1,5 +1,6 @@
 //! Tier-0 solver on the synthetic chambers: verdicts, shortest plans, mutations.
 
+use glados::builder::Builder;
 use glados::fixtures;
 use glados::geom::Dir;
 use glados::level::{ItemKind, Level};
@@ -220,6 +221,70 @@ fn start_open_inverts_the_exit_door() {
     let plan = plan(&p);
     assert_eq!(plan.len(), 3);
     assert!(!plan.iter().any(|a| matches!(a, Action::PickUp { .. })));
+}
+
+/// The exit needs an input nothing can switch on: unsolvable without searching, so even a
+/// budget of one state gives the verdict.
+fn dead_exit(p: &Puzzle) {
+    for mode in [Mode::Conservative, Mode::Liberal] {
+        let m = model_in(p, mode);
+        assert!(m.exit_dead.is_some(), "{}", p.title());
+        assert_eq!(m.solve(1).verdict, Verdict::Unsolvable, "{}", p.title());
+        assert_eq!(m.explore_to_verdict(1).verdict(), Verdict::Unsolvable, "{}", p.title());
+    }
+    let judged = judge(&Level::from_puzzle(p), 1).unwrap();
+    assert_eq!(judged.judgement, Judgement::Unsolvable, "{}", p.title());
+}
+
+#[test]
+fn exit_button_without_a_cube_is_dead() {
+    let mut p = fixtures::worked_example();
+    assert_eq!(model(&p).exit_dead, None);
+    p.items.retain(|i| i.kind() != "ITEM_CUBE");
+    dead_exit(&p);
+    // Inverted, the door is open while the button is up.
+    let exit = p.items.iter_mut().find(|i| i.kind() == "ITEM_EXIT_DOOR").unwrap();
+    exit.set("ITEM_PROPERTY_START_OPEN", "1");
+    assert_eq!(model(&p).exit_dead, None);
+}
+
+#[test]
+fn sphere_button_without_a_sphere_is_dead() {
+    let mut p = fixtures::sphere_button();
+    assert_eq!(model(&p).exit_dead, None);
+    for cube in p.items.iter_mut().filter(|i| i.kind() == "ITEM_CUBE") {
+        cube.set("ITEM_PROPERTY_CUBE_TYPE", "0");
+    }
+    dead_exit(&p);
+}
+
+#[test]
+fn exit_laser_receiver_without_an_emitter_is_dead() {
+    for mut p in [fixtures::laser_relay(), fixtures::laser_cube(true)] {
+        assert_eq!(model(&p).exit_dead, None, "{}", p.title());
+        p.items.retain(|i| !i.kind().starts_with("ITEM_LASER_EMITTER"));
+        dead_exit(&p);
+    }
+}
+
+#[test]
+fn rooms_walled_apart_are_dead() {
+    // Two rooms with a solid wall between them at x = 3.
+    let mut b = Builder::new("Walled apart", [7, 6, 4]);
+    b.carve([0, 0, 1], [2, 5, 3]);
+    b.carve([4, 0, 1], [6, 5, 3]);
+    b.entry([1, 0, 1], Dir::PosY);
+    b.exit([5, 5, 1], Dir::NegY);
+    let p = b.build();
+    dead_exit(&p);
+    // A one-voxel hole in the wall, too high to walk through, joins them.
+    let mut b = Builder::new("Walled apart, with a window", [7, 6, 4]);
+    b.carve([0, 0, 1], [2, 5, 3]);
+    b.carve([4, 0, 1], [6, 5, 3]);
+    b.carve([3, 2, 3], [3, 2, 3]);
+    b.entry([1, 0, 1], Dir::PosY);
+    b.exit([5, 5, 1], Dir::NegY);
+    assert_eq!(model(&b.build()).exit_dead, None);
 }
 
 #[test]

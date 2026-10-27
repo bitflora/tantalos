@@ -22,7 +22,10 @@ order, with nothing to remember:
      is skipped, and `status` says INCOMPLETE until `run.py ingame NAME` redoes it.
   4. train best.pt away from every level Portal 2 has rejected (data/ingame/invalid.jsonl, x5,
      labelled invalid) and every level a play-tester found unsolvable though our solver passed
-     it (data/ingame/human-unsolvable.jsonl, x5, labelled unsolvable) for 15 minutes into
+     it (data/ingame/human-unsolvable.jsonl, x5, labelled unsolvable), and every level of an
+     evaluation whose exit can never be reached (glados-score's "dead": walls part entry and
+     exit, or the exit needs a laser with no emitter or a button with no cube it takes;
+     collected into data/ingame/dead.jsonl, x5, labelled unsolvable) for 15 minutes into
      runs/NAME/away, evaluate that and check it in Portal 2 too. It is the final model unless
      its EVAL solvable share is over 3 points lower (then away/WORSE is written and best.pt
      stays final).
@@ -299,6 +302,7 @@ SOLVE_STEPS = ("training", "evaluating")  # a solver-net run's
 PLANS = ROOT / "data" / "plans" / "train.jsonl"  # its training data (train/plans.py)
 INVALID = ROOT / "data" / "ingame" / "invalid.jsonl"  # levels Portal 2's editor rejected, so far
 HUMAN = ROOT / "data" / "ingame" / "human-unsolvable.jsonl"  # passed our solver, unsolvable in play
+DEAD = ROOT / "data" / "ingame" / "dead.jsonl"  # evaluated levels whose exit can never be reached
 # Workshop levels no level run trains on: their loss (train.py --holdout) shows overfitting to
 # the Workshop part, which the val loss shows poorly.
 WS_TEST = ROOT / "data" / "ws5" / "test.jsonl"
@@ -351,11 +355,35 @@ def quick_guard(d, s):
     return d / "best.pt", f"EVAL {new:.0%}{vs}: this run is the final model"
 
 
+def collect_dead(d):
+    """Add the levels of d's evaluation that glados-score calls dead (the exit can never be
+    reached, whatever the solver's search would say) to DEAD, labelled unsolvable. Returns how
+    many were new."""
+    seen = set()
+    if DEAD.exists():
+        seen = {json.loads(l)["tokens"] for l in DEAD.read_text(encoding="utf-8").splitlines() if l.strip()}
+    new = []
+    for f in (d / "eval" / "samples.jsonl", d / "eval" / "rated-samples.jsonl"):
+        if not f.exists():
+            continue
+        for line in f.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line) if line.strip() else {}
+            if r.get("dead") and r.get("tokens") and r["tokens"] not in seen:
+                seen.add(r["tokens"])
+                new.append({"tokens": r["tokens"], "verdict": "unsolvable", "dead": r["dead"],
+                            "source": str(f.relative_to(ROOT).as_posix())})
+    if new:
+        DEAD.parent.mkdir(parents=True, exist_ok=True)
+        with open(DEAD, "a", encoding="utf-8") as out:
+            out.writelines(json.dumps(r) + "\n" for r in new)
+    return len(new)
+
+
 def away_train(d, s):
     """train.py arguments for training d's best.pt away from the game-rejected levels."""
     name = name_of(d)
     return [
-        "train/train.py", "--data", *s["data"], *[str(f) for f in (INVALID, HUMAN) if f.exists()] * AWAY_REPEAT,
+        "train/train.py", "--data", *s["data"], *[str(f) for f in (INVALID, HUMAN, DEAD) if f.exists()] * AWAY_REPEAT,
         "--vocab", s["vocab"],
         "--out", str(d / "away"), "--init", str(d / "best.pt"), "--block", "1024", "--batch", "16",
         "--eval-every", "1000", "--score-n", "64", "--lr", "2e-4", "--min-lr", "2e-5", "--warmup", "200",
@@ -481,6 +509,7 @@ def pipeline(d, steps=STEPS):
             # to them), then evaluate that. A failure leaves best.pt as the final model.
             try:
                 (d / "away").mkdir(exist_ok=True)
+                say(f"{collect_dead(d)} new dead levels (exit never reachable) added to {DEAD.relative_to(ROOT).as_posix()}")
                 until = (now() + datetime.timedelta(minutes=AWAY_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
                 phase("away", away_train(d, s) + ["--until", until], "away/train.log")
                 if not (d / "away" / "best.pt").exists():

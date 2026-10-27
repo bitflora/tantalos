@@ -9,7 +9,8 @@ Use `train/run.py` for every training run. Don't call train.py, evaluate.py, ing
 pick.py, retrain.sh or loop.sh yourself, and don't change their settings, unless the user asks
 you to. `run.py start` already does every step of a run, in order: build the `glados-*.exe` binaries, train,
 evaluate, check the levels in Portal 2's own editor, train 15 minutes away from every level
-the game has rejected or a play-tester found unsolvable (`data/ingame/human-unsolvable.jsonl`) (into `runs/NAME/away`; evaluated and game-checked too, and the final
+the game has rejected or a play-tester found unsolvable (`data/ingame/human-unsolvable.jsonl`), and every evaluated
+level whose exit can never be reached (`data/ingame/dead.jsonl`, glados-score's `"dead"`) (into `runs/NAME/away`; evaluated and game-checked too, and the final
 model unless it scores over 3 points lower), stage a blind A/B play-test (`train/abtest.py`: 4
 game-checked levels from the final model and 4 from its parent, or from rated Workshop levels
 for a fresh run, shuffled into the Puzzle Maker folder as `glados-ab-NAME-NN`), record in

@@ -800,7 +800,7 @@ fn main() -> std::process::ExitCode {
                     stats.min_len_sum += *min_len;
                 }
                 Label::Uncertain(_) => stats.uncertain += 1,
-                Label::Unsolvable => stats.unsolvable += 1,
+                Label::Unsolvable | Label::Dead(_) => stats.unsolvable += 1,
                 Label::Invalid(_) => stats.invalid += 1,
                 Label::Unsupported(_) => stats.unsupported += 1,
             }

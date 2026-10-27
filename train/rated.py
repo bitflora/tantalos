@@ -147,7 +147,7 @@ def assess(lines, glados, budget=50_000, p2c_dir=None):
         s, t = mechanics(b.get("metrics"))
         rows.append({"i": i, "line": b.get("line", i + 1), "sample": line, "outcome": outcome(a, b),
                      "tokens": b.get("tokens"), "min_len": b.get("min_len"), "metrics": b.get("metrics"),
-                     "problem": a.get("problem") or b.get("problem"), "state": s, "tricks": t,
+                     "problem": a.get("problem") or b.get("problem"), "dead": b.get("dead"), "state": s, "tricks": t,
                      "desc": describe(line)})
     probes = [r for r in rows if r["outcome"] not in ("unparsed",) and r["tokens"]]
     for r, near in zip(probes, nearest([str(WS_TRAIN)], [(-1, r["tokens"]) for r in probes])):

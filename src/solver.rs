@@ -79,7 +79,10 @@
 //!   when told to (`Auto Drop` off, wired) holds its cube until its inputs are first on.
 //!   Whenever a wired dropper's inputs come on (all of them, after not all were), it drops a
 //!   new cube and the old one dissolves: its cube goes back to the dropper (item_dropper.vmf).
-//! - A model that had to leave things out (`Model::complete`) never calls a level unsolvable.
+//! - A model that had to leave things out (`Model::complete`) never calls a level unsolvable,
+//!   except where the exit can never be reached (`Model::exit_dead`): walls part it from the
+//!   entry, or the door needs a laser receiver in a level without an emitter, or a floor
+//!   button without a cube it accepts.
 //!
 //! The search works on states packed into a few words (`Layout`), each stored once in a hash
 //! table (`Table`); `State` is the readable form `successors` and `initial` hand out.
@@ -556,6 +559,11 @@ pub struct Model {
     pub exit_cell: Cell,
     exit_inputs: Vec<Signal>,
     exit_inverted: bool,
+    /// The exit can never be reached: walls part it from the entry (`Level::open_connected`),
+    /// or the door needs an input that can never come on, a laser receiver with no emitter in
+    /// the level or a floor button with no cube it accepts (the player standing on it can't
+    /// also be at the exit). Every search says unsolvable at once. Holds why.
+    pub exit_dead: Option<String>,
     /// Per region: where a cube dropped off each of its ledges lands.
     tosses: Vec<Vec<Landings>>,
     walk: WalkGraph,
@@ -1351,12 +1359,33 @@ impl Model {
             })
             .collect();
 
-        let (Some((_, start)), Some((exit_door, exit_region))) = (entry, exit) else {
+        let (Some((entry_door, start)), Some((exit_door, exit_region))) = (entry, exit) else {
             return Err(problems);
         };
         if !problems.is_empty() {
             return Err(problems);
         }
+        let exit_inverted = !exit_inputs.is_empty() && exit_door.start_open == Some(true);
+        // Every cube is an ITEM_CUBE, a dropper's too.
+        let has_cube = |b: &Button| level.of_kind(&ItemKind::Cube).any(|c| b.kind.accepts(c.cube_kind()));
+        let dead_input = (!exit_inverted)
+            .then(|| {
+                exit_inputs.iter().find_map(|&sig| match sig {
+                    Signal::Laser(_) if level.of_kind(&ItemKind::LaserEmitter).next().is_none() => {
+                        Some("the exit needs a laser receiver and there is no laser emitter")
+                    }
+                    Signal::Floor(b) if !has_cube(&buttons[b]) => {
+                        Some("the exit needs a floor button and there is no cube it takes")
+                    }
+                    _ => None,
+                })
+            })
+            .flatten();
+        let exit_dead = if !level.open_connected(entry_door.cell, exit_door.cell) {
+            Some("walls part the entry from the exit".to_string())
+        } else {
+            dead_input.map(str::to_string)
+        };
 
         // Fizzlers stop shots while on. Every fizzler goes in the shot masks, even one that is
         // always on, so that switching it off (`hazard_enabled`) clears its shots too.
@@ -2021,7 +2050,8 @@ impl Model {
             button_enabled: vec![true; buttons.len()],
             pedestal_enabled: vec![true; pedestals.len()],
             hazard_enabled: vec![true; hazards.len()],
-            exit_inverted: !exit_inputs.is_empty() && exit_door.start_open == Some(true),
+            exit_inverted,
+            exit_dead,
             exit_cell: exit_door.cell,
             graph,
             portals,
@@ -2261,6 +2291,9 @@ impl Model {
     /// others drawn uniformly from all shortest plans (`seed`), each once. Empty unless solved.
     /// Searches the same states as `solve`, plus the goals of the last layer.
     pub fn shortest_plans(&self, max_states: usize, k: usize, seed: u64) -> (Outcome, Vec<Vec<Action>>) {
+        if self.exit_dead.is_some() {
+            return (Outcome { verdict: Verdict::Unsolvable, states: 1 }, Vec::new());
+        }
         let cx = self.context();
         let mut table = Table::new(cx.lay.len);
         let start = self.initial_packed(&cx);
@@ -2386,6 +2419,12 @@ impl Model {
     }
 
     fn search(&self, max_states: usize, max_len: Option<usize>) -> Outcome {
+        if self.exit_dead.is_some() {
+            return Outcome {
+                verdict: Verdict::Unsolvable,
+                states: 1,
+            };
+        }
         let cx = self.context();
         let mut table = Table::new(cx.lay.len);
         let start = self.initial_packed(&cx);
@@ -2471,6 +2510,14 @@ impl Model {
             parent: Vec::new(),
             regions: Vec::new(),
         };
+        if self.exit_dead.is_some() {
+            // Just the start, with no way on: the verdict is unsolvable.
+            space.complete = true;
+            space.goal.push(false);
+            space.regions.push(start[0]);
+            space.offsets.push(0);
+            return space;
+        }
         let (mut cur, mut sc) = (Vec::new(), Scratch::default());
         let mut solved = false;
         let mut i = 0;
