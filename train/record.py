@@ -78,11 +78,22 @@ GOBLIN_FIELDS = SETTINGS + [
     "ws_solved",
     "published_solved",
     "published_liberal_solved",
+    "v6_solved",
+    "gen_solved",
+    "mut_solved",
+    "hard_solved",
+    "probe_solved",
+    "frontier_solved",
+    "frontier_liberal_solved",
     "notes",
 ]
-# goblin_eval.py's other sets, and the column of each one's greedy solved share.
+# goblin_eval.py's other sets, and the column of each one's greedy solved share. (The headline
+# set's goes in eval_solved too: test-ws+v6 on data/goblin, test-gen on data/plans.)
 GOBLIN_SETS = {"test-ws": "ws_solved", "published": "published_solved",
-               "published-liberal": "published_liberal_solved"}
+               "published-liberal": "published_liberal_solved", "test-v6": "v6_solved",
+               "test-gen": "gen_solved", "test-mut": "mut_solved", "test-hard": "hard_solved",
+               "probe": "probe_solved", "test-frontier": "frontier_solved",
+               "test-frontier-liberal": "frontier_liberal_solved"}
 
 
 GOBLIN = "goblin"

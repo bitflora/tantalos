@@ -230,8 +230,9 @@ class GPT(nn.Module):
             if done.all() or step == steps - 1:
                 break
             at = n + step
-            logits, _ = self(nxt, caches=caches, positions=(lens + step)[:, None],
-                             mask=real[:, None, None, : at + 1])
+            # A row past its last step is done; its position is only kept inside the block.
+            where = (lens + step).clamp(max=self.cfg.block_size - 1)[:, None]
+            logits, _ = self(nxt, caches=caches, positions=where, mask=real[:, None, None, : at + 1])
         gen = torch.cat(new, dim=1).tolist() if new else [[] for _ in prompts]
         outs = []
         for r, seq in enumerate(gen):

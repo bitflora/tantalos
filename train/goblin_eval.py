@@ -4,17 +4,23 @@
     .venv/Scripts/python train/goblin_eval.py runs/solve-fresh-3h/best.pt
 
 For each level it writes one greedy plan and --k sampled ones, and `glados-score check` replays
-them on our solver's model. The levels:
-  test-gen   generated levels held out of training (data/plans/test-gen.jsonl, --n-gen of them)
-  test-ws    the Workshop test split our solver solves (data/plans/test-ws.jsonl)
-  published  Workshop levels our solver can't solve (`verdict: published` in data/ws3/test.jsonl,
-             --n-published of them). The conservative check uses the very rules the solver
-             fails on, so it mostly says no; `published-liberal` (check --mode liberal) is a
-             weak signal. The real test for these is playing them in Portal 2.
+them on our solver's model. The levels, from --plans (data/goblin, train/goblin_data.py; the
+older data/plans has only the first two and `published`):
+  test-ws    the Workshop test split our solver solves (all of them)
+  test-v6    levels the level net wrote, held out by puzzle (--n-sets of them)
+  test-gen   generated levels held out (--n-gen)
+  test-mut   mutants of Workshop test levels (--n-sets)
+  test-hard  held-out levels whose search took over 50k states (--n-sets)
+  probe      held-out primers, small levels that show one mechanic each; reported per mechanic
+  test-frontier  Workshop test levels our solver runs out of budget on (--n-sets): solving one
+             means beating the search. Checked in conservative and liberal mode
+             (`test-frontier-liberal`, a weak signal: play them to know)
+  published  (data/plans only) Workshop levels our solver can't solve, from data/ws3/test.jsonl
 
 Writes <checkpoint dir>/eval/ (or --out): report.md, eval.json and solutions.jsonl (every
-level with its plans and verdicts). The headline number is the share of test-gen levels the
-greedy plan solves.
+level with its plans and verdicts). The headline number is the share of test-ws and test-v6
+levels together (the Workshop and the level net's: what Goblin is for) the greedy plan solves;
+on data/plans, the test-gen share.
 """
 
 import argparse
@@ -36,7 +42,11 @@ from seeding import resolve  # noqa: E402
 from record import GOBLIN, task_name  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-HEADLINE = "test-gen"
+HEADLINE = "test-ws+v6"  # test-ws and test-v6 together
+OLD_HEADLINE = "test-gen"  # data/plans has no test-v6
+# data/goblin's sets checked in conservative mode, in report order, and how many of each
+# (`--n-sets`, else all) are asked; the frontier is checked in both modes.
+SETS = ("test-ws", "test-v6", "test-gen", "test-mut", "test-hard", "probe")
 # Verdicts for levels the net was never asked about: tokens its vocabulary lacks, or a level
 # that leaves no room in the block for a plan.
 SKIPPED = ("unknown_tokens", "too_long")
@@ -114,7 +124,8 @@ def solve_levels(model, vocab, records, k, temperature, glados, modes, rows):
     sampled = generate_plans(model, vocab, [prompts[i] for i in asked for _ in range(k)], temperature, None, rows)
     samples = {i: sampled[j * k : (j + 1) * k] for j, i in enumerate(asked)}
     out = [{"tokens": r["tokens"], "min_len": r.get("min_len"), "metrics": r.get("metrics"),
-            "workshop_id": r.get("workshop_id"), "greedy_plan": greedy.get(i), "sample_plans": samples.get(i, [])}
+            "workshop_id": r.get("workshop_id"), "primer": r.get("primer"), "src": r.get("src"),
+            "greedy_plan": greedy.get(i), "sample_plans": samples.get(i, [])}
            for i, r in enumerate(records)]
     items = [{"tokens": o["tokens"], "min_len": o["min_len"],
               "plans": [o["greedy_plan"]] + o["sample_plans"]}
@@ -172,6 +183,15 @@ def set_summary(levels, mode, k):
             by_len[key][0] += 1
             by_len[key][1] += ok
     s["by_mechanic"] = {m: {"n": a, "solved": b / a} for m, (a, b) in by_mech.items()}
+    # Primers: the mechanic each shows (goblin_data.py's probe set).
+    by_primer = {}
+    for lv, r in zip(levels, greedy):
+        if lv.get("primer"):
+            by_primer.setdefault(lv["primer"], [0, 0])
+            by_primer[lv["primer"]][0] += 1
+            by_primer[lv["primer"]][1] += r["verdict"] == "solved"
+    if by_primer:
+        s["by_primer"] = {m: {"n": a, "solved": b / a} for m, (a, b) in sorted(by_primer.items())}
     s["by_min_len"] = {key: {"n": a, "solved": b / a} for key, (a, b) in by_len.items()}
     # Where the greedy plans that fail go wrong.
     fails = [r for r in greedy if r["verdict"] != "solved"]
@@ -186,9 +206,10 @@ def pct(x):
 
 def report(ck_path, sets, k, seconds):
     lines = [f"# Goblin evaluation: {ck_path}", ""]
-    head = sets.get(HEADLINE)
+    name = HEADLINE if HEADLINE in sets else OLD_HEADLINE
+    head = sets.get(name)
     if head:
-        lines += [f"**Solved (greedy, {HEADLINE}): {pct(head['solved'])}** of {head['n']} levels "
+        lines += [f"**Solved (greedy, {name}): {pct(head['solved'])}** of {head['n']} levels "
                   f"(the headline number); pass@{k} {pct(head['pass_at_k'])}, optimal {pct(head['optimal'])}.", ""]
     lines += [f"| set | levels | solved (greedy) | pass@{k} | sampled plans solved | optimal | parsed | verdicts |",
               "|---|---|---|---|---|---|---|---|"]
@@ -196,10 +217,15 @@ def report(ck_path, sets, k, seconds):
         verdicts = ", ".join(f"{v} {c}" for v, c in sorted(s["verdicts"].items(), key=lambda x: -x[1]))
         lines.append(f"| {name} | {s['n']} | {pct(s['solved'])} | {pct(s['pass_at_k'])} | {pct(s['sample_solved'])} "
                      f"| {pct(s['optimal'])} | {pct(s['parsed'])} | {verdicts} |")
-    lines += ["", "`published` levels have no solver plan: optimal doesn't apply, and the conservative check "
-              "mostly says no by construction. `published-liberal` is a weak signal; play them to know.", ""]
+    lines += ["", "`test-frontier` and `published` levels have no solver plan: optimal doesn't apply, and a "
+              "conservative solve beats the solver's own search. Their `-liberal` rows are a weak signal; "
+              "play them to know.", ""]
     for name, s in sets.items():
         lines += [f"## {name}", ""]
+        if s.get("by_primer"):
+            lines += ["| primer's mechanic | levels | solved |", "|---|---|---|"]
+            lines += [f"| {m} | {v['n']} | {pct(v['solved'])} |" for m, v in s["by_primer"].items()]
+            lines.append("")
         if "length" in s:
             L = s["length"]
             hist = ", ".join(f"{'shorter' if e < 0 else f'+{e}' + ('+' if e == 3 else '')} {c}"
@@ -245,7 +271,8 @@ def main():
     ap.add_argument("--published", default="data/ws3/test.jsonl", help="Workshop levels; those with verdict published are used")
     ap.add_argument("--n-gen", type=int, default=1024, help="test-gen levels (0: all)")
     ap.add_argument("--n-ws", type=int, default=0, help="test-ws levels (0: all)")
-    ap.add_argument("--n-published", type=int, default=256)
+    ap.add_argument("--n-published", type=int, default=256, help="published levels (data/plans) or test-frontier ones")
+    ap.add_argument("--n-sets", type=int, default=1024, help="levels of each other set (0: all)")
     ap.add_argument("--k", type=int, default=8, help="sampled plans per level, for pass@k")
     ap.add_argument("--temperature", type=float, default=1.0, help="for the sampled plans")
     ap.add_argument("--rows", type=int, default=64, help="plans generated at once")
@@ -269,13 +296,18 @@ def main():
     published = ROOT / args.published if not Path(args.published).is_absolute() else Path(args.published)
 
     todo = []  # (set name, records, check modes)
-    for name, n in ((HEADLINE, args.n_gen), ("test-ws", args.n_ws)):
+    sizes = {"test-gen": args.n_gen, "test-ws": args.n_ws, "probe": 0}
+    for name in SETS:
         path = plans / f"{name}.jsonl"
-        if path.exists():
-            todo.append((name, pick(read_jsonl(path, lambda r: bool(r.get("plan"))), n, args.seed), ["conservative"]))
-        else:
+        recs = read_jsonl(path, lambda r: bool(r.get("plan"))) if path.exists() else []
+        if recs:
+            todo.append((name, pick(recs, sizes.get(name, args.n_sets), args.seed), ["conservative"]))
+        elif name in ("test-gen", "test-ws"):
             print(f"{path} is missing: no {name} levels")
-    if published.exists() and args.n_published:
+    frontier = plans / "test-frontier.jsonl"
+    if frontier.exists() and args.n_published:
+        todo.append(("test-frontier", pick(read_jsonl(frontier), args.n_published, args.seed), ["conservative", "liberal"]))
+    elif published.exists() and args.n_published:
         recs = read_jsonl(published, lambda r: r.get("verdict") == "published")
         todo.append(("published", pick(recs, args.n_published, args.seed), ["conservative", "liberal"]))
     if not todo:
@@ -293,9 +325,13 @@ def main():
             print(f"{key}: {pct(sets[key]['solved'])} solved (greedy), pass@{args.k} "
                   f"{pct(sets[key]['pass_at_k'])}, {len(levels)} levels, {time.time() - t:.0f}s", flush=True)
         solutions += [{"set": name, **lv} for lv in levels]
+        if name in ("test-ws", "test-v6"):
+            both = [lv for lv in solutions if lv["set"] in ("test-ws", "test-v6")]
+            if {lv["set"] for lv in both} == {"test-ws", "test-v6"}:
+                sets = {HEADLINE: set_summary(both, "conservative", args.k), **sets}
 
     seconds = time.time() - t0
-    head = HEADLINE if HEADLINE in sets else next(iter(sets))
+    head = next((h for h in (HEADLINE, OLD_HEADLINE) if h in sets), next(iter(sets)))
     result = {
         "task": GOBLIN,
         "checkpoint": str(args.checkpoint),

@@ -518,17 +518,26 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
     return out["train"], out["val"], skipped
 
 
+# How often a level with plans that solve it another way (`alt_plans`, goblin_data.py) is
+# shown one of those instead of a shortest plan.
+ALTERNATIVE_SHARE = 0.3
+
+
 class GoblinPlans(Levels):
     """Levels with their plans (task `goblin`), one split, as flat tensors. The level is the
-    prompt; a plan and <eos> are what is learned. A level can have several plans (different
-    shortest ones): each time it comes up, one of them is taken at random."""
+    prompt; a plan and <eos> are what is learned. A level can have several plans: different
+    shortest ones, then ones that solve it another way. Each time it comes up, one of them is
+    taken at random: an alternative ALTERNATIVE_SHARE of the time if it has any, else a
+    shortest one."""
 
-    def __init__(self, level_ids, level_offsets, plan_ids, plan_offsets, plan_groups, min_lens):
+    def __init__(self, level_ids, level_offsets, plan_ids, plan_offsets, plan_groups, min_lens, shortest=None):
         # As in Levels, `level_ids`/`offsets` hold what is learned: here the plans.
         super().__init__(plan_ids, plan_offsets, None, [])
         self.prompt_ids = level_ids  # int16, all levels end to end
         self.prompt_offsets = level_offsets  # int64, len N + 1
         self.groups = plan_groups  # int64, len N + 1: level i's plans are groups[i]..groups[i + 1]
+        # Per record, how many of its plans are shortest ones (the rest are alternatives).
+        self.shortest = shortest if shortest is not None else (plan_groups[1:] - plan_groups[:-1]).tolist()
         self.min_lens = min_lens  # the solver's plan length per record (-1: unknown)
 
     def __len__(self):
@@ -545,7 +554,9 @@ class GoblinPlans(Levels):
 
     def sequence(self, i, drop=0.0):
         level = self.level(i)
-        j = random.randrange(int(self.groups[i]), int(self.groups[i + 1]))
+        a, b = int(self.groups[i]), int(self.groups[i + 1])
+        s = a + self.shortest[i]
+        j = random.randrange(s, b) if s < b and random.random() < ALTERNATIVE_SHARE else random.randrange(a, s)
         plan = self.level_ids[self.offsets[j] : self.offsets[j + 1]].tolist()
         ids = [BOS] + level + [SEP] + plan + [EOS]
         learn = [False] * (len(level) + 2) + [True] * (len(plan) + 1)
@@ -584,15 +595,17 @@ class LengthStats:
 
 
 def load_goblin(paths, vocab, block_size, val_share=0.05, seed=0):
-    """Train and validation `GoblinPlans` from data/goblin (or data/plans) JSONL ({tokens, plan, plans, min_len, ...};
-    `plans`, if there, lists every plan of the level, `plan` first), streamed, and the
+    """Train and validation `GoblinPlans` from data/goblin (or data/plans) JSONL ({tokens, plan,
+    plans, alt_plans, min_len, identity, ...}; `plans`, if there, lists every shortest plan of
+    the level, `plan` first; `alt_plans` ones that solve it another way), streamed, and the
     `LengthStats` of every record's first plan. Records too long for `block_size`, or with
     tokens the vocabulary lacks, are dropped, and so are other plans too long for it. A record
-    goes to validation by a hash of its level, so a level repeated in the data stays on one
-    side."""
+    goes to validation by a hash of its `identity` (the puzzle it belongs to: goblin_data.py),
+    else of its level, so a puzzle's versions and mutants stay on one side."""
     stats = LengthStats(block_size)
     stats.unknown = 0
-    splits = {name: (array("h"), array("q", [0]), array("h"), array("q", [0]), array("q", [0]), array("h"))
+    splits = {name: (array("h"), array("q", [0]), array("h"), array("q", [0]), array("q", [0]), array("h"),
+                     array("q"))
               for name in ("train", "val")}
     cut = int(val_share * 2**32)
     for p in paths:
@@ -606,16 +619,19 @@ def load_goblin(paths, vocab, block_size, val_share=0.05, seed=0):
                 level, plan = r["tokens"].split(), r["plan"].split()
                 if not stats.add(len(level), len(plan)):
                     continue
-                others = [p.split() for p in r.get("plans", [])[1:]]
-                others = [p for p in others if len(level) + len(p) + 3 <= block_size]
+                fits = lambda ps: [p for p in ps if len(level) + len(p) + 3 <= block_size]  # noqa: E731
+                others = fits([p.split() for p in r.get("plans", [])[1:]])
+                alts = fits([p.split() for p in r.get("alt_plans", [])])
                 try:
                     level_ids = vocab.encode(level)
-                    plans_ids = [vocab.encode(p) for p in [plan] + others]
+                    plans_ids = [vocab.encode(p) for p in [plan] + others + alts]
                 except KeyError:
                     stats.unknown += 1
                     continue
-                split = "val" if zlib.crc32(f"{seed} {r['tokens']}".encode()) < cut else "train"
-                lv, lo, pl, po, pg, ml = splits[split]
+                key = r.get("identity") or r["tokens"]
+                split = "val" if zlib.crc32(f"{seed} {key}".encode()) < cut else "train"
+                lv, lo, pl, po, pg, ml, sh = splits[split]
+                sh.append(1 + len(others))
                 lv.extend(level_ids)
                 lo.append(len(lv))
                 for plan_ids in plans_ids:
@@ -629,8 +645,8 @@ def load_goblin(paths, vocab, block_size, val_share=0.05, seed=0):
 
     out = {
         name: GoblinPlans(tensor(lv, torch.int16), tensor(lo, torch.int64), tensor(pl, torch.int16),
-                     tensor(po, torch.int64), tensor(pg, torch.int64), ml.tolist())
-        for name, (lv, lo, pl, po, pg, ml) in splits.items()
+                          tensor(po, torch.int64), tensor(pg, torch.int64), ml.tolist(), sh.tolist())
+        for name, (lv, lo, pl, po, pg, ml, sh) in splits.items()
     }
     return out["train"], out["val"], stats
 

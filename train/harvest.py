@@ -20,6 +20,10 @@ To train on them, pass them with the usual data:
         --data "data/v5b/levels-*.jsonl" data/harvest/RUN.jsonl --note "..."
 
 Put earlier harvests in `--data` here so later rounds only keep levels new to all of them.
+
+`--keep-unsolved FILE` also writes the sampled levels the solver runs out of budget on
+(`uncertain`: editor-valid, not proven unsolvable), once each, to FILE: Goblin's self-play pool
+(docs/goblin-plan-2026-10-27.md), levels it can only get by beating the search.
 """
 
 import argparse
@@ -102,6 +106,8 @@ def main():
     ap.add_argument("--max-similarity", type=float, default=0.9,
                     help="drop levels this close (Jaccard) to a same-size --data level")
     ap.add_argument("--out", default=None, help="default data/harvest/<run>.jsonl")
+    ap.add_argument("--keep-unsolved", default=None, metavar="FILE",
+                    help="also write the levels the solver runs out of budget on here (appended)")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-k", type=int, default=None)
     ap.add_argument("--batch", type=int, default=64)
@@ -128,6 +134,7 @@ def main():
 
     counts = Counter()
     candidates = []
+    unsolved = {}
     t0 = time.time()
     for start in range(0, args.n, args.chunk):
         k = min(args.chunk, args.n - start)
@@ -138,6 +145,8 @@ def main():
             if r["verdict"] == "unparsed":
                 continue
             counts["parsed"] += 1
+            if r["verdict"] == "uncertain" and args.keep_unsolved:
+                unsolved.setdefault(r["tokens"], r)
             if r["verdict"] != "solvable":
                 continue
             counts["solvable"] += 1
@@ -158,6 +167,15 @@ def main():
             rec["n_tokens"] = len(r["tokens"].split())
             rec.update(source="model", checkpoint=str(args.checkpoint), cond=args.cond)
             f.write(json.dumps(rec) + "\n")
+    if args.keep_unsolved:
+        Path(args.keep_unsolved).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.keep_unsolved, "a", encoding="utf-8", newline="\n") as f:
+            for r in unsolved.values():
+                rec = {k: r[k] for k in ("tokens", "verdict") if k in r}
+                rec.update(n_tokens=len(r["tokens"].split()), source="model", checkpoint=str(args.checkpoint),
+                           cond=args.cond)
+                f.write(json.dumps(rec) + "\n")
+        print(f"wrote {len(unsolved)} levels the solver ran out of budget on to {args.keep_unsolved}")
     sims = [s for s in near if s is not None]
     print(f"conditions: {args.cond or '(none)'}")
     for name, c in counts.items():
