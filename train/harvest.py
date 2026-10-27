@@ -206,7 +206,7 @@ def main():
         nonlocal waited
         start, k = queued.pop(0)
         t = time.time()
-        results = scorer.take(k)
+        results = scorer.take()
         waited += time.time() - t
         with open(partial, "a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps({"start": start, "k": k, "results": results}) + "\n")

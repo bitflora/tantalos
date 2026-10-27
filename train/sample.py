@@ -9,11 +9,10 @@ solvable levels as .p2c with --p2c.
 
 import argparse
 import json
-import queue
 import subprocess
 import sys
-import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -61,9 +60,11 @@ def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, 
     return lines
 
 
-def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None, editor_rules=True, p2c_all=False):
+def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None, editor_rules=True, p2c_all=False,
+          low_priority=False):
     """One result dict per line, from `glados-score score`. p2c_dir gets the solvable levels as
-    .p2c (every parsed one with p2c_all); editor_rules=False is how Workshop levels are scored."""
+    .p2c (every parsed one with p2c_all); editor_rules=False is how Workshop levels are scored;
+    low_priority runs it at below-normal priority (on Windows)."""
     args = [str(Path(glados).resolve()), "score", "--budget", str(budget)]
     if p2c_dir:
         args += ["--p2c-all" if p2c_all else "--p2c", str(p2c_dir)]
@@ -71,65 +72,31 @@ def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None, editor_rule
         args += ["--editor-rules", "off"]
     # Empty lines would be skipped by glados and break the alignment.
     text = "\n".join(line if line.strip() else "<empty>" for line in lines) + "\n"
-    out = subprocess.run(args, input=text, capture_output=True, text=True, check=True)
+    flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if low_priority and sys.platform == "win32" else 0
+    out = subprocess.run(args, input=text, capture_output=True, text=True, check=True, creationflags=flags)
     return [json.loads(line) for line in out.stdout.splitlines()]
 
 
 class Scorer:
-    """`score` as one long-lived `glados-score score` process, so the CPU scores levels while the
-    GPU samples the next ones: `send` a list of lines (returns at once), `take` that many results
-    later, in order. It runs at below-normal priority: it still gets every idle core, but the
-    sampling thread (which keeps the GPU fed) wins when they compete."""
+    """`score` in the background, so the CPU scores one chunk of levels while the GPU samples the
+    next: `send` a list of lines (returns at once), `take` the oldest chunk's results. Each chunk
+    is its own `glados-score score`, at below-normal priority: it still gets every idle core, but
+    the sampling thread (which keeps the GPU fed) wins when they compete. (Not one long-lived
+    process: glados writes its results only when its input ends.)"""
 
     def __init__(self, glados=DEFAULT_GLADOS, budget=50_000):
-        args = [str(Path(glados).resolve()), "score", "--budget", str(budget)]
-        flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == "win32" else 0
-        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
-                                     encoding="utf-8", creationflags=flags)
-        self.inbox, self.results = queue.Queue(), queue.Queue()
-        # A thread each way, so neither pipe fills up while this one is busy sampling.
-        self.writer = threading.Thread(target=self._write, daemon=True)
-        self.reader = threading.Thread(target=self._read, daemon=True)
-        self.writer.start()
-        self.reader.start()
-
-    def _write(self):
-        try:
-            for lines in iter(self.inbox.get, None):
-                # Empty lines would be skipped by glados and break the alignment.
-                self.proc.stdin.write("".join((l if l.strip() else "<empty>") + "\n" for l in lines))
-                self.proc.stdin.flush()
-        except OSError:
-            pass  # glados stopped: take() and close() say so
-        finally:
-            try:
-                self.proc.stdin.close()
-            except OSError:
-                pass
-
-    def _read(self):
-        for line in self.proc.stdout:
-            self.results.put(json.loads(line))
-        self.results.put(None)
+        self.glados, self.budget = glados, budget
+        self.pool = ThreadPoolExecutor(max_workers=2)
+        self.pending = []
 
     def send(self, lines):
-        self.inbox.put(list(lines))
+        self.pending.append(self.pool.submit(score, list(lines), self.glados, self.budget, low_priority=True))
 
-    def take(self, k):
-        out = []
-        for _ in range(k):
-            r = self.results.get()
-            if r is None:
-                raise RuntimeError(f"glados-score score stopped (exit code {self.proc.wait()}) "
-                                   f"after {len(out)} of {k} results")
-            out.append(r)
-        return out
+    def take(self):
+        return self.pending.pop(0).result()
 
     def close(self):
-        self.inbox.put(None)
-        self.writer.join()
-        if self.proc.wait() != 0:
-            raise subprocess.CalledProcessError(self.proc.returncode, self.proc.args)
+        self.pool.shutdown()
 
 
 def summarize(results):
