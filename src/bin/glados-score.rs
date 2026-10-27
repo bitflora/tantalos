@@ -11,7 +11,8 @@ use glados::solver::{Mode, Model, Problem, DEFAULT_MAX_STATES};
 use glados::{dataset, plan, route, tokens};
 
 const USAGE: &str = "usage:
-  glados-score score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [--plan-only] [--plans K] [FILE]
+  glados-score score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [--plan-only] [--plans K]
+                     [--alternatives N] [FILE]
                                 decode and solve one token sequence per line of FILE (or
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
                                 --p2c-all every one that parsed. --editor-rules off: don't
@@ -22,7 +23,10 @@ const USAGE: &str = "usage:
                                 --plan-only: just the plan and min_len, for levels already
                                 labelled solvable: no metrics, portal check or liberal model.
                                 --plans K (with --plan-only): also \"plans\", up to K
-                                different shortest plans, \"plan\" first
+                                different shortest plans, \"plan\" first. --alternatives N
+                                (with --plan-only): also \"alt_plans\", up to N plans that
+                                solve it another way (a face class the first plan fires at
+                                switched off; at most 3 actions longer)
   glados-score check [--mode conservative|liberal] [--route DIR] [FILE]
                                 check plans: JSONL with \"tokens\" (a level) and \"plan\" (plan
                                 tokens) or \"plans\" (a list of them, all against one model),
@@ -149,6 +153,7 @@ fn run_score(args: &[String]) -> Result<()> {
     let mut with_plan = false;
     let mut plan_only = false;
     let mut k = 1;
+    let mut alternatives = 0;
     let mut rest = Vec::new();
     // `--plan` and `--plan-only` take no value.
     let args: Vec<String> = args
@@ -166,6 +171,7 @@ fn run_score(args: &[String]) -> Result<()> {
         match flag {
             "--budget" => budget = parse(flag, value)?,
             "--plans" => k = parse(flag, value)?,
+            "--alternatives" => alternatives = parse(flag, value)?,
             "--editor-rules" => {
                 editor_rules = match value {
                     "on" => true,
@@ -213,22 +219,25 @@ fn run_score(args: &[String]) -> Result<()> {
                         format!("\"tokens\":{},", dataset::json_str(&t))
                     });
                     if plan_only {
-                        let fields = match dataset::plan_only(&p, budget, editor_rules, k, i as u64) {
-                            Ok((len, Ok(ts))) => {
+                        let list = |ts: &[String]| {
+                            ts.iter().map(|t| dataset::json_str(t)).collect::<Vec<_>>().join(",")
+                        };
+                        let fields = match dataset::plan_only(&p, budget, editor_rules, k, i as u64, alternatives) {
+                            Ok(found) => {
                                 let mut f = format!(
-                                    "\"verdict\":\"solvable\",\"min_len\":{len},\"plan\":{}",
-                                    dataset::json_str(&ts[0])
+                                    "\"verdict\":\"solvable\",\"min_len\":{},\"states\":{},\"plan\":{}",
+                                    found.min_len,
+                                    found.states,
+                                    dataset::json_str(&found.plans[0])
                                 );
                                 if k > 1 {
-                                    let all: Vec<String> = ts.iter().map(|t| dataset::json_str(t)).collect();
-                                    f += &format!(",\"plans\":[{}]", all.join(","));
+                                    f += &format!(",\"plans\":[{}]", list(&found.plans));
+                                }
+                                if alternatives > 0 {
+                                    f += &format!(",\"alt_plans\":[{}]", list(&found.alt_plans));
                                 }
                                 f
                             }
-                            Ok((len, Err(e))) => format!(
-                                "\"verdict\":\"solvable\",\"min_len\":{len},\"plan_error\":{}",
-                                dataset::json_str(&e)
-                            ),
                             Err(label) => label.json_fields(),
                         };
                         return Ok((

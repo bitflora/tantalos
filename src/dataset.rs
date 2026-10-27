@@ -178,15 +178,17 @@ pub fn label_with_plan(
 /// (or why it couldn't be grounded), without the metrics, the portal check or the liberal model
 /// that labelling pays for. A level that no longer solves gets its label instead: `Invalid`,
 /// `Unsupported`, `Unsolvable`, or `Uncertain(None)` if the budget ran out. With `k` > 1, up to
-/// `k` different shortest plans (`Model::shortest_plans`, `seed`), the solver's own first; one
-/// that doesn't ground is left out, and an `Err` means the first didn't.
+/// `k` different shortest plans (`Model::shortest_plans`, `seed`), the solver's own first.
+/// With `alternatives` > 0, also up to that many plans that solve it another way (`Planned`).
+/// A plan the route can't ground is written from its actions (`plan::encode_actions`).
 pub fn plan_only(
     puzzle: &Puzzle,
     budget: usize,
     editor_rules: bool,
     k: usize,
     seed: u64,
-) -> Result<(usize, Result<Vec<String>, String>), Label> {
+    alternatives: usize,
+) -> Result<Planned, Label> {
     let level = Level::from_puzzle(puzzle);
     let problems = level.mount_problems_with(editor_rules);
     if !problems.is_empty() {
@@ -219,31 +221,71 @@ pub fn plan_only(
     }
     match found.0.verdict {
         Verdict::Solved(plan) => {
+            // Other ways: the first plan's face classes switched off one at a time.
+            let mut others: Vec<Vec<Action>> = Vec::new();
+            let mut fired: Vec<usize> = plan
+                .iter()
+                .filter_map(|a| match *a {
+                    Action::Fire { class, .. } | Action::Loop { refire: Some(class), .. } => Some(class),
+                    _ => None,
+                })
+                .collect();
+            fired.sort_unstable();
+            fired.dedup();
+            for c in fired {
+                if others.len() >= alternatives {
+                    break;
+                }
+                model.class_enabled[c] = false;
+                let out = model.solve(budget);
+                model.class_enabled[c] = true;
+                if let Verdict::Solved(p) = out.verdict {
+                    if p.len() <= plan.len() + ALTERNATIVE_SLACK && !others.contains(&p) && !found.1.contains(&p) {
+                        others.push(p);
+                    }
+                }
+            }
             // A plan the route can't ground (a loop, a double dash, ...) is written from its
             // actions instead: `check` takes either back.
-            let ground = |p: &[Action]| -> Result<String, String> {
-                Ok(crate::route::route_plan(&level, &model, p)
+            let ground = |p: &[Action]| -> String {
+                crate::route::route_plan(&level, &model, p)
                     .map(|r| crate::plan::encode(&r))
-                    .unwrap_or_else(|_| crate::plan::encode_actions(&model, p)))
+                    .unwrap_or_else(|_| crate::plan::encode_actions(&model, p))
             };
-            Ok((
-                plan.len(),
-                ground(&plan).map(|first| {
-                    let mut texts = vec![first];
-                    for t in found.1[1..].iter().filter_map(|p| ground(p).ok()) {
-                        // Different actions can come out as the same plan tokens.
-                        if !texts.contains(&t) {
-                            texts.push(t);
-                        }
-                    }
-                    texts
-                }),
-            ))
+            let mut plans: Vec<String> = Vec::new();
+            for t in found.1.iter().map(|p| ground(p)) {
+                // Different actions can come out as the same plan tokens.
+                if !plans.contains(&t) {
+                    plans.push(t);
+                }
+            }
+            let mut alt_plans: Vec<String> = Vec::new();
+            for t in others.iter().map(|p| ground(p)) {
+                if !plans.contains(&t) && !alt_plans.contains(&t) {
+                    alt_plans.push(t);
+                }
+            }
+            Ok(Planned { min_len: plan.len(), states: found.0.states, plans, alt_plans })
         }
         Verdict::Unsolvable => Err(Label::Unsolvable),
         Verdict::Unknown => Err(Label::Uncertain(None)),
     }
 }
+
+/// What `plan_only` found for a solvable level.
+pub struct Planned {
+    pub min_len: usize,
+    /// States the shortest-plan search stored (how hard the level is to search).
+    pub states: usize,
+    /// Different shortest plans, the solver's own first.
+    pub plans: Vec<String>,
+    /// Plans that solve it another way: each found with one of the face classes the first plan
+    /// fires at switched off, at most `ALTERNATIVE_SLACK` actions longer than the shortest.
+    pub alt_plans: Vec<String>,
+}
+
+/// How much longer than the shortest an alternative plan may be.
+pub const ALTERNATIVE_SLACK: usize = 3;
 
 /// `label_known`, with the conservative plan when the search found one, and whether it took
 /// angled laser spots (`Model::new_angled`: tried only when the plain model doesn't solve it).
