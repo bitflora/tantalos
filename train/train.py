@@ -21,9 +21,10 @@ sequences in train/data.py). Its eval replays greedy plans for --score-n
 validation levels with `glados-score check` and logs the solved share. --init from a level model keeps
 the embeddings of the tokens both know (level words), and drops its conditions.
 
-Training batches hold levels of similar length (--bucket), so they pad little. On the GPU the
-process keeps to --gpu-mem: on Windows, outgrowing the free GPU memory doesn't fail, the driver
-pages to system memory instead and everything slows down.
+Training batches hold levels of similar length (--bucket), so they pad little. On the GPU there is
+no memory cap by default (since 2026-10-28, after a 2.7 GB cap killed goblin-v6init-12h): on
+Windows, outgrowing the GPU memory doesn't fail, the driver pages to system memory and that step
+slows down. --gpu-mem GB keeps the process to a cap instead (it then fails when it outgrows it).
 """
 
 import argparse
@@ -38,7 +39,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
-# Hand back cached GPU memory nobody is using once 80% of the --gpu-mem cap is taken, rather
+# Hand back cached GPU memory nobody is using once 80% of the card (or --gpu-mem cap) is taken, rather
 # than all at once when it runs out. (Read when CUDA starts.)
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.8")
 
@@ -125,8 +126,8 @@ def main():
         "--gpu-mem",
         type=float,
         default=None,
-        help="GB of GPU memory to keep to (default: what is free at the start less 0.5, "
-        "but at least 2.5; 0: no limit)",
+        help="GB of GPU memory to keep to (default: no limit; past the card, Windows pages to "
+        "system memory)",
     )
     ap.add_argument("--resume", action="store_true", help="continue from <out>/last.pt")
     ap.add_argument("--pause-at", type=float, default=None,
@@ -171,7 +172,7 @@ def main():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         free, total = torch.cuda.mem_get_info()
-        cap = args.gpu_mem * 2**30 if args.gpu_mem is not None else max(free - 2**29, 2.5 * 2**30)
+        cap = (args.gpu_mem or 0) * 2**30
         if cap > 0:
             torch.cuda.set_per_process_memory_fraction(min(cap / total, 1.0))
             print(f"GPU memory: keeping to {cap / 2**30:.1f} of {total / 2**30:.1f} GB ({free / 2**30:.1f} free)")
