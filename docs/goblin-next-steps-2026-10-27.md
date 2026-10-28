@@ -111,13 +111,26 @@ No heavy job, a few minutes.
 
 ## Task 4 (ASK): the first Goblin run
 
-Follow CLAUDE.md's "Training runs" and "Goblin runs" sections exactly; this is step 1 there.
+Why a plain next-token policy first, when the goal is an AlphaGo-style net (policy, value head,
+search; docs/goblin-plan-2026-10-27.md "Next" 4): this run *is* that net's first stage, as
+AlphaGo's supervised policy network was. The policy head is the next-token output (a step's
+prior in the search is the sum of its tokens' log-probabilities), and its weights carry over: a
+checkpoint without the value head loads with the head freshly initialised. The value head can't
+be trained yet, since every plan in data/goblin is a solved one (it would only learn "solvable");
+its labels come from self-play rounds (Task 5 on), which need a policy that already solves a fair
+share. The search needs the legal-step server `glados-score env`, not built yet. The one change
+that could go in before this run, 3D position embeddings, is Task 6 instead, as an A/B run
+against this one, so we learn whether it helps.
+
+The first attempt, `goblin-v6init-12h` (2026-10-28 00:29), ran out of GPU memory in its first
+minutes under the old 2.73 GiB cap, since removed (954bfd9). Run names can't be reused, so this
+run is `goblin-v6init-12h-b`.
 
 1. If Task 1's "longer than a 1024 block" share is 10% or less:
-   `.venv/Scripts/python train/run.py start goblin-v6init-12h --task goblin --from v6-fresh-12h --hours 12 --note "First Goblin run on data/goblin (Workshop-first, 8-way versions with plans, alternatives, primers), started from the v6 level net's weights" -- --layers 10 --batch 8 --accum 2`
+   `.venv/Scripts/python train/run.py start goblin-v6init-12h-b --task goblin --from v6-fresh-12h --hours 12 --note "First Goblin run on data/goblin (Workshop-first, 8-way versions with plans, alternatives, primers), started from the v6 level net's weights" -- --layers 10 --batch 8 --accum 2`
    If it is over 10%, add `--block 1280` and use `--batch 4 --accum 4` instead of
    `--batch 8 --accum 2`, and say so in the note.
-2. `.venv/Scripts/python train/run.py wait goblin-v6init-12h` with `run_in_background`. Then do
+2. `.venv/Scripts/python train/run.py wait goblin-v6init-12h-b` with `run_in_background`. Then do
    every NEXT STEPS item it prints. If it ran out of memory in the first minutes (the log says
    "out of memory"), stop and report; don't retry with other settings unasked.
 3. Gate. Compare its eval with Task 3's baseline on the same sets. It passes if it is more than
@@ -168,12 +181,33 @@ writes `runs/school-NAME/rRR/` (RR = two digits) and does, in order:
    calls uncertain ("beyond BFS"), the time each step took.
 
 Then check, by hand, on a small round first:
-`.venv/Scripts/python train/school.py round try --model runs/goblin-v6init-12h/best.pt --round 0 --levels 256 --k 8`
+`.venv/Scripts/python train/school.py round try --model runs/goblin-v6init-12h-b/best.pt --round 0 --levels 256 --k 8`
 
 Done when: the small round runs without errors; every buffer plan checks as solved when run
 through `glados-score check` again; `summary.json` numbers add up (solved ≤ drawn); a second
 `round try --round 1` draws a different half of new levels and updates `levels.jsonl`. Commit
 `train/school.py`. Report the summary table to the user and stop.
+
+## Task 6 (ASK, after Task 4): 3D position embeddings, an A/B run
+
+Why: the first step toward the AlphaGo-style architecture that changes the net itself
+(docs/goblin-plan-2026-10-27.md "Next" 4c). Today a cell's coordinates are number tokens with
+only 1D positions; the net has to learn which cells are neighbours. AlphaGo's convolutions get
+that for free.
+
+1. In `train/model.py` and the data loader: learned x, y and z embeddings added to each
+   coordinate token of the level and of the plan's cell arguments, derived at load time by
+   parsing the token text (the grammar of `glados-p2c tokens` and src/plan.rs). Zero-initialised,
+   so a checkpoint without them loads and behaves exactly as before. Behind a flag, off by
+   default. data/goblin is not rebuilt.
+2. Tests: the parser marks the right tokens on a few levels and plans (Workshop and generated,
+   with and without `loop`/`fetch`/`double` steps); an old checkpoint gives the same logits with
+   the flag on as off.
+3. The run: the same command as Task 4 (same `--from`, hours, sizes) plus the flag, named
+   `goblin-v6init-3d-12h`. Compare with Task 4's run on every test set and the probe; the probe's
+   spatial mistakes (wrong walls, off-by-one cells) are what it should fix.
+
+Done when the code and tests are committed and the A/B numbers are reported to the user.
 
 ## Later (don't start without the user)
 
