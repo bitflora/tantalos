@@ -29,6 +29,14 @@ later; overnight CPU and GPU data jobs are fine when nothing is training.
 
 ## Done (2026-10-27)
 
+- **data/goblin built, harvest, check, baseline** (2026-10-28). Harvest of runs/v6-fresh-12h/away
+  (217,088 sampled in 13,605 s over two sessions, paused once): 11,631 novel kept (5%), 15,001 in
+  data/goblin/pool/v6.jsonl. Second build: train.jsonl 223,141 rows (v6 17,679), test-v6 602,
+  test-ws 382, test-gen 2,332, test-hard 22, test-mut 0 (empty: look at before relying on it),
+  Workshop rows over a 1024 block 0.1%. Check of 2,000 random train rows: 4,205 of 4,205 plans solved.
+  **Baseline** (runs/solve-fresh-3h on data/goblin, greedy solved): test-ws+v6 5.7%, test-ws 12.8%,
+  test-v6 1.2%, test-gen 23.5% (1,024 sampled), test-hard 0.0%, probe 18.1%. Task 4's run must beat
+  test-ws+v6 and test-gen by more than 5 points, and test-hard above 0%.
 - **Rename** (e7d9848): `--task goblin` (`--task solve`, old checkpoints and runs still work via
   `record.task_name`), `goblin_eval.py`, `goblin_data.py`, `goblin-runs.csv`, broadcast
   `--goblin`/`--goblin-hours` and `bc-NAME-rRR-goblin` runs.
