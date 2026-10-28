@@ -209,6 +209,26 @@ that for free.
 
 Done when the code and tests are committed and the A/B numbers are reported to the user.
 
+## Task 7 (ASK, with the user at the game): portals fired in flight
+
+Why: the plan language can fire a portal while falling only inside a `loop`. Levels that need one
+fired after a `dive`, or chained flings, can't be written by Goblin or accepted by `check`.
+Plan and order: docs/goblin-plan-2026-10-27.md "Next" 5. Can be done alongside Tasks 4-6 (it's
+Rust and an in-game look, no GPU), but not while a run or data build is going if it needs
+`cargo build --release`.
+
+1. **In-game look, with the user** (the rules say don't touch the game on your own): pick 5-10
+   ws5 levels the solver calls unsolvable or uncertain whose titles or play-test notes point at
+   flings ("Next" 5a); the user plays them and says how. Write each down in
+   docs/solver-gaps-2026-10.md.
+2. Stop and agree with the user what to model from what step 1 showed, before writing the solver
+   action ("Next" 5b-d). Each step after that gets its own tests (tests/playtested.rs for the
+   levels played) and its own commit.
+3. Re-plan with `goblin_data.py` only when the user says so (CPU for hours).
+
+Done when step 2's agreed changes are committed, tested, and the levels from step 1 that they
+should solve do.
+
 ## Later (don't start without the user)
 
 In docs/goblin-plan-2026-10-27.md, "Next" 3: the full school loop (rounds with `--quick`

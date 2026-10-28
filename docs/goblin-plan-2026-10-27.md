@@ -145,8 +145,30 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
    - Kept as is: x4 symmetry augmentation (AlphaGo used 8), model size (the 4 GB card is the
      limit, and search buys more than parameters).
 
-None of these needs data/goblin rebuilt: c is parsed from the existing tokens, a and b take
-their labels from school rounds and the game, d is an `--assemble` pass at most.
+5. **Portals fired in flight** (asked 2026-10-28). Some levels need a new portal fired while the
+   player falls or flies out of another. Goblin can only write what the plan language has words
+   for, and a plan only counts if the Rust model allows it, so this is a model and plan-language
+   change, not a net change. Today only `loop COLOR X Y Z D X Y Z` has it (back down through a
+   floor portal, the other one moved on the way). Missing: firing in flight after a `dive` (out
+   of the other portal, a new one placed to catch the player), and with it chained flings, the
+   momentum family that blocks most of the ~3,100 movement-bound Workshop levels
+   (docs/solver-gaps-2026-10.md, item 2). In order:
+   - **a. Look in game first** (with the user): a few of those Workshop levels, and the physics
+     of a refire in flight: when the shot can be made, which faces are reachable, how far the
+     new portal flings. docs/solver-gaps-2026-10.md says not to model momentum before this.
+   - **b. Solver action**, a refire on `dive` (as `Loop` has) and, if a shows they matter,
+     chained flings; tests in tests/playtested.rs from the levels looked at.
+   - **c. Plan word**: an optional face on `dive` (`dive COLOR [X Y Z D] X Y Z`, as `loop`), or a
+     new word appended last to `PLAN_WORDS` so older vocabularies stay a prefix; `encode`,
+     `encode_actions`, `check` and `augment::apply_plan` learn it. One new embedding row for
+     the net, nothing more.
+   - **d. Play harness**: `route` and train/play.py time the shot in flight.
+   - **e. Data**: re-plan the levels the new action makes solvable (`goblin_data.py` parts),
+     and re-check the school buffer.
+
+None of 4's changes needs data/goblin rebuilt: c is parsed from the existing tokens, a and b take
+their labels from school rounds and the game, d is an `--assemble` pass at most. 5 does: the
+levels it makes solvable get plans for the first time.
 
 The reverse generator stays out (pedestals/buttons/goo only, a fixed hall-and-pockets layout
 Goblin would learn shortcuts from). Only if the 12+ bucket stays far behind after step 2: a <= 5%
