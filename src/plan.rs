@@ -623,7 +623,7 @@ pub fn step_verb(step: &Step) -> &'static str {
 }
 
 /// Whether `step` is what action `a` (from `s` to `next`) does.
-fn fits(model: &Model, s: &State, a: &Action, next: &State, step: &Step) -> bool {
+pub(crate) fn fits(model: &Model, s: &State, a: &Action, next: &State, step: &Step) -> bool {
     let region = |c: &Cell| model.graph.region_of(*c);
     let lands = |c: &Cell| region(c) == Some(next.region);
     let held = s

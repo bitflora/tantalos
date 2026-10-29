@@ -17,6 +17,13 @@ older data/plans has only the first two and `published`):
              (`test-frontier-liberal`, a weak signal: play them to know)
   published  (data/plans only) Workshop levels our solver can't solve, from data/ws3/test.jsonl
 
+--constrained writes every plan with `glados-score env` (src/env.rs) choosing which tokens may
+come next, so each step fits a move of the conservative model, and a plan can't stop (write
+`exit`) before the goal: it solves the level or runs out of tokens (--max-plan; 256 is enough
+for every held-out solver plan but one). --let-stop lets it stop after any whole step instead,
+where it would by itself. The frontier's liberal check sees the same plans. Its report goes to
+<checkpoint dir>/eval-constrained/ (or --out) and isn't recorded in the run's row.
+
 Writes <checkpoint dir>/eval/ (or --out): report.md, eval.json and solutions.jsonl (every
 level with its plans and verdicts). The headline number is the share of test-ws and test-v6
 levels together (the Workshop and the level net's: what Goblin is for) the greedy plan solves;
@@ -65,18 +72,101 @@ def plan_prompt(vocab, tokens, block_size):
     return [BOS] + vocab.encode(words) + [SEP]
 
 
-def generate_plans(model, vocab, prompts, temperature=1.0, top_k=None, rows=64):
+def generate_plans(model, vocab, prompts, temperature=1.0, top_k=None, rows=64, env=None):
     """One plan (a token string) per prompt. Prompts are sorted by length and generated `rows`
     at a time, so a batch pads little (GPT.generate pads mixed lengths; 64 rows fit the 4 GB
-    card, 128 don't). top_k=1 is greedy."""
+    card, 128 don't). top_k=1 is greedy. With `env` (an Env), only legal steps are written."""
     order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))
     plans = [None] * len(prompts)
     for start in range(0, len(order), rows):
         chunk = order[start : start + rows]
-        outs = model.generate([prompts[i] for i in chunk], MAX_PLAN, EOS, temperature, top_k)
+        constrain = legal_steps(env, vocab, [prompts[i] for i in chunk]) if env else None
+        outs = model.generate([prompts[i] for i in chunk], MAX_PLAN, EOS, temperature, top_k, constrain)
+        if env:
+            outs = constrain.trim(outs)
+            env.close(constrain.keys)
         for i, o in zip(chunk, outs):
             plans[i] = " ".join(vocab.decode(o))
     return plans
+
+
+class Env:
+    """`glados-score env` (src/env.rs), running: the plan tokens that may come next on a level."""
+
+    def __init__(self, glados=DEFAULT_GLADOS, mode="conservative", let_stop=False):
+        self.mode = mode
+        self.let_stop = let_stop  # let plans stop (`exit`) after any whole step, not only at the goal
+        self.proc = subprocess.Popen([str(Path(glados).resolve()), "env"], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
+
+    def ask(self, request):
+        self.proc.stdin.write(json.dumps(request) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        if not line:
+            raise RuntimeError(f"glados-score env stopped (exit code {self.proc.poll()})")
+        return json.loads(line)
+
+    def open(self, key, tokens):
+        """Whether the level could be opened (not an invalid or unsupported one)."""
+        return bool(self.ask({"op": "open", "id": key, "tokens": tokens, "mode": self.mode}).get("ok"))
+
+    def next(self, keys, plans):
+        """Per (level key, plan so far): {allowed: [tokens], end, dead, whole}."""
+        return self.ask({"op": "next", "ids": keys, "plans": plans})["results"]
+
+    def close(self, keys):
+        self.ask({"op": "close", "ids": [k for k in keys if k is not None]})
+
+    def stop(self):
+        self.proc.stdin.close()
+        self.proc.wait()
+
+
+def legal_steps(env, vocab, prompts):
+    """A `GPT.generate` constraint for these prompts (`<bos> level <sep>`): each row may write
+    only the tokens `env` allows next on its level: `exit` only at the goal (with env.let_stop,
+    also after any whole step, where the model would stop by itself: an unfinished plan). A
+    level env can't open is left unconstrained. `.keys`: the levels opened, to close after; `.trim(outs)`: plans cut
+    off by the length limit mid-step, back to their last whole step."""
+    keys, opened = [], {}
+    for p in prompts:
+        tokens = " ".join(vocab.decode(p[1:-1]))
+        if tokens not in opened:
+            key = str(len(opened))
+            opened[tokens] = key if env.open(key, tokens) else None
+        keys.append(opened[tokens])
+
+    def constrain(seqs, done):
+        mask = torch.ones((len(seqs), len(vocab)), dtype=torch.bool)
+        ask = [r for r, k in enumerate(keys) if k is not None and not done[r]]
+        if ask:
+            answers = env.next([keys[r] for r in ask], [" ".join(vocab.decode(seqs[r])) for r in ask])
+            for r, a in zip(ask, answers):
+                ids = [vocab.stoi[t] for t in a.get("allowed", []) if t in vocab.stoi]
+                if a.get("whole"):
+                    whole[r] = len(seqs[r])
+                    if env.let_stop:
+                        ids.append(exit_id)
+                if a.get("end") or not ids:
+                    ids.append(EOS)
+                mask[r] = False
+                mask[r, ids] = True
+        return mask
+
+    def trim(outs):
+        rows = [r for r, k in enumerate(keys) if k is not None]
+        answers = env.next([keys[r] for r in rows], [" ".join(vocab.decode(outs[r])) for r in rows]) if rows else []
+        for r, a in zip(rows, answers):
+            if not a.get("whole") and not a.get("end"):
+                outs[r] = outs[r][: whole[r]]
+        return outs
+
+    whole = [0] * len(prompts)  # each row's length at its last whole step
+    exit_id = vocab.stoi["exit"]
+    constrain.keys = list(opened.values())
+    constrain.trim = trim
+    return constrain
 
 
 def check(items, glados=DEFAULT_GLADOS, mode="conservative"):
@@ -114,14 +204,16 @@ def summarize(results):
     }
 
 
-def solve_levels(model, vocab, records, k, temperature, glados, modes, rows):
+def solve_levels(model, vocab, records, k, temperature, glados, modes, rows, env=None):
     """Greedy and `k` sampled plans for each record, checked in each mode. Returns one dict
-    per record: the record's fields, and per mode `greedy` (verdict) and `samples` (verdicts)."""
+    per record: the record's fields, and per mode `greedy` (verdict) and `samples` (verdicts).
+    With `env` (an Env), plans are written from legal steps only."""
     block = model.cfg.block_size
     prompts = [plan_prompt(vocab, r["tokens"], block) for r in records]
     asked = [i for i, p in enumerate(prompts) if not isinstance(p, str)]
-    greedy = dict(zip(asked, generate_plans(model, vocab, [prompts[i] for i in asked], 1.0, 1, rows)))
-    sampled = generate_plans(model, vocab, [prompts[i] for i in asked for _ in range(k)], temperature, None, rows)
+    greedy = dict(zip(asked, generate_plans(model, vocab, [prompts[i] for i in asked], 1.0, 1, rows, env)))
+    sampled = generate_plans(model, vocab, [prompts[i] for i in asked for _ in range(k)], temperature, None, rows,
+                             env)
     samples = {i: sampled[j * k : (j + 1) * k] for j, i in enumerate(asked)}
     out = [{"tokens": r["tokens"], "min_len": r.get("min_len"), "metrics": r.get("metrics"),
             "workshop_id": r.get("workshop_id"), "primer": r.get("primer"), "src": r.get("src"),
@@ -204,8 +296,11 @@ def pct(x):
     return f"{100 * x:.1f}%"
 
 
-def report(ck_path, sets, k, seconds):
+def report(ck_path, sets, k, seconds, constrained=False):
     lines = [f"# Goblin evaluation: {ck_path}", ""]
+    if constrained:
+        lines += [f"Constrained decoding ({constrained}): every plan was written from the steps "
+                  "`glados-score env` allows (conservative model), so none is illegal there.", ""]
     name = HEADLINE if HEADLINE in sets else OLD_HEADLINE
     head = sets.get(name)
     if head:
@@ -264,6 +359,7 @@ def pick(records, n, seed):
 
 
 def main():
+    global MAX_PLAN
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checkpoint")
     ap.add_argument("--plans", default=None,
@@ -281,6 +377,10 @@ def main():
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--constrained", action="store_true",
+                    help="write only legal steps (glados-score env); default --out: <checkpoint dir>/eval-constrained")
+    ap.add_argument("--let-stop", action="store_true", help="with --constrained: plans may stop before the goal")
+    ap.add_argument("--max-plan", type=int, default=MAX_PLAN, help="most tokens per plan")
     args = ap.parse_args()
     args.seed = resolve(args.seed)
 
@@ -313,12 +413,14 @@ def main():
     if not todo:
         sys.exit("no levels to evaluate on")
 
-    out = Path(args.out) if args.out else Path(args.checkpoint).parent / "eval"
+    out = Path(args.out) if args.out else Path(args.checkpoint).parent / ("eval-constrained" if args.constrained else "eval")
+    env = Env(args.glados, let_stop=args.let_stop) if args.constrained else None
+    MAX_PLAN = args.max_plan
     out.mkdir(parents=True, exist_ok=True)
     sets, solutions = {}, []
     for name, records, modes in todo:
         t = time.time()
-        levels = solve_levels(model, vocab, records, args.k, args.temperature, args.glados, modes, args.rows)
+        levels = solve_levels(model, vocab, records, args.k, args.temperature, args.glados, modes, args.rows, env)
         for mode in modes:
             key = name if mode == "conservative" else f"{name}-{mode}"
             sets[key] = set_summary(levels, mode, args.k)
@@ -330,12 +432,17 @@ def main():
             if {lv["set"] for lv in both} == {"test-ws", "test-v6"}:
                 sets = {HEADLINE: set_summary(both, "conservative", args.k), **sets}
 
+    if env:
+        env.stop()
     seconds = time.time() - t0
     head = next((h for h in (HEADLINE, OLD_HEADLINE) if h in sets), next(iter(sets)))
     result = {
         "task": GOBLIN,
         "checkpoint": str(args.checkpoint),
         "k": args.k,
+        "constrained": args.constrained,
+        "let_stop": args.let_stop,
+        "max_plan": args.max_plan,
         "headline": {"set": head, "solved": sets[head]["solved"], "parsed": sets[head]["parsed"],
                      "pass_at_k": sets[head]["pass_at_k"], "optimal": sets[head]["optimal"]},
         "sets": sets,
@@ -343,11 +450,13 @@ def main():
     (out / "eval.json").write_text(json.dumps(result, indent=2) + "\n")
     with open(out / "solutions.jsonl", "w", encoding="utf-8") as f:
         f.writelines(json.dumps(s) + "\n" for s in solutions)
-    (out / "report.md").write_text(report(args.checkpoint, sets, args.k, seconds), encoding="utf-8")
+    how = args.constrained and (f"may stop after any step, at most {args.max_plan} tokens" if args.let_stop
+                                else f"no stopping before the goal, at most {args.max_plan} tokens")
+    (out / "report.md").write_text(report(args.checkpoint, sets, args.k, seconds, how), encoding="utf-8")
     print(f"wrote {out / 'report.md'}")
 
     run = Path(args.checkpoint).parent
-    if (run / "log.jsonl").exists():
+    if (run / "log.jsonl").exists() and not args.constrained:
         import record
 
         record.safely(run)

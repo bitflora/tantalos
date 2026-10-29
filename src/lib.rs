@@ -22,6 +22,7 @@ pub mod dataset;
 pub mod dynamics;
 pub mod flings;
 pub mod editor;
+pub mod env;
 pub mod evolve;
 pub mod fixtures;
 pub mod gel;

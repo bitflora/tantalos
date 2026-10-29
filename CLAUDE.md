@@ -97,7 +97,8 @@ for good and records it.
   other heavy jobs: training calls `glados-score.exe` and shares the machine.
 
 Binaries (`src/bin/`, each prints its usage when run without arguments):
-`glados-score` (`score`, `check`, `route`: what training, evaluation and play call),
+`glados-score` (`score`, `check`, `route`: what training, evaluation and play call; `env`: the
+legal next plan tokens, for `goblin_eval.py --constrained`),
 `glados-data` (`dataset`, `mutate`), `glados-p2c` (`info`, `solve`, `tokens`, `vocab`, `editor`,
 `roundtrip`, `fixtures`), `glados-view`, `glados-workbench`, `glados-evolve`, and `reverse`.
 There is no `glados.exe` any more.

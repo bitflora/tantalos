@@ -118,7 +118,7 @@ prior in the search is the sum of its tokens' log-probabilities), and its weight
 checkpoint without the value head loads with the head freshly initialised. The value head can't
 be trained yet, since every plan in data/goblin is a solved one (it would only learn "solvable");
 its labels come from self-play rounds (Task 5 on), which need a policy that already solves a fair
-share. The search needs the legal-step server `glados-score env`, not built yet. The one change
+share. The search needs the legal-step server `glados-score env` (built 2026-10-29, src/env.rs). The one change
 that could go in before this run, 3D position embeddings, is Task 6 instead, as an A/B run
 against this one, so we learn whether it helps.
 

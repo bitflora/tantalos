@@ -37,6 +37,16 @@ const USAGE: &str = "usage:
                                 laser spots, as the solver retries such levels.
                                 --route DIR: NNNNN.p2c and NNNNN.route.jsonl (as
                                 route writes) for the first solved plan of a line
+  glados-score env              the legal next plan tokens, for decoding plans step by step
+                                (src/env.rs): a JSONL server on stdin/stdout, one answer
+                                line per request line, flushed.
+                                {\"op\":\"open\",\"id\":ID,\"tokens\":LEVEL[,\"mode\":\"liberal\"]}
+                                  -> {\"ok\":true} or {\"error\":...,\"verdict\":\"invalid\"|...}
+                                {\"op\":\"next\",\"ids\":[ID,...],\"plans\":[PLAN,...]}
+                                  -> {\"results\":[{\"allowed\":[TOKEN,...],\"end\":B,\"dead\":B,\"whole\":B},...]}
+                                  (end: the plan solves if it stops here; dead: no step
+                                  fits; whole: the plan so far is whole steps)
+                                {\"op\":\"close\",\"ids\":[ID,...]} -> {\"ok\":true}
   glados-score route [--plan TOKENS [--mode conservative|liberal]] <file.p2c>
                                 the conservative plan made concrete for playing it in the game:
                                 where to stand, look, fire and walk (JSON lines, src/route.rs).
@@ -52,6 +62,7 @@ fn main() -> ExitCode {
         Some("score") => Some(run_score(&args[1..])),
         Some("check") => Some(run_check(&args[1..])),
         Some("route") => Some(run_route(&args[1..])),
+        Some("env") => Some(run_env(&args[1..])),
         _ => None,
     })
 }
@@ -280,6 +291,85 @@ fn run_score(args: &[String]) -> Result<()> {
         },
     )?;
     out.flush()?;
+    Ok(())
+}
+
+fn run_env(args: &[String]) -> Result<()> {
+    use glados::env::Env;
+    use glados::mutate::{json_array, json_field};
+    use std::io::BufRead;
+    if !args.is_empty() {
+        return Err(format!("env takes no arguments
+{USAGE}").into());
+    }
+    let mut envs: std::collections::HashMap<String, Env> = std::collections::HashMap::new();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for line in std::io::stdin().lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let error = |why: &str, verdict: &str| {
+            format!("{{\"error\":{},\"verdict\":\"{verdict}\"}}", dataset::json_str(why))
+        };
+        let answer = match json_field(&line, "op").as_deref() {
+            Some("open") => match (json_field(&line, "id"), json_field(&line, "tokens")) {
+                (Some(id), Some(toks)) => {
+                    let mode = match json_field(&line, "mode").as_deref() {
+                        Some("liberal") => Mode::Liberal,
+                        _ => Mode::Conservative,
+                    };
+                    match tokens::decode(&toks) {
+                        Err(e) => error(&format!("level: {e}"), "unparsed"),
+                        Ok(puzzle) => match Env::new(&Level::from_puzzle(&puzzle), mode) {
+                            Ok(env) => {
+                                envs.insert(id, env);
+                                "{\"ok\":true}".to_string()
+                            }
+                            Err(problems) => {
+                                let invalid = problems.iter().any(|p| matches!(p, Problem::Invalid(_)));
+                                error(&format!("{problems:?}"), if invalid { "invalid" } else { "unsupported" })
+                            }
+                        },
+                    }
+                }
+                _ => error("open needs \"id\" and \"tokens\"", "unparsed"),
+            },
+            Some("next") => match (json_array(&line, "ids"), json_array(&line, "plans")) {
+                (Some(ids), Some(plans)) if ids.len() == plans.len() => {
+                    let results: Vec<String> = ids
+                        .iter()
+                        .zip(&plans)
+                        .map(|(id, p)| match envs.get_mut(id) {
+                            None => error(&format!("no level {id} open"), "unparsed"),
+                            Some(env) => {
+                                let n = env.next(p);
+                                let allowed: Vec<String> = n.allowed.iter().map(|t| dataset::json_str(t)).collect();
+                                format!(
+                                    "{{\"allowed\":[{}],\"end\":{},\"dead\":{},\"whole\":{}}}",
+                                    allowed.join(","),
+                                    n.end,
+                                    n.dead,
+                                    n.whole
+                                )
+                            }
+                        })
+                        .collect();
+                    format!("{{\"results\":[{}]}}", results.join(","))
+                }
+                _ => error("next needs \"ids\" and \"plans\", as many of each", "unparsed"),
+            },
+            Some("close") => {
+                for id in json_array(&line, "ids").unwrap_or_default() {
+                    envs.remove(&id);
+                }
+                "{\"ok\":true}".to_string()
+            }
+            _ => error("\"op\" is open, next or close", "unparsed"),
+        };
+        writeln!(out, "{answer}")?;
+        out.flush()?;
+    }
     Ok(())
 }
 

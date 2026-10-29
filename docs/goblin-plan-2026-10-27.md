@@ -29,6 +29,18 @@ later; overnight CPU and GPU data jobs are fine when nothing is training.
 
 ## Done (2026-10-27)
 
+- **Constrained decoding, E2 built early** (2026-10-29): `glados-score env` (src/env.rs), a JSONL
+  server listing the plan tokens that may come next (each step a move of the conservative or the
+  angled-laser model; only `exit` at the goal), and `goblin_eval.py --constrained`. All 1,087
+  held-out solver plans pass it; 1,048 random allowed plans never break a model's rules (11 show
+  as illegal only because `check` reports the plain model's verdict). Stopping is forbidden before
+  the goal (letting the net stop halved the gain: 7 against 15 of 32 test-ws) and plans are cut at
+  256 tokens. **goblin-v6init-12h-b re-evaluated** (same seed, runs/goblin-v6init-12h-b/
+  eval-constrained, 73 min), greedy solved, unconstrained -> constrained: test-ws+v6 20.2 -> 57.3
+  (pass@8 33.8 -> 82.3), test-ws 23.8 -> 52.6, test-v6 17.9 -> 60.3, test-gen 17.7 -> 43.2,
+  test-hard 0 -> 18.2, probe 21.0 -> 60.0, test-frontier 0.4 -> 1.2. Every gate passes. Failures are
+  now 402 of 420 "ends before the exit" (256-token cap reached); solved share falls with
+  solution length (3-4 steps 72%, 8-11 25%, 12+ 6%).
 - **data/goblin built, harvest, check, baseline** (2026-10-28). Harvest of runs/v6-fresh-12h/away
   (217,088 sampled in 13,605 s over two sessions, paused once): 11,631 novel kept (5%), 15,001 in
   data/goblin/pool/v6.jsonl. Second build: train.jsonl 223,141 rows (v6 17,679), test-v6 602,
@@ -95,7 +107,7 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
      `--quick` run on the base mix plus buffer (buffer 30-50% of rows), guarded; every 5 rounds
      one long consolidation run. Record per round: pool solved, beyond-BFS solves, frontier
      size, every test set, the probe, plan lengths, the game results, exploits.
-   - **E2 constrained decoding** when E1 flattens: `glados-score env` (JSONL server: open a
+   - **E2 constrained decoding** (built 2026-10-29, see Done; use it in E1 from round 1): `glados-score env` (JSONL server: open a
      level, apply steps, list the legal next steps as plan tokens), sampling only legal steps.
    - **E3 liberal plans in Portal 2** (from round 1, when the game can run): unattended
      play.py batches with `route --plan --mode liberal`; clean plays become trusted; a failed

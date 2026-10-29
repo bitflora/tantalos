@@ -146,19 +146,21 @@ class GPT(nn.Module):
         return torch.optim.AdamW(groups, lr=lr, betas=betas, fused=fused)
 
     @torch.no_grad()
-    def generate(self, prompts, max_new, stop, temperature=1.0, top_k=None):
+    def generate(self, prompts, max_new, stop, temperature=1.0, top_k=None, constrain=None):
         """Continue each prompt (list of id lists) until `stop` or `max_new` tokens.
         Returns the new ids per prompt, without `stop`. On a GPU it runs in bfloat16, as
-        training does."""
+        training does. `constrain(seqs, done)`, if given, is asked before every token with each
+        row's new ids so far and which rows are done, and returns a (rows, vocab) bool mask of
+        the tokens each row may write next (goblin_eval.legal_steps)."""
         device = next(self.parameters()).device
         amp = (
             torch.autocast("cuda", dtype=torch.bfloat16)
             if device.type == "cuda" and torch.cuda.is_bf16_supported()
             else nullcontext()
         )
-        if len({len(p) for p in prompts}) > 1:
+        if len({len(p) for p in prompts}) > 1 or constrain is not None:
             with amp:
-                return self._generate_padded(prompts, max_new, stop, temperature, top_k, device)
+                return self._generate_padded(prompts, max_new, stop, temperature, top_k, device, constrain)
         # Prompts of equal length run as one batch, so positions line up without padding.
         outs = [None] * len(prompts)
         by_len = {}
@@ -267,7 +269,7 @@ class GPT(nn.Module):
                 logits[sorted(fresh)] = prompt_logits
         return outs
 
-    def _generate_padded(self, prompts, max_new, stop, temperature, top_k, device):
+    def _generate_padded(self, prompts, max_new, stop, temperature, top_k, device, constrain=None):
         """`generate` for prompts of different lengths, as one batch: each is padded on the left
         to the longest, its pads hidden from attention, and its positions start at 0 at its
         first real token, so each row comes out as it would alone. A row stops where it would
@@ -293,8 +295,12 @@ class GPT(nn.Module):
         # A row's last step: where it reaches max_new, or the end of the block.
         last = torch.clamp(self.cfg.block_size - lens, max=max_new) - 1
         new = []
+        seqs = [[] for _ in prompts]  # the new ids on the CPU, for `constrain`
         for step in range(steps):
             logits = logits[:, -1, :].float()
+            if constrain is not None:
+                allowed = constrain(seqs, done.tolist()).to(device)
+                logits = logits.masked_fill(~allowed, -float("inf"))
             if top_k == 1:
                 nxt = logits.argmax(dim=-1, keepdim=True)
             else:
@@ -306,6 +312,9 @@ class GPT(nn.Module):
             nxt[done] = stop
             done |= nxt.squeeze(1) == stop
             new.append(nxt)
+            if constrain is not None:
+                for seq, t in zip(seqs, nxt.squeeze(1).tolist()):
+                    seq.append(t)
             done |= last <= step
             if done.all() or step == steps - 1:
                 break
