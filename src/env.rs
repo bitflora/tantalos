@@ -30,6 +30,9 @@ use crate::tokens::{dir_token, parse_dir, MAX_NUM};
 /// Most states a node follows, per model (`check` follows up to 100,000; decoding asks a node
 /// for every token, so it keeps fewer).
 pub const MAX_STATES: usize = 2_000;
+/// Most states a level's nodes keep (about 200 bytes each) before all but the first node are
+/// dropped; `next` builds what it needs again from the start of the plan.
+pub const MAX_CACHED: usize = 1_000_000;
 
 const DIRS: [Dir; 6] = [Dir::PosX, Dir::NegX, Dir::PosY, Dir::NegY, Dir::PosZ, Dir::NegZ];
 
@@ -130,8 +133,9 @@ fn extend(pattern: &[Slot], words: &[&str], out: &mut BTreeSet<String>) -> bool 
 /// The states some steps lead to, in each model, and the patterns of the steps that can come
 /// next.
 struct Node {
-    /// Per model: each state with its moves.
-    states: Vec<Vec<(State, Vec<(Action, State)>)>>,
+    /// Per model: the states. (Their moves are worked out again for each child: keeping them
+    /// took gigabytes on big levels.)
+    states: Vec<Vec<State>>,
     patterns: Vec<Vec<Slot>>,
     goal: bool,
 }
@@ -139,6 +143,11 @@ struct Node {
 impl Node {
     fn dead(&self) -> bool {
         self.states.iter().all(|s| s.is_empty())
+    }
+
+    /// States kept.
+    fn size(&self) -> usize {
+        self.states.iter().map(Vec::len).sum()
     }
 }
 
@@ -168,6 +177,8 @@ pub struct Env {
     loose: HashMap<(usize, usize, CubeKind), Rc<[Cell]>>,
     /// Nodes by the words of their steps.
     nodes: HashMap<String, Node>,
+    /// The nodes' `size`s, summed.
+    cached: usize,
 }
 
 impl Env {
@@ -206,15 +217,31 @@ impl Env {
             classes,
             loose: HashMap::new(),
             nodes: HashMap::new(),
+            cached: 0,
         };
         let states = env.models.iter().map(|m| vec![m.initial()]).collect();
         let root = env.node(states);
+        env.cached = root.size();
         env.nodes.insert(String::new(), root);
         Ok(env)
     }
 
+    /// States the nodes keep (see `MAX_CACHED`).
+    pub fn cached(&self) -> usize {
+        self.cached
+    }
+
+    /// Drops every node but the first: they are built again when asked for.
+    pub fn forget(&mut self) {
+        self.nodes.retain(|k, _| k.is_empty());
+        self.cached = self.nodes.values().map(Node::size).sum();
+    }
+
     /// What may follow `plan` (plan tokens, space-separated).
     pub fn next(&mut self, plan: &str) -> Next {
+        if self.cached > MAX_CACHED {
+            self.forget();
+        }
         let words: Vec<&str> = plan.split_whitespace().collect();
         let dead = Next {
             allowed: BTreeSet::new(),
@@ -308,13 +335,13 @@ impl Env {
                 let model = &self.models[m];
                 let mut next: Vec<State> = Vec::new();
                 let mut seen = std::collections::HashSet::new();
-                for (s, moves) in &p.states[m] {
-                    for (a, n) in moves {
+                for s in &p.states[m] {
+                    for (a, n) in model.successors(s) {
                         if next.len() >= MAX_STATES {
                             break;
                         }
-                        if fits(model, s, a, n, &step) && seen.insert(n.clone()) {
-                            next.push(n.clone());
+                        if fits(model, s, &a, &n, &step) && seen.insert(n.clone()) {
+                            next.push(n);
                         }
                     }
                 }
@@ -322,6 +349,7 @@ impl Env {
             })
             .collect();
         let node = self.node(states);
+        self.cached += node.size();
         self.nodes.insert(child.to_string(), node);
         true
     }
@@ -332,23 +360,16 @@ impl Env {
             .enumerate()
             .any(|(m, ss)| ss.iter().any(|s| self.models[m].is_goal(s)));
         let mut patterns = Vec::new();
-        let mut with_moves = Vec::with_capacity(states.len());
-        for (m, ss) in states.into_iter().enumerate() {
-            let mut v = Vec::with_capacity(ss.len());
-            for s in ss {
-                let moves = if goal { Vec::new() } else { self.models[m].successors(&s) };
-                for (a, n) in &moves {
-                    self.patterns(m, &s, a, n, &mut patterns);
+        if !goal {
+            for (m, ss) in states.iter().enumerate() {
+                for s in ss {
+                    for (a, n) in self.models[m].successors(s) {
+                        self.patterns(m, s, &a, &n, &mut patterns);
+                    }
                 }
-                v.push((s, moves));
             }
-            with_moves.push(v);
         }
-        Node {
-            states: with_moves,
-            patterns,
-            goal,
-        }
+        Node { states, patterns, goal }
     }
 
     /// The cells `plan::loc_fits` takes for a cube at `loc` (`kind`: the cube put there, when
@@ -560,6 +581,20 @@ mod tests {
         let first = env.next("fire blue");
         assert!(!first.allowed.is_empty() && !first.end);
         assert!(first.allowed.iter().all(|t| t.parse::<i32>().is_ok_and(|n| n < 7)), "{:?}", first.allowed);
+    }
+
+    /// Dropping the nodes changes no answer: they are built again.
+    #[test]
+    fn forget_keeps_answers() {
+        let (_, mut env) = env();
+        let words: Vec<&str> = PLAN.split_whitespace().collect();
+        let before: Vec<Next> = (0..=words.len()).map(|i| env.next(&words[..i].join(" "))).collect();
+        let full = env.cached();
+        env.forget();
+        assert!(env.cached() < full);
+        let after: Vec<Next> = (0..=words.len()).map(|i| env.next(&words[..i].join(" "))).collect();
+        assert_eq!(before, after);
+        assert_eq!(env.cached(), full);
     }
 
     /// Random plans written only from allowed tokens: `check` finds no illegal step in any,

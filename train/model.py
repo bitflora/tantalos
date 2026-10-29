@@ -5,6 +5,7 @@ plenty to start with and fits a 4 GB GPU with room to spare.
 """
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -146,21 +147,19 @@ class GPT(nn.Module):
         return torch.optim.AdamW(groups, lr=lr, betas=betas, fused=fused)
 
     @torch.no_grad()
-    def generate(self, prompts, max_new, stop, temperature=1.0, top_k=None, constrain=None):
+    def generate(self, prompts, max_new, stop, temperature=1.0, top_k=None):
         """Continue each prompt (list of id lists) until `stop` or `max_new` tokens.
         Returns the new ids per prompt, without `stop`. On a GPU it runs in bfloat16, as
-        training does. `constrain(seqs, done)`, if given, is asked before every token with each
-        row's new ids so far and which rows are done, and returns a (rows, vocab) bool mask of
-        the tokens each row may write next (goblin_eval.legal_steps)."""
+        training does."""
         device = next(self.parameters()).device
         amp = (
             torch.autocast("cuda", dtype=torch.bfloat16)
             if device.type == "cuda" and torch.cuda.is_bf16_supported()
             else nullcontext()
         )
-        if len({len(p) for p in prompts}) > 1 or constrain is not None:
+        if len({len(p) for p in prompts}) > 1:
             with amp:
-                return self._generate_padded(prompts, max_new, stop, temperature, top_k, device, constrain)
+                return self._generate_padded(prompts, max_new, stop, temperature, top_k, device)
         # Prompts of equal length run as one batch, so positions line up without padding.
         outs = [None] * len(prompts)
         by_len = {}
@@ -269,7 +268,131 @@ class GPT(nn.Module):
                 logits[sorted(fresh)] = prompt_logits
         return outs
 
-    def _generate_padded(self, prompts, max_new, stop, temperature, top_k, device, constrain=None):
+    @torch.no_grad()
+    def generate_many(self, prompts, max_new, stop, temperature=1.0, top_k=None, batch=64, constrain=None):
+        """`generate` for many prompts, `batch` rows at a time, started in the order given: a row
+        that finishes starts the next prompt at once, as in `generate_refill`, instead of waiting
+        for the longest row of its batch (Goblin's constrained plans: half run to `max_new`, the
+        rest end within a few dozen tokens). Each prompt runs alone through the net once and its
+        keys and values are copied into its row; consecutive copies of one prompt (k samples of
+        a level) share that run. Returns the new ids per prompt, without `stop`.
+
+        `constrain`, if given, is asked before every token: `constrain(idx, seqs)` with the
+        prompt index of each row still writing and its new ids so far returns a bool mask
+        (rows x vocab, on the CPU) of the tokens each may write next; `constrain.finish(i, seq)`
+        is told when prompt i ends and returns its ids to keep (goblin_eval.LegalSteps)."""
+        device = next(self.parameters()).device
+        amp = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if device.type == "cuda" and torch.cuda.is_bf16_supported()
+            else nullcontext()
+        )
+        n = len(prompts)
+        if n == 0:
+            return []
+        block = self.cfg.block_size
+        size = min(block, max(len(p) for p in prompts) + max_new)
+        b = min(batch, n)
+        caches = None
+        memo = {}  # the last prompt run: its ids, keys and values per layer, last logits
+
+        def run(p):
+            if memo.get("ids") != p:
+                first = [{"size": len(p)} for _ in self.blocks]
+                with amp:
+                    lg, _ = self(torch.tensor([p], device=device), caches=first)
+                memo.update(ids=p, kv=[(c["k"], c["v"]) for c in first], logits=lg[0, -1].float())
+            return memo["kv"], memo["logits"]
+
+        slots = [None] * b  # the prompt each row is writing (None: no more to start)
+        outs = [None] * n
+        plen = [0] * b
+        logits = torch.zeros((b, self.cfg.vocab_size), device=device)
+        started = 0
+
+        def start(r):
+            """Row r takes the next prompt, if any: its keys, values and logits."""
+            nonlocal started, caches
+            if started == n:
+                slots[r] = None
+                return
+            i, started = started, started + 1
+            kv, lg = run(prompts[i])
+            if caches is None:
+                # Zeros, not new_empty: a masked-out NaN still poisons attention (0 * NaN). The
+                # dtypes differ under QK-norm.
+                caches = [{"k": k.new_zeros((b, k.shape[1], size, k.shape[3])),
+                           "v": v.new_zeros((b, v.shape[1], size, v.shape[3]))} for k, v in kv]
+            p = len(prompts[i])
+            for c, (k, v) in zip(caches, kv):
+                c["k"][r, :, :p], c["v"][r, :, :p] = k[0], v[0]
+            logits[r] = lg
+            slots[r], outs[i], plen[r] = i, [], p
+
+        def ask():
+            """The tokens each row may write next (CPU), or None if unconstrained."""
+            rows = [r for r in range(b) if slots[r] is not None]
+            if constrain is None or not rows:
+                return None
+            allowed = torch.ones((b, self.cfg.vocab_size), dtype=torch.bool)
+            allowed[rows] = constrain([slots[r] for r in rows], [outs[slots[r]] for r in rows])
+            return allowed
+
+        for r in range(b):
+            start(r)
+        allowed = ask()
+        pool = ThreadPoolExecutor(1)
+        while True:
+            rows = [r for r in range(b) if slots[r] is not None]
+            if not rows:
+                break
+            lg = logits
+            if allowed is not None:
+                lg = lg.masked_fill(~allowed.to(device), -float("inf"))
+            if top_k == 1:
+                nxt = lg.argmax(dim=-1)
+            else:
+                lg = lg / max(temperature, 1e-5)
+                if top_k:
+                    kth = torch.topk(lg, min(top_k, lg.size(-1))).values[:, -1:]
+                    lg[lg < kth] = -float("inf")
+                nxt = torch.multinomial(F.softmax(lg, dim=-1), 1).squeeze(1)
+            # Where each row's token goes: its own position, for a row going on. A row that
+            # starts a prompt feeds one at that prompt's end, overwritten by its first real one;
+            # its logits stay the prompt's. An idle row feeds one at 0.
+            at = [0] * b
+            going = [False] * b
+            toks = nxt.tolist()
+            for r in rows:
+                i, t = slots[r], toks[r]
+                if t != stop:
+                    outs[i].append(t)
+                    if len(outs[i]) < max_new and plen[r] + len(outs[i]) < block:
+                        at[r], going[r] = plen[r] + len(outs[i]) - 1, True
+                        continue
+                if constrain is not None:
+                    outs[i] = constrain.finish(i, outs[i])
+                start(r)
+                if slots[r] is not None:
+                    at[r] = plen[r]
+            # The next step's constraint, worked out (mostly waiting on env) while this thread
+            # runs the net.
+            asked = pool.submit(ask) if constrain is not None else None
+            if any(going):
+                longest = max(at) + 1
+                at = torch.tensor(at, device=device)
+                for c in caches:
+                    c["at"], c["len"] = at, longest
+                mask = (torch.arange(longest, device=device)[None, :] <= at[:, None])[:, None, None, :]
+                with amp:
+                    new, _ = self(nxt[:, None], caches=caches, positions=at[:, None], mask=mask)
+                keep = torch.tensor(going, device=device)[:, None]
+                logits = torch.where(keep, new[:, -1, :].float(), logits)
+            allowed = asked.result() if asked is not None else None
+        pool.shutdown()
+        return outs
+
+    def _generate_padded(self, prompts, max_new, stop, temperature, top_k, device):
         """`generate` for prompts of different lengths, as one batch: each is padded on the left
         to the longest, its pads hidden from attention, and its positions start at 0 at its
         first real token, so each row comes out as it would alone. A row stops where it would
@@ -295,12 +418,8 @@ class GPT(nn.Module):
         # A row's last step: where it reaches max_new, or the end of the block.
         last = torch.clamp(self.cfg.block_size - lens, max=max_new) - 1
         new = []
-        seqs = [[] for _ in prompts]  # the new ids on the CPU, for `constrain`
         for step in range(steps):
             logits = logits[:, -1, :].float()
-            if constrain is not None:
-                allowed = constrain(seqs, done.tolist()).to(device)
-                logits = logits.masked_fill(~allowed, -float("inf"))
             if top_k == 1:
                 nxt = logits.argmax(dim=-1, keepdim=True)
             else:
@@ -312,9 +431,6 @@ class GPT(nn.Module):
             nxt[done] = stop
             done |= nxt.squeeze(1) == stop
             new.append(nxt)
-            if constrain is not None:
-                for seq, t in zip(seqs, nxt.squeeze(1).tolist()):
-                    seq.append(t)
             done |= last <= step
             if done.all() or step == steps - 1:
                 break

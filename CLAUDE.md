@@ -206,13 +206,16 @@ new task, fresh learning rates); `--from` a Goblin run continues it.
   for hours, so only when the user asks, and not while a run is going. `start` refuses without
   it; tell the user. data/goblin/BUILD.md says what went in. The plan for Goblin's data and its
   self-play is docs/goblin-plan-2026-10-27.md.
-- A Goblin run does: build, train, evaluate with `goblin_eval.py` (about 15 minutes), record. It
+- A Goblin run does: build, train, evaluate with `goblin_eval.py --constrained` (plans written
+  from legal steps only; about 75 minutes; `--quick` runs decode freely, about 15), record. It
   has no Portal 2 steps, no training away and no play-test picks, so `wait` never exits 2.
 - Goblin runs are recorded in `train/goblin-runs.csv`, not runs.csv; see them with
   `.venv/Scripts/python train/run.py list --task goblin`. `note` finds the right file itself.
 - The main score is **EVAL solved %**: on data/goblin, the share of test-ws and test-v6
   levels together (held-out Workshop levels our solver solves, and levels the level net wrote)
-  whose greedy plan `glados-score check` accepts; on the old data/plans (solve-fresh-3h), of
+  whose greedy plan `glados-score check` accepts (`decoding` in goblin-runs.csv: runs before
+  2026-10-29 decoded freely and score far lower, 20.2% against 57.3% constrained for
+  goblin-v6init-12h-b); on the old data/plans (solve-fresh-3h), of
   1,024 test-gen levels. Higher is better; differences under about 5 points are noise. Also
   reported: pass@8, optimal %, test-gen (a guardrail now), test-mut, test-hard (levels whose
   search took over 50k states), the **probe** (held-out primers, one mechanic each: the

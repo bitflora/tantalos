@@ -355,6 +355,10 @@ fn run_env(args: &[String]) -> Result<()> {
                             }
                         })
                         .collect();
+                    // All the open levels together: past this, each starts afresh.
+                    if envs.values().map(Env::cached).sum::<usize>() > 4 * glados::env::MAX_CACHED {
+                        envs.values_mut().for_each(Env::forget);
+                    }
                     format!("{{\"results\":[{}]}}", results.join(","))
                 }
                 _ => error("next needs \"ids\" and \"plans\", as many of each", "unparsed"),

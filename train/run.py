@@ -52,8 +52,9 @@ in runs.csv did. Anything after `--` goes to train.py as is.
 Goblin runs (`start NAME --task goblin`) train the second net, Goblin, which reads a level and
 writes its plan (called the solver net, task "solve", before 2026-10-27; `--task solve` and old
 runs still work). They train on data/goblin (train/goblin_data.py makes it; data/plans until it
-exists). Their steps: train, evaluate best.pt (goblin_eval.py, about 15 minutes: plans for
-held-out levels, replayed by `glados-score check`), record in train/goblin-runs.csv (`list --task
+exists). Their steps: train, evaluate best.pt (goblin_eval.py --constrained, about 75 minutes:
+plans for held-out levels written from legal steps only, replayed by `glados-score check`;
+`--quick` runs decode freely, about 15 minutes), record in train/goblin-runs.csv (`list --task
 goblin` shows them). No Portal 2 steps, no training away, no play-test picks. The main score is
 EVAL solved %: the share of held-out levels whose greedy plan solves. --from a level-writing run
 starts from its weights with the fresh learning rates (a new task); --from a Goblin run continues it.
@@ -253,8 +254,10 @@ def start(a):
     if goblin:
         tests = data[0].parent if (data[0].parent / "test-gen.jsonl").exists() else (plans or OLD_PLANS).parent
         evaluate = ["train/goblin_eval.py", str(d / "best.pt"), "--plans", str(tests)]
-        if a.quick:
+        if a.quick:  # broadcast rounds: free decoding keeps the round short
             evaluate += ["--n-published", "0", "--k", "4"]
+        else:
+            evaluate += ["--constrained", "--out", str(d / "eval")]
     else:
         evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
         if a.quick:
@@ -732,7 +735,8 @@ def goblin_lines(d):
     except (OSError, ValueError):
         return []
     h, k = e["headline"], e.get("k", 8)
-    out = [f"  EVAL: {h['solved']:.0%} solved (greedy, {h['set']} levels; the main score, differences under"
+    how = "constrained" if e.get("constrained") else "free decoding"
+    out = [f"  EVAL: {h['solved']:.0%} solved (greedy, {how}, {h['set']} levels; the main score, differences under"
            f" ~5 points are noise), pass@{k} {h['pass_at_k']:.0%}, optimal {h['optimal']:.0%}, {h['parsed']:.0%} parse"]
     for name, v in e["sets"].items():
         if name != h["set"]:

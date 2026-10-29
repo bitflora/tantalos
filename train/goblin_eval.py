@@ -22,7 +22,9 @@ come next, so each step fits a move of the conservative model, and a plan can't 
 `exit`) before the goal: it solves the level or runs out of tokens (--max-plan; 256 is enough
 for every held-out solver plan but one). --let-stop lets it stop after any whole step instead,
 where it would by itself. The frontier's liberal check sees the same plans. Its report goes to
-<checkpoint dir>/eval-constrained/ (or --out) and isn't recorded in the run's row.
+<checkpoint dir>/eval-constrained/ (or --out). A run's own eval (train/run.py, since 2026-10-29)
+is constrained, with --out <run>/eval; only an eval written to <run>/eval is recorded in the
+run's row.
 
 Writes <checkpoint dir>/eval/ (or --out): report.md, eval.json and solutions.jsonl (every
 level with its plans and verdicts). The headline number is the share of test-ws and test-v6
@@ -60,6 +62,9 @@ SKIPPED = ("unknown_tokens", "too_long")
 # Most plan tokens written per level: 80-odd steps, far beyond the solver's plans. (An untrained
 # net that never writes <eos> would otherwise fill the block for every level.)
 MAX_PLAN = 512
+# The same for a constrained plan, which can't stop before the goal: only 1 of ~6,700 held-out
+# solver plans is longer, and a row that wanders runs to the limit.
+MAX_CONSTRAINED = 256
 
 
 def plan_prompt(vocab, tokens, block_size):
@@ -74,19 +79,15 @@ def plan_prompt(vocab, tokens, block_size):
 
 def generate_plans(model, vocab, prompts, temperature=1.0, top_k=None, rows=64, env=None):
     """One plan (a token string) per prompt. Prompts are sorted by length and generated `rows`
-    at a time, so a batch pads little (GPT.generate pads mixed lengths; 64 rows fit the 4 GB
+    at a time (GPT.generate_many: a row that ends starts the next prompt; 64 rows fit the 4 GB
     card, 128 don't). top_k=1 is greedy. With `env` (an Env), only legal steps are written."""
     order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))
+    asked = [prompts[i] for i in order]
+    constrain = LegalSteps(env, vocab, asked) if env else None
+    outs = model.generate_many(asked, MAX_CONSTRAINED if env else MAX_PLAN, EOS, temperature, top_k, rows, constrain)
     plans = [None] * len(prompts)
-    for start in range(0, len(order), rows):
-        chunk = order[start : start + rows]
-        constrain = legal_steps(env, vocab, [prompts[i] for i in chunk]) if env else None
-        outs = model.generate([prompts[i] for i in chunk], MAX_PLAN, EOS, temperature, top_k, constrain)
-        if env:
-            outs = constrain.trim(outs)
-            env.close(constrain.keys)
-        for i, o in zip(chunk, outs):
-            plans[i] = " ".join(vocab.decode(o))
+    for i, o in zip(order, outs):
+        plans[i] = " ".join(vocab.decode(o))
     return plans
 
 
@@ -123,50 +124,72 @@ class Env:
         self.proc.wait()
 
 
-def legal_steps(env, vocab, prompts):
-    """A `GPT.generate` constraint for these prompts (`<bos> level <sep>`): each row may write
-    only the tokens `env` allows next on its level: `exit` only at the goal (with env.let_stop,
-    also after any whole step, where the model would stop by itself: an unfinished plan). A
-    level env can't open is left unconstrained. `.keys`: the levels opened, to close after; `.trim(outs)`: plans cut
-    off by the length limit mid-step, back to their last whole step."""
-    keys, opened = [], {}
-    for p in prompts:
-        tokens = " ".join(vocab.decode(p[1:-1]))
-        if tokens not in opened:
-            key = str(len(opened))
-            opened[tokens] = key if env.open(key, tokens) else None
-        keys.append(opened[tokens])
+class LegalSteps:
+    """A `GPT.generate_many` constraint for these prompts (`<bos> level <sep>`, maybe followed by
+    the start of a plan, made of whole steps, to continue): each row may write only the tokens
+    `env` allows next on its level: `exit` only at the goal (with env.let_stop, also after any
+    whole step, where the model would stop by itself: an unfinished plan). A level is opened
+    when its first prompt starts and closed when its last one ends; one env can't open is left
+    unconstrained. A plan cut off by the length limit mid-step goes back to its last whole step."""
 
-    def constrain(seqs, done):
-        mask = torch.ones((len(seqs), len(vocab)), dtype=torch.bool)
-        ask = [r for r, k in enumerate(keys) if k is not None and not done[r]]
+    def __init__(self, env, vocab, prompts):
+        self.env, self.vocab = env, vocab
+        self.exit_id = vocab.stoi["exit"]
+        self.levels, self.starts = [], []
+        self.left = Counter()  # prompts of each level not yet ended
+        for p in prompts:
+            sep = p.index(SEP)
+            self.levels.append(" ".join(vocab.decode(p[1:sep])))
+            self.starts.append(vocab.decode(p[sep + 1 :]))
+            self.left[self.levels[-1]] += 1
+        self.keys = {}  # level -> its env key (None: it couldn't be opened)
+        self.whole = {}  # prompt -> its length at its last whole step
+        self.opened = 0
+
+    def key(self, i):
+        level = self.levels[i]
+        if level not in self.keys:
+            key = str(self.opened)
+            self.opened += 1
+            self.keys[level] = key if self.env.open(key, level) else None
+        return self.keys[level]
+
+    def plan(self, i, seq):
+        return " ".join(self.starts[i] + self.vocab.decode(seq))
+
+    def __call__(self, idx, seqs):
+        mask = torch.ones((len(idx), len(self.vocab)), dtype=torch.bool)
+        ask = [r for r, i in enumerate(idx) if self.key(i) is not None]
         if ask:
-            answers = env.next([keys[r] for r in ask], [" ".join(vocab.decode(seqs[r])) for r in ask])
+            answers = self.env.next([self.key(idx[r]) for r in ask], [self.plan(idx[r], seqs[r]) for r in ask])
             for r, a in zip(ask, answers):
-                ids = [vocab.stoi[t] for t in a.get("allowed", []) if t in vocab.stoi]
+                ids = [self.vocab.stoi[t] for t in a.get("allowed", []) if t in self.vocab.stoi]
                 if a.get("whole"):
-                    whole[r] = len(seqs[r])
-                    if env.let_stop:
-                        ids.append(exit_id)
+                    self.whole[idx[r]] = len(seqs[r])
+                    if self.env.let_stop:
+                        ids.append(self.exit_id)
                 if a.get("end") or not ids:
                     ids.append(EOS)
                 mask[r] = False
                 mask[r, ids] = True
         return mask
 
-    def trim(outs):
-        rows = [r for r, k in enumerate(keys) if k is not None]
-        answers = env.next([keys[r] for r in rows], [" ".join(vocab.decode(outs[r])) for r in rows]) if rows else []
-        for r, a in zip(rows, answers):
+    def finish(self, i, seq):
+        key = self.key(i)
+        # A plan that ended where env let it ends at a whole step; only one cut off by the length
+        # limit may be mid-step.
+        if key is not None and len(seq) > self.whole.get(i, 0):
+            a = self.env.next([key], [self.plan(i, seq)])[0]
             if not a.get("whole") and not a.get("end"):
-                outs[r] = outs[r][: whole[r]]
-        return outs
-
-    whole = [0] * len(prompts)  # each row's length at its last whole step
-    exit_id = vocab.stoi["exit"]
-    constrain.keys = list(opened.values())
-    constrain.trim = trim
-    return constrain
+                seq = seq[: self.whole.get(i, 0)]
+        self.whole.pop(i, None)
+        level = self.levels[i]
+        self.left[level] -= 1
+        if not self.left[level]:
+            if key is not None:
+                self.env.close([key])
+            del self.keys[level]
+        return seq
 
 
 def check(items, glados=DEFAULT_GLADOS, mode="conservative"):
@@ -359,7 +382,7 @@ def pick(records, n, seed):
 
 
 def main():
-    global MAX_PLAN
+    global MAX_PLAN, MAX_CONSTRAINED
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checkpoint")
     ap.add_argument("--plans", default=None,
@@ -380,7 +403,8 @@ def main():
     ap.add_argument("--constrained", action="store_true",
                     help="write only legal steps (glados-score env); default --out: <checkpoint dir>/eval-constrained")
     ap.add_argument("--let-stop", action="store_true", help="with --constrained: plans may stop before the goal")
-    ap.add_argument("--max-plan", type=int, default=MAX_PLAN, help="most tokens per plan")
+    ap.add_argument("--max-plan", type=int, default=None,
+                    help=f"most tokens per plan (default {MAX_PLAN}, constrained {MAX_CONSTRAINED})")
     args = ap.parse_args()
     args.seed = resolve(args.seed)
 
@@ -415,7 +439,9 @@ def main():
 
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / ("eval-constrained" if args.constrained else "eval")
     env = Env(args.glados, let_stop=args.let_stop) if args.constrained else None
-    MAX_PLAN = args.max_plan
+    if args.max_plan:
+        MAX_PLAN = MAX_CONSTRAINED = args.max_plan
+    args.max_plan = MAX_CONSTRAINED if args.constrained else MAX_PLAN
     out.mkdir(parents=True, exist_ok=True)
     sets, solutions = {}, []
     for name, records, modes in todo:
@@ -456,7 +482,7 @@ def main():
     print(f"wrote {out / 'report.md'}")
 
     run = Path(args.checkpoint).parent
-    if (run / "log.jsonl").exists() and not args.constrained:
+    if (run / "log.jsonl").exists() and out.resolve() == (run / "eval").resolve():
         import record
 
         record.safely(run)

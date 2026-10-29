@@ -85,6 +85,7 @@ GOBLIN_FIELDS = SETTINGS + [
     "probe_solved",
     "frontier_solved",
     "frontier_liberal_solved",
+    "decoding",
     "notes",
 ]
 # goblin_eval.py's other sets, and the column of each one's greedy solved share. (The headline
@@ -260,6 +261,7 @@ def measure(run):
             row["eval_solved"] = pct(h["solved"])
             row["eval_pass_at_k"] = pct(h["pass_at_k"])
             row["eval_optimal"] = pct(h["optimal"])
+            row["decoding"] = "constrained" if e.get("constrained") else "free"
             for name, field in GOBLIN_SETS.items():
                 if name in e["sets"]:
                     row[field] = pct(e["sets"][name]["solved"])
