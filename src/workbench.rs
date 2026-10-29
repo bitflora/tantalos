@@ -1101,6 +1101,12 @@ fn level_detail(state: &Mutex<State>, id: &str) -> Result<String, String> {
 fn annotate(state: &Mutex<State>, body: &str) -> Result<String, String> {
     let id = param(body, "id").ok_or("missing id")?;
     let mut guard = state.lock().unwrap();
+    // Agents and stage.py rewrite the store while the app is open; start from what is on disk
+    // so this save does not put a stale in-memory copy over their changes.
+    let path = guard.paths.annotations.clone();
+    if let Ok(annotations) = load_annotations(&path) {
+        guard.annotations = annotations;
+    }
     let old = guard.annotations.get(&id).cloned().unwrap_or_default();
     let staged = param(body, "staged").map_or(old.staged, |v| v == "1");
     let rating = param(body, "rating")

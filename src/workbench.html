@@ -637,8 +637,8 @@ function flushNotes() {
   const ta = $("#a-notes");
   if (l && ta && notesDirty) {
     l.ann.notes = ta.value;
-    persist(l);
     notesDirty = false;
+    return persist(l);
   }
 }
 
@@ -924,6 +924,9 @@ async function stageLevel(l) {
     if (status) { status.className = "hint err"; status.textContent = "This level has no token sequence to stage."; }
     return;
   }
+  // Save a pending note first: stage.py rewrites the annotation file, and a note save that
+  // lands while it runs could be overwritten by it.
+  await flushNotes();
   const force = !!l.ann.staged;
   if (btn) { btn.disabled = true; btn.textContent = "Staging…"; }
   if (status) {
@@ -938,8 +941,11 @@ async function stageLevel(l) {
     });
     const d = await r.json().catch(() => ({ ok: false, error: "bad response from the server" }));
     if (!d.ok) throw new Error(d.error || "staging failed");
-    if (d.annotation) l.ann = Object.assign(EMPTY_ANNOTATION(), d.annotation);
+    const typed = l.ann.notes;
+    if (d.annotation) Object.assign(l.ann, EMPTY_ANNOTATION(), d.annotation);
     else l.ann.staged = true;
+    // Anything typed while the level compiled is newer than stage.py's copy.
+    l.ann.notes = typed;
     state.annotations[l.id] = l.ann;
     const cb = $("#a-staged"); if (cb) cb.checked = true;
     const head = $("#head-ann"); if (head) head.innerHTML = annotationBadges(l);
@@ -959,6 +965,9 @@ async function stageLevel(l) {
 function persist(l) {
   const seq = ++saveSeq;
   setSaved("saving…", "");
+  // Keep this object: renderDetail's controls hold a reference to `l.ann`, so replacing it
+  // would leave the notes box writing into an object that is no longer saved.
+  const ann = l.ann;
   const body = new URLSearchParams({
     id: l.id,
     staged: l.ann.staged ? "1" : "0",
@@ -969,13 +978,16 @@ function persist(l) {
     excluded: l.ann.excluded ? "1" : "0",
     human_verdict: l.ann.human_verdict || "",
   });
-  fetch("/api/annotate", { method:"POST", body })
+  return fetch("/api/annotate", { method:"POST", body })
     .then(r => { if (!r.ok) return r.text().then(t => { throw new Error(t || ("HTTP " + r.status)); }); return r.json(); })
     .then(a => {
       if (seq < saveApplied) return;
       saveApplied = seq;
-      l.ann = Object.assign(EMPTY_ANNOTATION(), a);
-      state.annotations[l.id] = l.ann;
+      const typed = ann.notes;
+      Object.assign(ann, EMPTY_ANNOTATION(), a);
+      // The server's copy is an echo of an earlier request; never undo text typed since.
+      ann.notes = typed;
+      state.annotations[l.id] = ann;
       l.search = searchText(l);
       setSaved("saved", "ok");
       renderList();
