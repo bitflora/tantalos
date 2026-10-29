@@ -27,7 +27,19 @@ User's decisions (2026-10-27): self-play trusts conservative-checked plans, and 
 plans once Portal 2 has played them cleanly; the level net stays frozen first, co-trained
 later; overnight CPU and GPU data jobs are fine when nothing is training.
 
-## Done (2026-10-27)
+## Done (updated 2026-10-29)
+
+- **School integrity repair** (2026-10-29): shortening uses verdicts grouped by item; draws
+  and resumed rounds exclude both tests and the probe; every retained buffer plan is checked
+  before publication. One atomic JSONL writer handles state and buffer files; the completion
+  marker is published last. Regression tests cover shortening, skipped prompts, holdout
+  exclusion, invalid alternatives, replacement failure and interruption/resume.
+- **Trial buffer audit and recovery** (2026-10-29): the original 13-row, 36-plan buffer had
+  19 plans that failed conservative rechecking and one probe identity (`ws:3363171431`). The
+  original bytes are preserved in `runs/school/try/buffer.pre-review-2026-10-29.jsonl`. Recovered
+  from original checked attempts and shortened with the fixed code: **12 levels, 31 plans**,
+  all independently rechecked, no held-out identities. Audit: `runs/school/try/buffer-audit-2026-10-29.json`.
+  The original round outputs remain historical; the next sampling round is still pending.
 
 - **Constrained decoding, E2 built early** (2026-10-29): `glados-score env` (src/env.rs), a JSONL
   server listing the plan tokens that may come next (each step a move of the conservative or the
@@ -86,20 +98,26 @@ later; overnight CPU and GPU data jobs are fine when nothing is training.
 
 ## Next
 
+Current priority: self-play data integrity and one verified small round, followed by a guarded
+training experiment. Before a value head, compare constrained sampling with bounded step-level
+beam or best-first search at equal wall-clock cost (same levels, model and hardware). Record
+solved share, plan lengths, model/check calls and peak memory; the baseline uses the existing
+policy and no learned leaf scorer. Keep game validation and simulator-gap fixes alongside this
+work. The [project roadmap](../plan.md) records the milestone order.
+
 Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
 
-1. Overnight data jobs, one at a time, nothing training: `goblin_data.py --deep` (all parts),
-   then `harvest.py runs/v6-fresh-12h/away/best.pt --cond "<verdict:solvable> <src:ws>"
-   --out data/goblin/harvest/v6-solvable.jsonl --keep-unsolved data/goblin/pool/v6.jsonl`,
-   then `goblin_data.py` again (plans the v6 part, assembles).
-2. First Goblin run: one long run, `run.py start goblin-v6init-12h --task goblin --from
-   v6-fresh-12h --hours 12 -- --layers 10 --batch 8 --accum 2` (block 1024 unless BUILD.md says
-   over 10% of Workshop rows don't fit). Gate: more than 5 points over solve-fresh-3h on
-   test-gen (30.6) and test-ws (14.4), and non-zero test-hard.
-3. Self-play, `train/school.py` (not built yet), in stages:
+1. Data build and v6 harvest are complete (see Done); do not repeat them by default.
+2. The first Goblin run, `goblin-v6init-12h-b`, and its constrained evaluation are complete;
+   all gates pass on the current data/goblin baseline. Compare future runs on identical splits
+   and decoding modes, not the older data/plans percentages.
+3. Self-play: `train/school.py` implements one manual round; its training loop is not built.
+   First verify the integrity fixes, audit existing buffers, and finish Task 5's small-round,
+   resume and second-draw checks. Test and probe identities must remain excluded; every retained
+   plan must pass an independent check. Then proceed in stages:
    - **E1 expert iteration.** Each round: draw 4,096 levels, half from the frontier (solved by
      1-50% of samples before, or never, with back-off), half new (a fresh v6 harvest's pool,
-     ws5 *train* uncertain/published levels; never test-side identities). Greedy + 32 samples,
+     ws5 *train* uncertain levels; never test or probe identities). Greedy + 32 samples,
      then prefix resampling from the longest checked prefix (`steps_ok`). Conservative check:
      trusted; liberal only: the game queue. Shorten each solved plan by dropping steps that
      aren't needed; keep at most 4 per level, different mechanic sets first. Buffer by
@@ -113,17 +131,20 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
      play.py batches with `route --plan --mode liberal`; clean plays become trusted; a failed
      conservative plan is a model exploit (docs/solver-gaps-2026-10.md, tests/playtested.rs, fix,
      re-check the buffer).
-   - **E4 AlphaGo proper** once E2 is stable: the value head and step-level search of "Next" 4
-     (items a and b), the policy trained on the search's plans, the value head on the outcomes.
-     Game checks stay on.
+   - **E4 search and value learning.** First compare bounded step-level search without a value
+     head against constrained sampling at equal wall-clock cost. Then, with rollout labels and
+     evidence that learned leaf scoring is needed, add "Next" 4's value head and value-guided
+     search. Train the policy on checked search plans and the value head on outcomes. Game
+     checks stay on.
    - **E5 co-training the level net** after several stable rounds: expert iteration on levels
      at Goblin's frontier, rated prompt kept, judged by blind A/B play-tests.
    - **E6 learned dynamics (MuZero-style)**, only if the game keeps accepting plans the Rust
      model forbids, and only once there are thousands of clean in-game outcomes: "Next" 4e.
-4. Architecture changes toward AlphaGo (agreed 2026-10-27). Goblin today is a decoder-only
+4. Architecture changes toward AlphaGo (updated 2026-10-29). Goblin today is a decoder-only
    transformer (6 layers, 384 wide by default, `--layers 10` for the first run) with a policy
-   only, decoded greedily or best-of-N, no search. In order:
-   - **a. Value head** (with E4). A scalar head on the shared trunk, read at each step boundary
+   only, decoded greedily or best-of-N, no search. The search baseline comes before the value head:
+   - **a. Value head** (after E4's search baseline and rollout-label checks). A scalar head on
+     the shared trunk, read at each step boundary
      (the token before a plan verb, and at `exit`), trained alongside the policy (policy
      cross-entropy plus value loss, as AlphaGo Zero). Two outputs, because there are two judges:
      **P(model accepts | level, prefix)**, labelled by `check` on school rollouts (cheap,
@@ -131,10 +152,11 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
      plays (expensive, authoritative; a harness failure, play.py's `exec`/`plan?` classes, is
      not a label). The gap between the two marks likely exploits and picks which plans get game
      time. Checkpoints without the head load with it freshly initialised.
-   - **b. Step-level search** (with E4). Tree nodes are whole steps (`fire C X Y Z D` is one
-     move, not five tokens). Candidates are the legal steps `glados-score env` lists (E2), plus
+   - **b. Step-level search** (policy-only baseline first; value guidance later). Tree nodes
+     are whole steps (`fire C X Y Z D` is one move, not five tokens). Candidates are the legal steps `glados-score env` lists (E2), plus
      the policy's own top samples in liberal mode so a step the model forbids can still be
-     tried; prior = summed token log-probabilities of the step, leaves scored by the value head;
+     tried; prior = summed token log-probabilities of the step; the baseline uses policy scores,
+     with leaves scored by the value head only in the later comparison;
      best-first first, MCTS (PUCT) if best-first stalls. Search runs in the Rust model; the best
      few plans per level go to the game (E3), and what the game accepts goes to the buffer.
    - **c. 3D position embeddings** (any time after the first Goblin run, step 2, as an A/B run

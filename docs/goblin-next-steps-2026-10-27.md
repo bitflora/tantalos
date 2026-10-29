@@ -10,6 +10,41 @@ plans that move with mirrored/turned levels, fast padded sampling, alternative p
 builder `train/goblin_data.py`, the new eval sets in `train/goblin_eval.py`,
 `harvest.py --keep-unsolved`. A smoke run (`runs/goblin-smoke`) went through the whole pipeline.
 
+## Current status (2026-10-29)
+
+Tasks 1-4 are historical instructions: data/goblin is built, the harvest is complete, and
+`goblin-v6init-12h-b` passes the gates with constrained decoding. Do not rerun those jobs by
+default. `train/school.py` now implements Task 5's manual round; the first trial exists under
+`runs/school/try/r00`, and its buffer has been audited and repaired (see below).
+The full school training loop remains future work. The current roadmap is [plan.md](../plan.md).
+
+Integrity repair and buffer audit are complete: the old buffer had 19 failing plans and one
+probe identity. A byte-for-byte backup is `runs/school/try/buffer.pre-review-2026-10-29.jsonl`;
+the repaired buffer has 12 levels and 31 conservatively rechecked plans, with no held-out
+identities. The audit is `runs/school/try/buffer-audit-2026-10-29.json`. Original round outputs
+remain historical. No new sampling, training or game session was run for this repair.
+
+Acceptance checklist, before any school training (items 1-2 complete for this repair):
+
+1. Run `.venv/Scripts/python -m unittest discover -s tests -p test_school.py -v`.
+   Regressions cover grouped shortening verdicts, probe exclusion, all retained alternatives,
+   atomic replacement failures, and interruption before the completion marker followed by resume.
+2. Audit the existing trial buffer against test **and probe** identities and independently
+   check every retained plan. Preserve the original buffer and write an audit report; repair
+   from checked original attempts where possible. Keep historical round summaries as historical
+   observations, not corrected training-data counts.
+3. Finish Task 5's small-round acceptance checks with the corrected code when the GPU is free
+   and the user authorizes the sampling job. Include a second draw. Resumed pre-fix rounds that
+   contain held-out identities must be audited before they can continue.
+4. Only then propose guarded school training through `run.py`; keep the level net frozen.
+5. Before adding a value head, compare constrained best-of-N with bounded step-level beam or
+   best-first search using the current policy alone, at equal wall-clock cost and on identical
+   levels. Record solve rates, plan lengths, calls and peak memory. Rollout labels and evidence
+   from this comparison gate the value-head experiment. Game checks/model-gap fixes stay active.
+
+The integrity repair changes code and documentation; it does not authorize new training,
+data builds, sampling rounds or game sessions.
+
 ## Rules for whoever does these tasks
 
 - Read `CLAUDE.md` first and follow it. Use `.venv/Scripts/python`. Run commands from the repo
@@ -45,7 +80,7 @@ Both can be stopped and carried on; to pause, tell the user what you are doing, 
   Run the identical command again to resume (it reads `OUT.partial.jsonl`, keeps the saved seed).
   A `wait`-style background job that ends with exit 3 is a pause, not a failure.
 
-## Task 1 (ASK): build data/goblin without the harvest
+## Task 1 (complete; historical commands): build data/goblin without the harvest
 
 Why: the supervised data for the first Goblin run. CPU on every thread for several hours.
 
@@ -68,7 +103,7 @@ Done when all of these hold (stop and report otherwise):
   probe has at least 1,000 levels.
 - Write down BUILD.md's line "Workshop rows longer than a 1024 block": Task 4 needs it.
 
-## Task 2 (ASK): harvest levels from the level net, then plan them
+## Task 2 (complete; historical commands): harvest levels from the level net, then plan them
 
 Why: test-v6 (half of the headline score) and training rows in the level net's style, plus the
 first self-play pool. GPU (with some CPU) for hours.
@@ -90,7 +125,7 @@ first self-play pool. GPU (with some CPU) for hours.
 Done when: the second build's log shows a `v6:` line with `planned` close to the harvested count;
 BUILD.md lists a `v6` source and `test-v6` with a few hundred levels (1 in 20 of v6 levels).
 
-## Task 3: check the data
+## Task 3 (complete): check the data
 
 No heavy job, a few minutes.
 
@@ -109,7 +144,7 @@ No heavy job, a few minutes.
 3. Add both results (the check share and the baseline numbers) to the "Done" section of
    docs/goblin-plan-2026-10-27.md and commit that file.
 
-## Task 4 (ASK): the first Goblin run
+## Task 4 (complete; historical commands): the first Goblin run
 
 Why a plain next-token policy first, when the goal is an AlphaGo-style net (policy, value head,
 search; docs/goblin-plan-2026-10-27.md "Next" 4): this run *is* that net's first stage, as
@@ -140,21 +175,22 @@ run is `goblin-v6init-12h-b`.
 Done when the run is recorded and the user has the gate result. **If it failed, stop here**: report
 the report.md's failing-step counts and the probe table, and wait for the user.
 
-## Task 5 (ASK, only if Task 4 passed): self-play, one round by hand
+## Task 5 (implemented; sampling checks still ASK): self-play, one round by hand
 
-Why: the first stage of Goblin learning from its own solutions (expert iteration). Build a new
-script `train/school.py` with one subcommand, `round`. Keep the code in the style of
+Why: the first stage of Goblin learning from its own solutions (expert iteration). The existing
+script `train/school.py` has one subcommand, `round`. Finish its acceptance checks after the
+integrity repair. Keep the code in the style of
 `train/harvest.py` and `train/broadcast.py` (docstring at the top that says how to run it, small
 functions). Reuse, don't copy: `goblin_eval.plan_prompt`, `goblin_eval.generate_plans`,
 `goblin_eval.check`, `sample.load_checkpoint`, `goblin_data.augment`, `goblin_data.identity`,
 `data.PLAN_WORDS`.
 
 `.venv/Scripts/python train/school.py round NAME --model CHECKPOINT --round R [--levels 4096] [--k 32]`
-writes `runs/school-NAME/rRR/` (RR = two digits) and does, in order:
+writes `runs/school/NAME/rRR/` (RR = two digits) and does, in order:
 
 1. **Pool.** Candidates: `data/goblin/pool/*.jsonl`, plus the records of `data/ws5/train.jsonl`
    whose `solver_verdict` is `uncertain` (never `data/ws5/test.jsonl`; drop any record whose
-   `identity` is in a test set of data/goblin). Keep a state file `runs/school-NAME/levels.jsonl`
+   `identity` is in a test set or the probe of data/goblin). Keep a state file `runs/school/NAME/levels.jsonl`
    with one line per level tried: `tokens`, `identity`, `tries`, `solved_rounds`, `last_round`.
    Draw `--levels`: half from levels tried before and not solved in every try (prefer ones solved
    in some tries; a never-solved level only every 2^tries rounds), half never tried. Save the
@@ -172,20 +208,22 @@ writes `runs/school-NAME/rRR/` (RR = two digits) and does, in order:
 5. **Polish.** For each conservatively solved plan, try removing each step in turn; if
    `check` still says solved, keep the shorter one and repeat until no step can go. Keep at most
    4 distinct plans per level, preferring ones whose sets of verbs differ.
-6. **Buffer.** Append to `runs/school-NAME/buffer.jsonl` one row per newly solved level:
+6. **Buffer.** Append to `runs/school/NAME/buffer.jsonl` one row per newly solved level:
    `tokens`, `plan` (shortest), `plans`, `alt_plans` (empty), `min_len` (steps of the shortest),
    `src: "school"`, `identity`, `found_by: "goblin"`, `round`, `trusted: "check"`. A level already in
-   the buffer gets its row replaced only if the new plan is shorter.
+   the buffer gets its row replaced only if the new plan is shorter. Recheck every retained
+   plan in the whole buffer before publishing it; reject held-out identities and invalid plans.
+   Write state and buffer atomically; publish `summary.json` only after every other round output.
 7. **Round summary**: `summary.json` and a printed table: levels drawn, solved greedy, solved by
    any sample, by prefix resampling, liberal-only, newly solved, solved levels the Rust solver
    calls uncertain ("beyond BFS"), the time each step took.
 
-Then check, by hand, on a small round first:
-`.venv/Scripts/python train/school.py round try --model runs/goblin-v6init-12h-b/best.pt --round 0 --levels 256 --k 8`
+Then check, by hand, on a fresh small round (the old `try/r00` is already complete):
+`.venv/Scripts/python train/school.py round verify --model runs/goblin-v6init-12h-b/best.pt --round 0 --levels 256 --k 8`
 
 Done when: the small round runs without errors; every buffer plan checks as solved when run
 through `glados-score check` again; `summary.json` numbers add up (solved ≤ drawn); a second
-`round try --round 1` draws a different half of new levels and updates `levels.jsonl`. Commit
+`round verify --model runs/goblin-v6init-12h-b/best.pt --round 1 --levels 256 --k 8` draws a different half of new levels and updates `levels.jsonl`. Commit
 `train/school.py`. Report the summary table to the user and stop.
 
 ## Task 6 (ASK, after Task 4): 3D position embeddings, an A/B run
@@ -233,6 +271,6 @@ should solve do.
 
 In docs/goblin-plan-2026-10-27.md, "Next" 3: the full school loop (rounds with `--quick`
 training on the base data plus the buffer, consolidation runs every 5 rounds), Portal 2 checks
-of the liberal queue (E3), constrained decoding through a `glados-score env` server (E2), a value
-head and tree search (E4), and co-training the level net (E5). Each needs its own plan agreed
-with the user first.
+of the liberal queue (E3), the bounded search baseline followed by a gated value head (E4), and
+co-training the level net (E5). Constrained decoding (E2) is already implemented and stays on
+for school rounds. Each future experiment needs its own plan agreed with the user first.

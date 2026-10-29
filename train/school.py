@@ -7,7 +7,7 @@
 A round draws levels from Goblin's frontier (the levels the Rust solver runs out of budget on),
 asks the net to solve them, and keeps the plans `glados-score check` accepts in a replay buffer
 for the next training run (docs/goblin-next-steps-2026-10-27.md, Task 5; the plan behind it is
-docs/goblin-plan-2026-10-27.md "Next" 3, E1). It writes runs/school-NAME/rRR/ (RR = two digits):
+docs/goblin-plan-2026-10-27.md "Next" 3, E1). It writes runs/school/NAME/rRR/ (RR = two digits):
 
     pool.jsonl             the levels drawn this round
     attempts.jsonl         every plan tried, with its verdict
@@ -22,7 +22,7 @@ Steps, in order (each one's time goes into summary.json):
 
 1. Pool: data/goblin/pool/*.jsonl (levels the level net wrote that the solver ran out of budget
    on; harvest.py --keep-unsolved) and the ws5 *train* levels the solver calls `uncertain`,
-   never a test set's identity. Half the draw is levels tried before but not solved on every
+   never a test or probe identity. Half the draw is levels tried before but not solved on every
    try (a level never solved comes up only every 2^tries rounds); half is new.
 2. Attempt: one greedy plan and --k samples per level, checked conservatively. Plans are written
    from legal steps only (`glados-score env`, as `goblin_eval.py --constrained`; --free turns it
@@ -32,7 +32,8 @@ Steps, in order (each one's time goes into summary.json):
 4. Liberal: the plans of levels still unsolved, checked with mode="liberal".
 5. Polish: drop each unnecessary step from the solved plans, until no step can go; at most 4
    plans per level, different sets of verbs first.
-6. Buffer: the solved levels, with their shortest plan.
+6. Buffer: the solved levels, with their shortest plan; recheck every retained plan and reject
+   held-out test/probe identities before publishing training data.
 7. Summary.
 
 An interrupted round (Ctrl-C, a crash, the machine needed) goes on where it stopped when the same
@@ -67,7 +68,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "runs" / "school"
 POOL_FILES = ["data/goblin/pool/*.jsonl"]
 WS_TRAIN = "data/ws5/train.jsonl"
-TESTS = ["data/goblin/test-*.jsonl"]
+TESTS = ["data/goblin/test-*.jsonl", "data/goblin/probe.jsonl"]
 ROWS = 64  # plans generated at once (goblin_eval.generate_plans)
 PREFIX_TRIES = 16  # continuations sampled per prefix resampling pass
 MAX_PLANS = 4  # plans kept per solved level
@@ -119,7 +120,7 @@ def verbs(plan):
 # --- the pool ----------------------------------------------------------------------------------
 
 def test_identities():
-    """The identities held out by data/goblin's test sets: never drawn."""
+    """The identities held out by data/goblin's tests and probe: never drawn or buffered."""
     out = set()
     for path in expand(TESTS):
         for r in read_jsonl(path):
@@ -148,17 +149,14 @@ def candidates():
 
 
 def load_state(path):
-    """{identity: row} from runs/school-NAME/levels.jsonl."""
+    """{identity: row} from runs/school/NAME/levels.jsonl."""
     if not path.exists():
         return {}
     return {r["identity"]: r for r in read_jsonl(path)}
 
 
 def save_state(path, state):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        for row in state.values():
-            f.write(json.dumps(row) + "\n")
+    write_jsonl(path, state.values())
 
 
 def draw(pool, state, n, rnd, rng):
@@ -179,7 +177,8 @@ def draw(pool, state, n, rnd, rng):
     first = (some + never_solved)[:half]
     second = fresh[: n - len(first)]
     if len(first) + len(second) < n:  # one side was short
-        rest = [i for i in (some + never_solved + fresh) if i not in set(first) | set(second)]
+        selected = set(first) | set(second)
+        rest = [i for i in (some + never_solved + fresh) if i not in selected]
         rng.shuffle(rest)
         first += rest[: n - len(first) - len(second)]
     counts = {"tried": len(first), "new": len(second)}
@@ -194,11 +193,17 @@ def level_prompts(model, vocab, levels):
 
 
 def check_items(items, glados, mode):
-    """`goblin_eval.check` in batches: one process per batch, its levels' models built once each."""
+    """One verdict list per item, in order; retain batching and build each level once."""
     out = []
     step = 128
     for start in range(0, len(items), step):
-        out += goblin_eval.check(items[start : start + step], glados, mode)
+        part = items[start : start + step]
+        results = goblin_eval.check(part, glados, mode)
+        at = 0
+        for item in part:
+            n = len(item["plans"])
+            out.append(results[at : at + n])
+            at += n
     return out
 
 
@@ -217,13 +222,13 @@ def attempt(model, vocab, levels, args, save):
         for j, i in enumerate(asked):
             part[i]["plans"] = [greedy[j]] + sampled[j * args.k : (j + 1) * args.k]
             part[i]["kind"] = ["greedy"] + ["sample"] * args.k
-        items = [{"tokens": lv["tokens"], "plans": lv["plans"]} for lv in part if lv.get("plans")]
-        results = iter(check_items(items, args.glados, "conservative"))
         for lv in part:
             if lv.get("plans") is None:
                 lv["plans"], lv["kind"], lv["results"] = [], [], []
-            else:
-                lv["results"] = [next(results) for _ in lv["plans"]]
+        checked = [lv for lv in part if lv["plans"]]
+        items = [{"tokens": lv["tokens"], "plans": lv["plans"]} for lv in checked]
+        for lv, verdicts in zip(checked, check_items(items, args.glados, "conservative")):
+            lv["results"] = verdicts
         save()
         print(f"  attempt: {start + len(part)} of {len(levels)} levels", flush=True)
 
@@ -275,9 +280,9 @@ def prefix_pass(model, vocab, levels, args, i, save, n=PREFIX_TRIES):
             lv["plans"] += [f"{prefix} {o}".strip() for o in outs[j * n : (j + 1) * n]]
             lv["kind"] += ["prefix"] * n
         items = [{"tokens": lv["tokens"], "plans": lv["plans"][-n:]} for lv in part]
-        results = iter(check_items(items, args.glados, "conservative"))
-        for lv in part:
-            lv["results"] += [next(results) for _ in range(n)]
+        results = check_items(items, args.glados, "conservative")
+        for lv, verdicts in zip(part, results):
+            lv["results"] += verdicts
             lv["passes"] = i + 1
             del lv["asking"]
         save()
@@ -291,11 +296,10 @@ def liberal_pass(levels, args, save):
             and "liberal" not in lv]
     for start in range(0, len(todo), args.chunk):
         part = todo[start : start + args.chunk]
-        results = iter(check_items([{"tokens": lv["tokens"], "plans": lv["plans"]} for lv in part],
-                                   args.glados, "liberal"))
-        for lv in part:
-            plans = list(zip(lv["plans"], (next(results) for _ in lv["plans"])))
-            lv["liberal"] = [p for p, r in plans if solved(r)]
+        results = check_items([{"tokens": lv["tokens"], "plans": lv["plans"]} for lv in part],
+                              args.glados, "liberal")
+        for lv, verdicts in zip(part, results):
+            lv["liberal"] = [p for p, r in zip(lv["plans"], verdicts) if solved(r)]
         save()
     return [{"tokens": lv["tokens"], "identity": lv["identity"], "plan": lv["liberal"][0]}
             for lv in levels if lv.get("liberal")]
@@ -317,10 +321,10 @@ def polish(tokens, plans, glados):
                     c.append(plan)
             cands[i] = c
         items = [{"tokens": tokens, "plans": cands[i]} for i in active]
-        results = iter(check_items(items, glados, "conservative"))
+        results = check_items(items, glados, "conservative")
         following = []
-        for i in active:
-            hit = next((c for c, r in zip(cands[i], (next(results) for _ in cands[i])) if solved(r)), None)
+        for i, verdicts in zip(active, results):
+            hit = next((c for c, r in zip(cands[i], verdicts) if solved(r)), None)
             if hit is not None:
                 steps[i] = split_steps(hit)
                 if len(steps[i]) > 1:
@@ -360,17 +364,31 @@ def buffer_row(lv, plans, rnd):
             "found_by": "goblin", "round": rnd, "trusted": "check"}
 
 
-def write_buffer(path, rows):
-    """Rewrites the buffer (it is small: one row per solved level)."""
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        for r in rows.values():
-            f.write(json.dumps(r) + "\n")
+def validate_buffer(rows, held, glados):
+    """Check every retained plan, including old rows, before publishing training data."""
+    rows = list(rows)
+    if any(r["identity"] in held for r in rows):
+        raise ValueError("buffer contains held-out test/probe identities; audit it before continuing")
+    for row in rows:
+        if not row.get("plans") or row.get("plan") not in row["plans"]:
+            raise ValueError(f"buffer row {row['identity']} has no retained primary plan")
+    results = check_items(rows, glados, "conservative")
+    for row, verdicts in zip(rows, results):
+        if not all(solved(r) for r in verdicts):
+            raise ValueError(f"buffer row {row['identity']} has an invalid plan; audit it before continuing")
+
+
+def write_jsonl(path, rows):
+    write_atomic(path, "".join(json.dumps(row) + "\n" for row in rows))
 
 
 def write_atomic(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -397,14 +415,13 @@ def round_(a):
     torch.manual_seed(seed + len(progress.get("resumed", [])))  # a resume samples afresh
     out.mkdir(parents=True, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, vocab, _ = sample.load_checkpoint(a.model, device)
     timings = progress["timings"]
     levels = []
     step_t = [time.time()]
 
     def save():
         """The round so far: every level's plans and verdicts, and the time each step took."""
-        write_atomic(work_path, "".join(json.dumps(lv) + "\n" for lv in levels))
+        write_jsonl(work_path, levels)
         write_atomic(progress_path, json.dumps(progress, indent=2) + "\n")
 
     def timed(step):
@@ -416,21 +433,23 @@ def round_(a):
     state = load_state(base / "levels.jsonl")
     if work_path.exists():
         levels = read_jsonl(work_path)
+        held = test_identities()
+        if any(lv["identity"] in held for lv in levels):
+            sys.exit("saved round contains held-out test/probe identities: audit it before resuming")
         drawn_counts = progress["drawn"]
         print(f"resuming {out} (seed {seed}): {len(levels)} levels", flush=True)
     else:
         ids, drawn_counts = draw(pool, state, a.levels, a.round, rng)
         levels = [dict(pool[i]) for i in ids]
         progress["drawn"] = drawn_counts
-        with open(out / "pool.jsonl", "w", encoding="utf-8", newline="\n") as f:
-            for lv in levels:
-                f.write(json.dumps({"tokens": lv["tokens"], "identity": lv["identity"],
-                                    "frontier": lv["frontier"], "source": lv["source"]}) + "\n")
+        write_jsonl(out / "pool.jsonl", ({k: lv[k] for k in ("tokens", "identity", "frontier", "source")}
+                                         for lv in levels))
         timed("pool")
         save()
         print(f"drew {len(levels)} levels ({drawn_counts['tried']} tried before, {drawn_counts['new']} new) "
               f"of {len(pool):,} candidates", flush=True)
     step_t[0] = time.time()
+    model, vocab, _ = sample.load_checkpoint(a.model, device)
     a.env = None if a.free else goblin_eval.Env(a.glados)
 
     # 2. Attempt.
@@ -449,9 +468,7 @@ def round_(a):
 
     # 4. Liberal.
     queue = liberal_pass(levels, a, save)
-    with open(out / "liberal-queue.jsonl", "w", encoding="utf-8", newline="\n") as f:
-        for r in queue:
-            f.write(json.dumps(r) + "\n")
+    write_jsonl(out / "liberal-queue.jsonl", queue)
     timed("liberal")
     save()
 
@@ -482,7 +499,8 @@ def round_(a):
         elif row["min_len"] < old.get("min_len", 10**9):
             buffer[lv["identity"]] = row
             shorter.append(lv["identity"])
-    write_buffer(buffer_path, buffer)
+    validate_buffer(buffer.values(), test_identities(), a.glados)
+    write_jsonl(buffer_path, buffer.values())
     timed("buffer")
 
     # State: tries, the rounds it was solved in, the last round drawn.
@@ -521,16 +539,15 @@ def round_(a):
         "buffer": len(buffer), "plans_kept": sum(len(lv["solved_plans"]) for lv in solved_levels),
         "seconds": round(sum(timings.values()), 1), "timings": timings,
     }
-    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    with open(out / "attempts.jsonl", "w", encoding="utf-8", newline="\n") as f:
-        for lv in levels:
-            f.write(json.dumps({"tokens": lv["tokens"], "identity": lv["identity"],
+    write_jsonl(out / "attempts.jsonl", ({"tokens": lv["tokens"], "identity": lv["identity"],
                                 "frontier": lv["frontier"],
                                 "plans": [{"plan": p, "kind": k, "verdict": r["verdict"],
                                            "steps_ok": r.get("steps_ok")}
                                           for p, k, r in zip(lv["plans"], lv["kind"], lv["results"])],
                                 "liberal": lv.get("liberal", []),
-                                "kept": lv["solved_plans"]}) + "\n")
+                                "kept": lv["solved_plans"]} for lv in levels))
+    # The completion marker is published only after all other round outputs.
+    write_atomic(out / "summary.json", json.dumps(summary, indent=2) + "\n")
 
     pct = lambda n: f"{n}/{len(levels)} ({n / max(len(levels), 1):.0%})"  # noqa: E731
     print(f"\nschool {a.name} round {a.round}: {len(levels)} levels drawn "
