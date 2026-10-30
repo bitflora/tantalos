@@ -54,7 +54,7 @@ writes its plan (called the solver net, task "solve", before 2026-10-27; `--task
 runs still work). They train on data/goblin (train/goblin_data.py makes it; data/plans until it
 exists). Their steps: train, evaluate best.pt (goblin_eval.py --constrained, about 75 minutes:
 plans for held-out levels written from legal steps only, replayed by `glados-score check`;
-`--quick` runs decode freely, about 15 minutes), record in train/goblin-runs.csv (`list --task
+`--quick` runs decode freely, about 15 minutes, unless `--constrained-eval` is given), record in train/goblin-runs.csv (`list --task
 goblin` shows them). No Portal 2 steps, no training away, no play-test picks. The main score is
 EVAL solved %: the share of held-out levels whose greedy plan solves. --from a level-writing run
 starts from its weights with the fresh learning rates (a new task); --from a Goblin run continues it.
@@ -64,6 +64,9 @@ OLD at a low rate (1e-4 down to 1e-5), evaluate on a smaller sample (level runs:
 timing, fewer per-condition levels; Goblin runs: no published set, pass@4), and skip the Portal 2,
 training-away and picking steps. Then a guard: if the EVAL score is more than 3 points (level
 runs; 5 for Goblin runs) under OLD's, WORSE is written and OLD stays the final model.
+With `--constrained-eval`, Goblin uses the full evaluation on the parent's saved levels;
+the guard requires matching settings, headline levels and parent checkpoint, retaining OLD
+if no compatible baseline exists. This includes the probe and frontier sets.
 
 Only one run at a time: they share the GPU. While a broadcast (train/broadcast.py) is going,
 only its own runs (--broadcast NAME) start.
@@ -212,6 +215,8 @@ def start(a):
     if a.pause_after is not None and (a.quick or a.broadcast):
         sys.exit("--pause-after isn't for --quick or broadcast runs")
     goblin = a.task == GOBLIN
+    if a.constrained_eval and not goblin:
+        sys.exit("--constrained-eval is only for Goblin")
     plans = goblin_plans()
     if goblin and not a.data and not plans:
         sys.exit(f"{GOBLIN_DATA.relative_to(ROOT).as_posix()} is missing: a Goblin run needs plan data. Make it with "
@@ -254,10 +259,19 @@ def start(a):
     if goblin:
         tests = data[0].parent if (data[0].parent / "test-gen.jsonl").exists() else (plans or OLD_PLANS).parent
         evaluate = ["train/goblin_eval.py", str(d / "best.pt"), "--plans", str(tests)]
-        if a.quick:  # broadcast rounds: free decoding keeps the round short
+        if a.quick and not a.constrained_eval:  # broadcast rounds: free decoding keeps the round short
             evaluate += ["--n-published", "0", "--k", "4"]
         else:
             evaluate += ["--constrained", "--out", str(d / "eval")]
+        if a.constrained_eval and init:
+            for baseline in (Path(init).parent / "eval-constrained", Path(init).parent / "eval"):
+                try:
+                    report = json.loads((baseline / "eval.json").read_text())
+                    if report.get("constrained") and (baseline / "solutions.jsonl").exists():
+                        evaluate += ["--reference-solutions", str(baseline / "solutions.jsonl")]
+                        break
+                except (OSError, ValueError):
+                    continue
     else:
         evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
         if a.quick:
@@ -266,7 +280,8 @@ def start(a):
         print("train:   ", " ".join(train))
         print("evaluate:", " ".join(evaluate))
         if a.quick:
-            print(f"guard:    WORSE if EVAL is more than {QUICK_WORSE[a.task]:.0%} under {Path(init).parent / 'eval'}")
+            baseline = 'matched constrained parent evaluation' if a.constrained_eval else str(Path(init).parent / 'eval')
+            print(f"guard:    WORSE if EVAL is more than {QUICK_WORSE[a.task]:.0%} under {baseline}")
         return
 
     d.mkdir(parents=True)
@@ -274,7 +289,7 @@ def start(a):
         d, state="starting", started=now().isoformat(timespec="seconds"), hours=a.hours, task=a.task,
         ingame=not (a.no_ingame or goblin or a.quick), init=str(init or ""), train=train, evaluate=evaluate,
         data=list(map(str, data)), vocab=str(vocab), extra=a.extra, quick=a.quick,
-        broadcast=a.broadcast or "", pause_at=a.pause_after,
+        broadcast=a.broadcast or "", pause_at=a.pause_after, constrained_eval=a.constrained_eval,
     )
     p = detach(d)
     ends = now() + datetime.timedelta(hours=a.hours)
@@ -284,7 +299,7 @@ def start(a):
               f"{now() + datetime.timedelta(hours=a.pause_after):%H:%M}; then: train/run.py resume {a.name}")
         print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}   (exits 3 when it has paused)")
         return
-    after = 20 if goblin else 75
+    after = (75 if a.constrained_eval or not a.quick else 20) if goblin else 75
     print(f"training ends about {ends:%H:%M}, results about {ends + datetime.timedelta(minutes=after):%H:%M}")
     print(f"check:  .venv/Scripts/python train/run.py status {a.name}")
     print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
@@ -357,6 +372,8 @@ def eval_score(eval_dir, task):
 def quick_guard(d, s):
     """--quick: WORSE if this run's EVAL is too far under its parent's; returns (final model, line)."""
     task = task_name(s.get("task"))
+    if task == GOBLIN and s.get("constrained_eval"):
+        return constrained_guard(d, s)
     new = eval_score(d / "eval", task)
     old = eval_score(Path(s["init"]).parent / "eval", task)
     if new is None:
@@ -367,6 +384,49 @@ def quick_guard(d, s):
         return Path(s["init"]), f"EVAL {new:.0%} vs the parent's {old:.0%}: worse, the parent stays the final model"
     vs = f" vs the parent's {old:.0%}" if old is not None else " (the parent has no EVAL to compare)"
     return d / "best.pt", f"EVAL {new:.0%}{vs}: this run is the final model"
+
+
+def constrained_guard(d, s):
+    """Fail closed unless the parent and child have comparable greedy evaluations."""
+    parent = Path(s["init"])
+    def reject(reason):
+        (d / "WORSE").touch()
+        return parent, reason + ": the parent stays the final model"
+
+    def read(directory):
+        report = json.loads((directory / "eval.json").read_text())
+        if not 0 <= report["headline"]["solved"] <= 1:
+            raise ValueError("invalid score")
+        names = report["headline"]["set"].split("+")
+        if names == ["test-ws", "v6"]:
+            names = ["test-ws", "test-v6"]
+        rows = [json.loads(line) for line in (directory / "solutions.jsonl").read_text().splitlines() if line.strip()]
+        identities = sorted((r["set"], r["tokens"]) for r in rows if r["set"] in names)
+        if not identities or len(identities) != report["sets"][report["headline"]["set"]]["n"]:
+            raise ValueError("missing headline solutions")
+        return report, identities
+
+    try:
+        new, identities = read(d / "eval")
+    except (OSError, ValueError, KeyError, TypeError):
+        return reject("missing or invalid constrained evaluation")
+    for directory in (parent.parent / "eval-constrained", parent.parent / "eval"):
+        try:
+            old, old_ids = read(directory)
+            keys = ("constrained", "let_stop", "max_plan", "k")
+            if (not new.get("constrained") or not old.get("constrained") or
+                    any(new.get(k) != old.get(k) for k in keys) or
+                    new["headline"]["set"] != old["headline"]["set"] or identities != old_ids):
+                continue
+            if Path(old["checkpoint"]).resolve() != parent.resolve():
+                continue
+            before, after = old["headline"]["solved"], new["headline"]["solved"]
+            if after < before - QUICK_WORSE[GOBLIN]:
+                return reject(f"constrained EVAL {after:.1%} vs {before:.1%}: worse")
+            return d / "best.pt", f"constrained EVAL {after:.1%} vs {before:.1%}: guard passed"
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return reject("no comparable constrained parent baseline")
 
 
 def collect_dead(d):
@@ -933,6 +993,8 @@ def main():
     p.add_argument("--ingame", action="store_true", help=argparse.SUPPRESS)  # old flag: always on now
     p.add_argument("--quick", action="store_true",
                    help="a short fine-tune of --from with a small eval and a guard (train/broadcast.py's rounds)")
+    p.add_argument("--constrained-eval", action="store_true",
+                   help="Goblin: full constrained evaluation and matched parent guard for --quick")
     p.add_argument("--broadcast", default=None, help=argparse.SUPPRESS)  # set by train/broadcast.py
     p.add_argument("--pause-after", type=float, default=None,
                    help="pause by itself after this many hours of training (resume carries on)")

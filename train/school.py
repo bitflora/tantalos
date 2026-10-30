@@ -386,8 +386,10 @@ def validate_buffer(rows, held, glados):
         if not row.get("plans") or row.get("plan") not in row["plans"]:
             raise ValueError(f"buffer row {row['identity']} has no retained primary plan")
     results = check_items(rows, glados, "conservative")
+    if len(results) != len(rows):
+        raise ValueError("checker returned an incomplete buffer result")
     for row, verdicts in zip(rows, results):
-        if not all(solved(r) for r in verdicts):
+        if len(verdicts) != len(row["plans"]) or not all(solved(r) for r in verdicts):
             raise ValueError(f"buffer row {row['identity']} has an invalid plan; audit it before continuing")
 
 
@@ -577,6 +579,32 @@ def round_(a):
     print(f"wrote {out}")
 
 
+def export(a):
+    """Publish independently checked, identity-preserving training examples."""
+    rows = read_jsonl(OUT / a.name / "buffer.jsonl")
+    held = test_identities()
+    validate_buffer(rows, held, a.glados)
+    examples = []
+    for row in rows:
+        for plan in row["plans"]:
+            examples.append({**row, "plan": plan, "plans": [plan], "alt_plans": [],
+                             "min_len": None})  # a successful plan need not be optimal
+    examples = goblin_data.augment(examples, lambda r: ["r0", "r90", "r180", "r270"], "school")
+    if not examples:
+        raise ValueError("no school examples survived augmentation")
+    results = check_items(examples, a.glados, "conservative")
+    if len(results) != len(examples) or any(len(v) != 1 for v in results):
+        raise ValueError("checker returned incomplete augmented results")
+    rejected = [{**r, "check": v[0]} for r, v in zip(examples, results) if not solved(v[0])]
+    examples = [r for r, v in zip(examples, results) if solved(v[0])]
+    if not examples or any(r["identity"] in held for r in examples):
+        raise ValueError("empty or contaminated augmented export")
+    write_jsonl(Path(a.out).with_suffix(".rejected.jsonl"), rejected)
+    write_jsonl(Path(a.out), examples)
+    print(f"exported {len(examples)} rows from {len(rows)} levels to {a.out}; "
+          f"{len(rejected)} transformed plans rejected by independent replay")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -592,6 +620,11 @@ def main():
     r.add_argument("--seed", type=int, default=None,
                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     r.set_defaults(func=round_)
+    e = sub.add_parser("export", help="export checked buffer plans with four rotations")
+    e.add_argument("name")
+    e.add_argument("--out", required=True)
+    e.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    e.set_defaults(func=export)
     a = ap.parse_args()
     a.func(a)
 

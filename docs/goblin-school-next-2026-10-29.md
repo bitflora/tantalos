@@ -61,7 +61,7 @@ test or probe identity. r01 drew no tried levels: r00's unsolved ones wait 2^tri
 ### B. One full self-play round (**ASK**: it holds the GPU for several hours)
 
 The buffer after A is a few dozen levels. That is far too few to train on: data/goblin's
-train.jsonl has about a million rows. The plan (goblin-plan "E1") is rounds of 4,096 levels
+train.jsonl has 223,141 rows (counted 2026-10-30). The plan (goblin-plan "E1") is rounds of 4,096 levels
 with k=32:
 
 ```bash
@@ -77,7 +77,12 @@ hours. Prefix and liberal checking add to that.
 
 ### C. Guarded training on the buffer (**ASK**: needs new code first)
 
-This is not built yet. `run.py` has no way to put the school buffer into a Goblin run.
+Implemented 2026-10-30: `school.py export` checks the original buffer, exports each plan
+with four rotations, preserves identity, and checks the transformed plans before publishing.
+`run.py --constrained-eval` uses full constrained evaluation even with `--quick`, reuses
+the parent's evaluated levels, and retains the parent if the guard lacks a matching baseline.
+The approved first experiment is 30 minutes, roughly 20% buffer (export supplied ten times),
+80% base data, from `goblin-v6init-12h-b`. The earlier 30-50% range is deferred.
 
 1. Write `school.py export NAME --out data/school/NAME.jsonl`. It writes the buffer's plans as
    training rows, in the same row format as `data/goblin/train.jsonl`. Each plan becomes x4
@@ -85,12 +90,40 @@ This is not built yet. `run.py` has no way to put the school buffer into a Gobli
 2. Train with `run.py`, never `train.py` directly:
    - a `--task goblin --quick --from goblin-v6init-12h-b` run;
    - `--data` naming `data/goblin/train.jsonl` and the export;
-   - buffer rows 30-50% of what it trains on. How to reach that share with a small buffer (by
-     repeating it) is a decision for the user.
-3. `--quick` evaluates without constraints and guards against a 5-point drop. This experiment
-   needs the constrained eval: ask the user whether to add a flag for it to `run.py`.
+   - buffer export ten times alongside one copy of the base data; measure the effective
+     share after vocabulary/length filtering and the identity split.
+3. Add `--constrained-eval` to `--quick`: compare the same headline levels, constrained
+   settings and parent checkpoint, retaining the parent on a drop greater than five points
+   or a missing/incompatible baseline. A passed guard does not establish improvement.
 4. Judge the result by the constrained `test-ws+v6` headline (57.3% before), the probe and
-   `test-frontier` (1.2% greedy before). Differences under 5 points are noise.
+   `test-frontier` (3/256, 1.2% greedy before). Report solved counts and paired changes;
+   five points is a rough headline guideline, not a universal significance threshold.
+
+Round e1/r00 completed cleanly: 421/4096 levels, 1,355 checked plans, 24,022 seconds.
+No test/probe identity was in the pool or buffer. The k=8 verification rounds used different
+pools, so their similar solved shares do not establish that k=32 adds no value.
+
+Pilot `goblin-school-r00-b` started 2026-10-30 from `goblin-v6init-12h-b`, 0.5 h,
+quick learning rates, batch 8 / accumulation 2, constrained evaluation on the parent's
+saved evaluation levels. Export: 5,370 checked rows, all 421 identities retained.
+Augmentation rejected 42 transformations; independent replay rejected eight more
+(saved in `data/school/e1.rejected.jsonl`). No rejected transformation enters training.
+After loader filtering and identity split: 212,142 base training rows plus 5,191 school
+rows repeated ten times, giving **19.66%** school. Validation: 10,925 base plus 179 school
+rows repeated ten times. Audit: `runs/school/e1/training-mix.json`.
+Seventeen school/export/guard/reference tests passed.
+
+Result (2026-10-30, guard passed, pilot retained): headline 57.8% vs 57.3% (569 vs 564 of 984),
+pass@8 81.8 vs 82.3, frontier greedy 4 vs 3 of 256. Paired greedy flips, pilot wins/losses:
+test-gen 108/70 (sign test p ~ 0.004, the one real change), test-ws 25/17, test-v6 66/69,
+probe 283/297, test-hard 2/3: noise. Fits the buffer's make-up: 304 of the 421 solved levels
+were the level net's, 117 Workshop. Prefix resampling took 7,429 s of 24,022 for 24 levels.
+Next: replay the buffer's plans in Portal 2 (`train/stage_school_play.py`, `play.py --plans`)
+before training on more of it, then E1 round 1 from the pilot.
+The initial sandbox launch `goblin-school-r00` exited before creating a log; its status
+is preserved. The replacement was launched outside the sandbox. Monitor it with an
+unrestricted `run.py wait`: sandbox process visibility can falsely report DIED for
+an external worker.
 
 ### D. In parallel with B or C (**ASK**): search against sampling
 

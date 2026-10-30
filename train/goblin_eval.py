@@ -378,6 +378,15 @@ def read_jsonl(path, keep=lambda r: True):
         return [r for r in (json.loads(l) for l in f if l.strip()) if keep(r)]
 
 
+def reference_records(records, reference, name):
+    """Match saved evaluation levels exactly, failing rather than silently resampling."""
+    available = {r["tokens"]: r for r in records}
+    wanted = [r["tokens"] for r in reference if r["set"] == name]
+    if not wanted or any(t not in available for t in wanted):
+        raise ValueError(f"reference evaluation does not match current {name} data")
+    return [available[t] for t in wanted]
+
+
 def pick(records, n, seed):
     if n and len(records) > n:
         records = random.Random(seed).sample(records, n)
@@ -399,6 +408,7 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0, help="for the sampled plans")
     ap.add_argument("--rows", type=int, default=64, help="plans generated at once")
     ap.add_argument("--out", default=None, help="default: <checkpoint dir>/eval")
+    ap.add_argument("--reference-solutions", help="reuse the exact levels in a previous solutions.jsonl")
     ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
@@ -439,6 +449,15 @@ def main():
         todo.append(("published", pick(recs, args.n_published, args.seed), ["conservative", "liberal"]))
     if not todo:
         sys.exit("no levels to evaluate on")
+
+    if args.reference_solutions:
+        reference = read_jsonl(args.reference_solutions)
+        matched = []
+        for name, records, modes in todo:
+            # Reload the complete set: todo may already contain a random subset.
+            path = plans / f"{name}.jsonl" if name != "published" else published
+            matched.append((name, reference_records(read_jsonl(path), reference, name), modes))
+        todo = matched
 
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / ("eval-constrained" if args.constrained else "eval")
     env = Env(args.glados, let_stop=args.let_stop) if args.constrained else None
