@@ -27,8 +27,9 @@ Steps, in order (each one's time goes into summary.json):
 2. Attempt: one greedy plan and --k samples per level, checked conservatively. Plans are written
    from legal steps only (`glados-score env`, as `goblin_eval.py --constrained`; --free turns it
    off), so a plan fails only by running out of tokens before the exit.
-3. Prefix resampling, twice: from the longest checked prefix of the best failing plan, 16
-   continuations; a plan that still fails may give a longer prefix for the second pass.
+3. Prefix resampling, twice: from the longest checked prefix of the best failing plan, cut to
+   128 words (64 in the second pass; PREFIX_WORDS), 16 continuations, the whole plan within
+   256 words.
 4. Liberal: the plans of levels still unsolved, checked with mode="liberal".
 5. Polish: drop each unnecessary step from the solved plans, until no step can go; at most 4
    plans per level, different sets of verbs first.
@@ -71,6 +72,10 @@ WS_TRAIN = "data/ws5/train.jsonl"
 TESTS = ["data/goblin/test-*.jsonl", "data/goblin/probe.jsonl"]
 ROWS = 64  # plans generated at once (goblin_eval.generate_plans)
 PREFIX_TRIES = 16  # continuations sampled per prefix resampling pass
+# Longest prefix (words) continued in each prefix resampling pass. Constrained plans that fail
+# mostly run to the 256-word limit, every step legal: continuing all of one wrote 256 more words
+# after 254 (510 in pass 2) and took 2 of the try round's 2.2 hours.
+PREFIX_WORDS = (128, 64)
 MAX_PLANS = 4  # plans kept per solved level
 # A step starts at one of these; colours, numbers and directions are its arguments (the verbs of
 # src/plan.rs `decode`, which is also what the plan words list has apart from `blue`/`orange`).
@@ -233,8 +238,9 @@ def attempt(model, vocab, levels, args, save):
         print(f"  attempt: {start + len(part)} of {len(levels)} levels", flush=True)
 
 
-def best_prefix(lv):
-    """The longest checked prefix of the level's best failing plan, or None."""
+def best_prefix(lv, most):
+    """The longest checked prefix of the level's best failing plan, cut to the whole steps that
+    fit in `most` words, or None."""
     best = None
     for plan, r in zip(lv["plans"], lv["results"]):
         steps_ok = r.get("steps_ok") or 0
@@ -245,13 +251,20 @@ def best_prefix(lv):
     steps = split_steps(best[1])
     if best[0] > len(steps):
         return None  # the plan is shorter than its prefix: nothing to cut
-    return join_steps(steps[: best[0]])
+    kept, words = [], 0
+    for step in steps[: best[0]]:
+        if words + len(step) > most:
+            break
+        kept.append(step)
+        words += len(step)
+    return join_steps(kept) if kept else None
 
 
 def prefix_pass(model, vocab, levels, args, i, save, n=PREFIX_TRIES):
     """Prefix resampling pass `i` (from 0): the levels with no solved plan continue the longest
-    prefix that checked. A level's `passes` counts the passes done for it (a resumed round skips
-    them). Returns how many levels were asked."""
+    prefix that checked, cut to PREFIX_WORDS[i] words; prefix and continuation together stay
+    within goblin_eval's plan limit. A level's `passes` counts the passes done for it (a resumed
+    round skips them). Returns how many levels were asked."""
     block = model.cfg.block_size
     todo = []
     for lv in levels:
@@ -260,7 +273,7 @@ def prefix_pass(model, vocab, levels, args, i, save, n=PREFIX_TRIES):
         if lv.get("asking") == i:  # interrupted while asked: ask again
             todo.append(lv)
             continue
-        prefix = best_prefix(lv)
+        prefix = best_prefix(lv, PREFIX_WORDS[i])
         words = (prefix or "").split()
         if (any(solved(r) for r in lv["results"]) or prefix is None or prefix in lv.get("prefixes", [])
                 or len(lv["tokens"].split()) + len(words) + 3 >= block):
@@ -457,7 +470,7 @@ def round_(a):
     timed("attempt")
 
     # 3. Prefix resampling, twice.
-    for i in range(2):
+    for i in range(len(PREFIX_WORDS)):
         n = prefix_pass(model, vocab, levels, a, i, save)
         timed("prefix")
         save()

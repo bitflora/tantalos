@@ -130,10 +130,11 @@ class LegalSteps:
     `env` allows next on its level: `exit` only at the goal (with env.let_stop, also after any
     whole step, where the model would stop by itself: an unfinished plan). A level is opened
     when its first prompt starts and closed when its last one ends; one env can't open is left
-    unconstrained. A plan cut off by the length limit mid-step goes back to its last whole step."""
+    unconstrained. A plan cut off by the length limit mid-step goes back to its last whole step.
+    `limit` counts a prompt's start of a plan too: a continued plan stops there, whole."""
 
-    def __init__(self, env, vocab, prompts):
-        self.env, self.vocab = env, vocab
+    def __init__(self, env, vocab, prompts, limit=MAX_CONSTRAINED):
+        self.env, self.vocab, self.limit = env, vocab, limit
         self.exit_id = vocab.stoi["exit"]
         self.levels, self.starts = [], []
         self.left = Counter()  # prompts of each level not yet ended
@@ -170,6 +171,8 @@ class LegalSteps:
                         ids.append(self.exit_id)
                 if a.get("end") or not ids:
                     ids.append(EOS)
+                if len(self.starts[idx[r]]) + len(seqs[r]) >= self.limit:
+                    ids = [EOS]  # at the limit: finish() cuts the plan back to its last whole step
                 mask[r] = False
                 mask[r, ids] = True
         return mask

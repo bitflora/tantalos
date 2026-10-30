@@ -355,9 +355,9 @@ fn run_env(args: &[String]) -> Result<()> {
                             }
                         })
                         .collect();
-                    // All the open levels together: past this, each starts afresh.
+                    // All the open levels together: past this, each drops its older half.
                     if envs.values().map(Env::cached).sum::<usize>() > 4 * glados::env::MAX_CACHED {
-                        envs.values_mut().for_each(Env::forget);
+                        envs.values_mut().for_each(|e| e.forget(e.cached() / 2));
                     }
                     format!("{{\"results\":[{}]}}", results.join(","))
                 }

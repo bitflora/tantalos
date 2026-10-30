@@ -30,9 +30,10 @@ use crate::tokens::{dir_token, parse_dir, MAX_NUM};
 /// Most states a node follows, per model (`check` follows up to 100,000; decoding asks a node
 /// for every token, so it keeps fewer).
 pub const MAX_STATES: usize = 2_000;
-/// Most states a level's nodes keep (about 200 bytes each) before all but the first node are
-/// dropped; `next` builds what it needs again from the start of the plan.
-pub const MAX_CACHED: usize = 1_000_000;
+/// Most states a level's nodes keep before the least recently used half are dropped; `next`
+/// builds what it needs again from the deepest node still kept. (A state with its node's
+/// patterns took about 6 kB on a big Workshop level: 1,000,000 of them filled 6 GB.)
+pub const MAX_CACHED: usize = 200_000;
 
 const DIRS: [Dir; 6] = [Dir::PosX, Dir::NegX, Dir::PosY, Dir::NegY, Dir::PosZ, Dir::NegZ];
 
@@ -138,6 +139,8 @@ struct Node {
     states: Vec<Vec<State>>,
     patterns: Vec<Vec<Slot>>,
     goal: bool,
+    /// `Env::clock` when `next` last used it.
+    used: u64,
 }
 
 impl Node {
@@ -179,6 +182,8 @@ pub struct Env {
     nodes: HashMap<String, Node>,
     /// The nodes' `size`s, summed.
     cached: usize,
+    /// `next` calls so far.
+    clock: u64,
 }
 
 impl Env {
@@ -218,6 +223,7 @@ impl Env {
             loose: HashMap::new(),
             nodes: HashMap::new(),
             cached: 0,
+            clock: 0,
         };
         let states = env.models.iter().map(|m| vec![m.initial()]).collect();
         let root = env.node(states);
@@ -231,17 +237,32 @@ impl Env {
         self.cached
     }
 
-    /// Drops every node but the first: they are built again when asked for.
-    pub fn forget(&mut self) {
-        self.nodes.retain(|k, _| k.is_empty());
-        self.cached = self.nodes.values().map(Node::size).sum();
+    /// Drops the least recently used nodes, all but the first, until the rest keep at most
+    /// `keep` states: they are built again when asked for.
+    pub fn forget(&mut self, keep: usize) {
+        let mut recent: Vec<(u64, String)> =
+            self.nodes.iter().filter(|(k, _)| !k.is_empty()).map(|(k, n)| (n.used, k.clone())).collect();
+        recent.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let mut kept = self.nodes[""].size();
+        let mut full = false;
+        for (_, key) in recent {
+            let size = self.nodes[&key].size();
+            if full || kept + size > keep {
+                full = true;
+                self.nodes.remove(&key);
+            } else {
+                kept += size;
+            }
+        }
+        self.cached = kept;
     }
 
     /// What may follow `plan` (plan tokens, space-separated).
     pub fn next(&mut self, plan: &str) -> Next {
         if self.cached > MAX_CACHED {
-            self.forget();
+            self.forget(MAX_CACHED / 2);
         }
+        self.clock += 1;
         let words: Vec<&str> = plan.split_whitespace().collect();
         let dead = Next {
             allowed: BTreeSet::new(),
@@ -261,20 +282,29 @@ impl Env {
                 whole: true,
             };
         }
-        // The node after the whole steps.
-        let mut key = String::new();
+        // The node after the whole steps, built from the deepest one kept (the first always is).
+        let mut keys = vec![String::new()];
+        let mut texts = vec![];
         let mut start = 0;
         for &end in &ends {
             let text = words[start..end].join(" ");
-            let child = if key.is_empty() { text.clone() } else { format!("{key} {text}") };
-            if !self.child(&key, &child, &text) {
-                return dead;
-            }
-            key = child;
+            let last = keys.last().unwrap();
+            keys.push(if last.is_empty() { text.clone() } else { format!("{last} {text}") });
+            texts.push(text);
             start = end;
         }
+        let kept = (0..keys.len()).rev().find(|&i| self.nodes.contains_key(&keys[i])).unwrap_or(0);
+        for i in kept..texts.len() {
+            if !self.child(&keys[i], &keys[i + 1], &texts[i]) {
+                return dead;
+            }
+        }
+        let key = keys.pop().unwrap();
+        let clock = self.clock;
+        let node = self.nodes.get_mut(&key).unwrap();
+        node.used = clock;
+        let node = &*node;
         let rest = &words[partial..];
-        let node = &self.nodes[&key];
         if node.dead() {
             return dead;
         }
@@ -301,7 +331,10 @@ impl Env {
             let child = if key.is_empty() { text.clone() } else { format!("{key} {text}") };
             if self.child(&key, &child, &text) {
                 out.whole = true;
-                let c = &self.nodes[&child];
+                let clock = self.clock;
+                let c = self.nodes.get_mut(&child).unwrap();
+                c.used = clock;
+                let c = &*c;
                 if c.goal {
                     out.allowed.insert("exit".into());
                     out.end = true;
@@ -369,7 +402,7 @@ impl Env {
                 }
             }
         }
-        Node { states, patterns, goal }
+        Node { states, patterns, goal, used: self.clock }
     }
 
     /// The cells `plan::loc_fits` takes for a cube at `loc` (`kind`: the cube put there, when
@@ -583,18 +616,22 @@ mod tests {
         assert!(first.allowed.iter().all(|t| t.parse::<i32>().is_ok_and(|n| n < 7)), "{:?}", first.allowed);
     }
 
-    /// Dropping the nodes changes no answer: they are built again.
+    /// Dropping nodes, all or the older half, changes no answer: they are built again.
     #[test]
     fn forget_keeps_answers() {
         let (_, mut env) = env();
         let words: Vec<&str> = PLAN.split_whitespace().collect();
         let before: Vec<Next> = (0..=words.len()).map(|i| env.next(&words[..i].join(" "))).collect();
         let full = env.cached();
-        env.forget();
-        assert!(env.cached() < full);
-        let after: Vec<Next> = (0..=words.len()).map(|i| env.next(&words[..i].join(" "))).collect();
-        assert_eq!(before, after);
-        assert_eq!(env.cached(), full);
+        for keep in [0, full / 2] {
+            env.forget(keep);
+            assert!(env.cached() < full && env.cached() <= keep.max(env.nodes[""].size()));
+            // Asked deepest first: built from the deepest node kept.
+            let mut after: Vec<Next> = (0..=words.len()).rev().map(|i| env.next(&words[..i].join(" "))).collect();
+            after.reverse();
+            assert_eq!(before, after);
+            assert_eq!(env.cached(), full);
+        }
     }
 
     /// Random plans written only from allowed tokens: `check` finds no illegal step in any,
