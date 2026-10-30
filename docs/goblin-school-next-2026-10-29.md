@@ -28,8 +28,10 @@ Each step needs the one before it. Ask the user before every step marked **ASK**
 
 ### A. Finish Task 5's acceptance checks
 
-These are in docs/goblin-next-steps-2026-10-27.md, Task 5 "Done when". Steps 1-3 passed for
-`verify` r00 (see Done above); step 4, the second draw, is what is left.
+These are in docs/goblin-next-steps-2026-10-27.md, Task 5 "Done when". **All passed
+(2026-10-29).** `verify` r01 (seed 109745903): 256 new levels, none from r00; 17 solved (3 by
+prefix), 1,296 s; levels.jsonl 512 rows; buffer 43 levels, all 100 plans re-check as solved, no
+test or probe identity. r01 drew no tried levels: r00's unsolved ones wait 2^tries rounds.
 
 1. Run the unit tests:
 
