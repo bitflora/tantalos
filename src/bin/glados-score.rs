@@ -37,6 +37,12 @@ const USAGE: &str = "usage:
                                 laser spots, as the solver retries such levels.
                                 --route DIR: NNNNN.p2c and NNNNN.route.jsonl (as
                                 route writes) for the first solved plan of a line
+  glados-score polish [--seconds N] [FILE]
+                                shorten already conservatively solved plans (JSONL with
+                                \"tokens\" and \"plans\"). Reuse one model per level; flush
+                                a \"plans\" snapshot initially and after every improvement.
+                                Default: 300 seconds per level. A caller may kill the process
+                                at its deadline and retain the last complete snapshot.
   glados-score env              the legal next plan tokens, for decoding plans step by step
                                 (src/env.rs): a JSONL server on stdin/stdout, one answer
                                 line per request line, flushed.
@@ -61,10 +67,76 @@ fn main() -> ExitCode {
     cli::main(USAGE, |args| match args.first().map(String::as_str) {
         Some("score") => Some(run_score(&args[1..])),
         Some("check") => Some(run_check(&args[1..])),
+        Some("polish") => Some(run_polish(&args[1..])),
         Some("route") => Some(run_route(&args[1..])),
         Some("env") => Some(run_env(&args[1..])),
         _ => None,
     })
+}
+
+fn run_polish(args: &[String]) -> Result<()> {
+    use glados::mutate::{json_array, json_field};
+    use std::time::{Duration, Instant};
+    let mut seconds = 300.0_f64;
+    let mut rest = Vec::new();
+    for (flag, value) in flags(args, &mut rest)? {
+        match flag {
+            "--seconds" => seconds = parse(flag, value)?,
+            _ => return Err(format!("unknown flag {flag}\n{USAGE}").into()),
+        }
+    }
+    if !seconds.is_finite() || !(0.0..=86400.0).contains(&seconds) {
+        return Err("--seconds must be between 0 and 86400".into());
+    }
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (i, line) in cli::input_lines(&rest, "polish", USAGE)? {
+        let line = line?;
+        let mut plans = json_array(&line, "plans").ok_or("polish needs plans")?;
+        let snapshot = |out: &mut std::io::BufWriter<_>, plans: &[String]| -> std::io::Result<()> {
+            let list = plans.iter().map(|p| dataset::json_str(p)).collect::<Vec<_>>().join(",");
+            writeln!(out, "{{\"line\":{i},\"plans\":[{list}]}}")?;
+            out.flush()
+        };
+        snapshot(&mut out, &plans)?;
+        let deadline = Instant::now() + Duration::from_secs_f64(seconds);
+        if seconds == 0.0 || plans.is_empty() {
+            continue;
+        }
+        let puzzle = tokens::decode(&json_field(&line, "tokens").ok_or("polish needs tokens")?)?;
+        let level = Level::from_puzzle(&puzzle);
+        let mut checker = plan::Checker::new(&level, Mode::Conservative)
+            .map_err(|e| format!("polish model: {e:?}"))?;
+        // Across plans too: sampled plans often share the same loops and suffixes.
+        let mut verdicts = std::collections::HashMap::new();
+        for j in 0..plans.len() {
+            let steps = plan::decode(&plans[j])?;
+            let mut output_error = None;
+            plan::shorten(steps, |candidate| {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                let text = candidate.iter().map(plan::step_text).collect::<Vec<_>>().join(" ");
+                // A pathological deletion must not consume the whole level's budget.
+                // Unknown checks are simply not accepted as improvements.
+                let check_end = deadline.min(Instant::now() + Duration::from_secs(2));
+                Some(*verdicts.entry(text).or_insert_with(|| {
+                    checker.check_until(candidate, Some(check_end)).0.solved
+                }))
+            }, |steps| {
+                plans[j] = steps.iter().map(plan::step_text).collect::<Vec<_>>().join(" ");
+                if let Err(e) = snapshot(&mut out, &plans) {
+                    output_error = Some(e);
+                }
+            });
+            if let Some(e) = output_error {
+                return Err(e.into());
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_route(args: &[String]) -> Result<()> {

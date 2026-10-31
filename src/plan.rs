@@ -42,6 +42,7 @@
 //! and still pass. What happens between the steps (the walks) is the solver's business.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use crate::geom::{Cell, Dir};
 use crate::level::{CubeKind, Level};
@@ -457,8 +458,16 @@ impl<'a> Checker<'a> {
 
     /// What `check` found, and the model it was found on.
     pub fn check(&mut self, steps: &[Step]) -> (Checked, &Model) {
-        let c = check(&self.model, steps);
+        self.check_until(steps, None)
+    }
+
+    /// A bounded check for optional optimizations. Timeout is unknown, never solved.
+    pub fn check_until(&mut self, steps: &[Step], deadline: Option<Instant>) -> (Checked, &Model) {
+        let c = check_from_until(&self.model, self.model.initial(), steps, deadline);
         if c.solved || !self.model.could_angle() {
+            return (c, &self.model);
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             return (c, &self.model);
         }
         let (level, mode) = (self.level, self.mode);
@@ -467,7 +476,7 @@ impl<'a> Checker<'a> {
             .get_or_insert_with(|| Model::new_angled(level, mode).ok());
         match angled.as_ref() {
             Some(a) => {
-                let ca = check(a, steps);
+                let ca = check_from_until(a, a.initial(), steps, deadline);
                 if ca.solved {
                     return (ca, a);
                 }
@@ -484,8 +493,56 @@ pub fn check(model: &Model, steps: &[Step]) -> Checked {
     check_from(model, model.initial(), steps)
 }
 
+/// Shorten an already solved plan by deleting blocks, then individual steps. Stop at
+/// the first successful deletion; only recheck failures when the candidate changes.
+/// `accept` can return None to stop (for example, at a deadline). Every reported
+/// improvement has been accepted by the same conservative checker as the input.
+pub fn shorten(
+    mut steps: Vec<Step>,
+    mut accept: impl FnMut(&[Step]) -> Option<bool>,
+    mut improved: impl FnMut(&[Step]),
+) -> Vec<Step> {
+    let mut width = (steps.len() / 2).max(1);
+    let mut seen = HashSet::new();
+    loop {
+        let mut hit = false;
+        for start in 0..steps.len().saturating_sub(width) + 1 {
+            if width >= steps.len() {
+                break;
+            }
+            let mut candidate = steps.clone();
+            candidate.drain(start..start + width);
+            let text = candidate.iter().map(step_text).collect::<Vec<_>>().join(" ");
+            if !seen.insert(text) {
+                continue;
+            }
+            match accept(&candidate) {
+                None => return steps,
+                Some(false) => {}
+                Some(true) => {
+                    steps = candidate;
+                    improved(&steps);
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        if hit {
+            width = width.min((steps.len() / 2).max(1));
+        } else if width > 1 {
+            width /= 2;
+        } else {
+            return steps;
+        }
+    }
+}
+
 /// `check`, from state `start`.
 fn check_from(model: &Model, start: State, steps: &[Step]) -> Checked {
+    check_from_until(model, start, steps, None)
+}
+
+fn check_from_until(model: &Model, start: State, steps: &[Step], deadline: Option<Instant>) -> Checked {
     // The states after `i` steps, each once, and for each step how its states were reached:
     // (index of the state it came from among the step's before, action).
     let mut states = vec![start];
@@ -532,6 +589,9 @@ fn check_from(model: &Model, start: State, steps: &[Step]) -> Checked {
         let mut seen: HashSet<State> = HashSet::new();
         let mut layer: Vec<(usize, Action)> = Vec::new();
         for (k, s) in states.iter().enumerate() {
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return failed("the check ran out of time".into(), true);
+            }
             for (a, n) in model.successors(s) {
                 // Two fitting actions can lead to the same state (two ledges down to one
                 // region), from one state or two: it is followed once.
@@ -735,6 +795,47 @@ mod tests {
     /// the exit (data/plans/test-gen.jsonl).
     const LEVEL: &str = "size 7 9 8 open 3 3 1 4 6 7 0 0 2 6 8 7 white +x 4 4 1 6 8 1 white -x 3 4 1         6 8 7 0 4 2 6 4 5 0 5 4 6 7 5 white +y 1 8 2 6 8 5 entry 0 7 2 +x exit 1 0 2 +y         laserfield 2 8 2 -y +z 1 on dropper 0 6 7 sphere dropper 1 7 7 standard button 1 2 2         sphere > exit button 5 0 2 weighted > exit pedestal 3 3 1 inf > exit turret 4 0 2 3         laser 6 1 2 -x -z on catcher 4 5 1 -x -z > stairs 0 funnel 5 0 3 +y on stairs 5 2 2         +x off";
     const PLAN: &str = "fire blue 2 8 3 +y fire orange 0 4 2 -x pickup 1 7 2 enter orange         knock 4 0 2 walk 5 0 2 putdown 5 0 2 walk 6 1 2 walk 4 3 1 fire blue 3 4 1 -x         press 3 3 1 enter blue pickup 0 6 2 putdown 1 2 2 exit";
+
+    #[test]
+    fn shortening_removes_whole_loops_and_keeps_only_verified_improvements() {
+        let level = Level::from_puzzle(&crate::tokens::decode(LEVEL).unwrap());
+        let mut checker = Checker::new(&level, Mode::Conservative).unwrap();
+        let original = decode(PLAN).unwrap();
+        let mut steps = original[..2].to_vec();
+        for _ in 0..12 {
+            steps.extend(decode("pickup 1 7 2 putdown 1 7 2").unwrap());
+        }
+        steps.extend_from_slice(&original[2..]);
+        assert!(checker.check(&steps).0.solved);
+        let mut snapshots = Vec::new();
+        let mut checked = HashSet::new();
+        let short = shorten(steps.clone(), |s| {
+            let text = s.iter().map(step_text).collect::<Vec<_>>().join(" ");
+            assert!(checked.insert(text), "a candidate was checked twice");
+            Some(checker.check(s).0.solved)
+        }, |s| snapshots.push(s.to_vec()));
+        assert!(short.len() < steps.len() - 12);
+        for s in snapshots {
+            assert!(checker.check(&s).0.solved);
+        }
+        // Completion still means no single step can be removed.
+        for j in 0..short.len() {
+            let mut candidate = short.clone();
+            candidate.remove(j);
+            assert!(!checker.check(&candidate).0.solved);
+        }
+        assert_eq!(shorten(steps.clone(), |_| None, |_| panic!("deadline")), steps);
+    }
+
+    #[test]
+    fn a_timed_out_check_is_unknown_not_an_improvement() {
+        let level = Level::from_puzzle(&crate::tokens::decode(LEVEL).unwrap());
+        let mut checker = Checker::new(&level, Mode::Conservative).unwrap();
+        let steps = decode(PLAN).unwrap();
+        let c = checker.check_until(&steps, Some(Instant::now())).0;
+        assert!(!c.solved && c.exhausted);
+        assert!(checker.check(&steps).0.solved);
+    }
 
     /// Step 3 picks up either cube. The sphere does on the weighted button (step 7) as well as
     /// the standard cube, so with the sphere every later step still fits, until the last puts

@@ -31,8 +31,9 @@ Steps, in order (each one's time goes into summary.json):
    128 words (64 in the second pass; PREFIX_WORDS), 16 continuations, the whole plan within
    256 words.
 4. Liberal: the plans of levels still unsolved, checked with mode="liberal".
-5. Polish: drop each unnecessary step from the solved plans, until no step can go; at most 4
-   plans per level, different sets of verbs first.
+5. Polish: shorten up to 4 solved plans per level (shortest first, different sets of verbs),
+   deleting blocks then single steps in one Rust model. At most 300 seconds per level;
+   expensive candidate checks time out as unknown, retaining verified improvements.
 6. Buffer: the solved levels, with their shortest plan; recheck every retained plan and reject
    held-out test/probe identities before publishing training data.
 7. Summary.
@@ -51,6 +52,7 @@ import glob
 import json
 import os
 import random
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -77,6 +79,7 @@ PREFIX_TRIES = 16  # continuations sampled per prefix resampling pass
 # after 254 (510 in pass 2) and took 2 of the try round's 2.2 hours.
 PREFIX_WORDS = (128, 64)
 MAX_PLANS = 4  # plans kept per solved level
+POLISH_SECONDS = 300  # hard wall-clock budget per level, including model construction
 # A step starts at one of these; colours, numbers and directions are its arguments (the verbs of
 # src/plan.rs `decode`, which is also what the plan words list has apart from `blue`/`orange`).
 VERB = set(PLAN_WORDS) - {"blue", "orange"} | {"exit"}
@@ -318,32 +321,28 @@ def liberal_pass(levels, args, save):
             for lv in levels if lv.get("liberal")]
 
 
-def polish(tokens, plans, glados):
-    """`plans` with every step dropped that isn't needed: for each plan, remove one step at a
-    time and keep the shorter one while `check` still solves it."""
-    steps = [split_steps(p) for p in plans]
-    active = [i for i, s in enumerate(steps) if len(s) > 1]
-    while active:
-        cands = {}
-        for i in active:
-            seen, c = set(), []
-            for j in range(len(steps[i])):
-                plan = join_steps(steps[i][:j] + steps[i][j + 1 :])
-                if plan not in seen and plan:
-                    seen.add(plan)
-                    c.append(plan)
-            cands[i] = c
-        items = [{"tokens": tokens, "plans": cands[i]} for i in active]
-        results = check_items(items, glados, "conservative")
-        following = []
-        for i, verdicts in zip(active, results):
-            hit = next((c for c, r in zip(cands[i], verdicts) if solved(r)), None)
-            if hit is not None:
-                steps[i] = split_steps(hit)
-                if len(steps[i]) > 1:
-                    following.append(i)
-        active = following
-    return [join_steps(s) for s in steps]
+def polish(tokens, plans, glados, budget=POLISH_SECONDS):
+    """Shorten already solved plans in one Rust model. Retain each flushed improvement
+    even if model construction or an individual check exceeds the per-level deadline."""
+    plans = list(dict.fromkeys(plans))
+    if budget <= 0 or not any(len(split_steps(p)) > 1 for p in plans):
+        return plans
+    args = [str(Path(glados).resolve()), "polish", "--seconds", str(budget)]
+    try:
+        result = subprocess.run(args, input=json.dumps({"tokens": tokens, "plans": plans}) + "\n",
+                                capture_output=True, text=True, encoding="utf-8", check=True,
+                                timeout=budget)
+        output = result.stdout
+    except subprocess.TimeoutExpired as e:
+        # run() kills and reaps the child. TimeoutExpired's captured output is bytes,
+        # even in text mode; its final line may have been cut off during a write.
+        output = e.stdout or b""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+    for line in output.splitlines(keepends=True):
+        if line.endswith("\n"):
+            plans = json.loads(line)["plans"]
+    return plans
 
 
 def keep_plans(plans, limit=MAX_PLANS):
@@ -492,8 +491,11 @@ def round_(a):
         if "solved_plans" in lv:
             continue
         done = [p for p, r in zip(lv["plans"], lv["results"]) if solved(r)]
+        # Spend the budget on the four plans we can retain, shortest first with verb
+        # diversity, rather than polishing dozens of sampled duplicates/discards.
+        done = keep_plans(sorted(done, key=lambda p: len(split_steps(p))))
         lv["solved_plans"] = keep_plans(polish(lv["tokens"], done, a.glados)) if done else []
-        if j % 16 == 15:
+        if done or j % 16 == 15:
             save()
     timed("polish")
     save()

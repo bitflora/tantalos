@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import random
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -16,19 +17,33 @@ import school
 
 
 class SchoolTests(unittest.TestCase):
-    def test_polish_does_not_reuse_another_plans_verdicts(self):
-        # Both ways of shortening the first plan solve; neither for the second does.
-        good = {"walk 0 0 0", "press 0 0 0", "pickup 0 0 0 putdown 1 0 0"}
+    def test_polish_retains_last_complete_snapshot_on_hard_timeout(self):
+        original = ["walk 0 0 0 press 0 0 0", "pickup 0 0 0 putdown 1 0 0"]
+        improved = ["press 0 0 0", original[1]]
+        output = (json.dumps({"plans": original}) + "\n" +
+                  json.dumps({"plans": improved}) + '\n{"plans":[').encode()
+        with patch.object(school.subprocess, "run", side_effect=subprocess.TimeoutExpired(
+                "mock", 0.1, output=output)) as run:
+            self.assertEqual(school.polish("level", original, "mock", budget=0.1), improved)
+        self.assertEqual(run.call_args.kwargs["timeout"], 0.1)
 
-        def check(items, *args):
-            return [{"verdict": "solved" if p in good else "unfinished"}
-                    for item in items for p in item["plans"]]
+    def test_polish_timeout_before_first_snapshot_keeps_originals(self):
+        original = ["walk 0 0 0 press 0 0 0"]
+        with patch.object(school.subprocess, "run", side_effect=subprocess.TimeoutExpired("mock", 1)):
+            self.assertEqual(school.polish("level", original, "mock", budget=1), original)
 
-        with patch.object(school.goblin_eval, "check", side_effect=check):
-            plans = school.polish("level", ["walk 0 0 0 press 0 0 0",
-                                             "pickup 0 0 0 putdown 1 0 0"], "mock")
-        self.assertEqual(plans, ["press 0 0 0", "pickup 0 0 0 putdown 1 0 0"])
-        self.assertTrue(all(p in good for p in plans))
+    def test_polish_deduplicates_plans_and_uses_native_checker(self):
+        plan = "walk 0 0 0 press 0 0 0"
+        with patch.object(school.subprocess, "run", return_value=SimpleNamespace(
+                stdout=json.dumps({"plans": ["press 0 0 0"]}) + "\n")) as run:
+            self.assertEqual(school.polish("level", [plan, plan], "mock"), ["press 0 0 0"])
+        self.assertEqual(json.loads(run.call_args.kwargs["input"])["plans"], [plan])
+
+    def test_polish_zero_budget_never_launches_checker(self):
+        original = ["walk 0 0 0 press 0 0 0"]
+        with patch.object(school.subprocess, "run") as run:
+            self.assertEqual(school.polish("level", original, "mock", budget=0), original)
+        run.assert_not_called()
 
     def test_checks_remain_grouped_across_batches_and_empty_items(self):
         items = [{"tokens": str(i), "plans": list(range(i % 3))} for i in range(130)]
