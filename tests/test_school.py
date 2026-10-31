@@ -106,7 +106,7 @@ class SchoolTests(unittest.TestCase):
     def test_completion_marker_is_last_and_interruption_can_resume(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             out = Path(tmp)
-            args = SimpleNamespace(name="test", round=0, model="mock", seed=1, k=1, free=True,
+            args = SimpleNamespace(name="test", round=0, model="mock", seed=1, k=1, free=True, no_prefix=False,
                                    levels=1, glados="mock", chunk=1)
             pool = {"id": {"identity": "id", "tokens": "level", "frontier": True, "source": "test"}}
 

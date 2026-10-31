@@ -76,6 +76,7 @@ PREFIX_TRIES = 16  # continuations sampled per prefix resampling pass
 # mostly run to the 256-word limit, every step legal: continuing all of one wrote 256 more words
 # after 254 (510 in pass 2) and took 2 of the try round's 2.2 hours.
 PREFIX_WORDS = (128, 64)
+POLISH_SECONDS = 300  # most polishing a level gets (polish)
 MAX_PLANS = 4  # plans kept per solved level
 # A step starts at one of these; colours, numbers and directions are its arguments (the verbs of
 # src/plan.rs `decode`, which is also what the plan words list has apart from `blue`/`orange`).
@@ -318,12 +319,15 @@ def liberal_pass(levels, args, save):
             for lv in levels if lv.get("liberal")]
 
 
-def polish(tokens, plans, glados):
+def polish(tokens, plans, glados, budget=POLISH_SECONDS):
     """`plans` with every step dropped that isn't needed: for each plan, remove one step at a
-    time and keep the shorter one while `check` still solves it."""
+    time and keep the shorter one while `check` still solves it. Stops after `budget` seconds
+    with the plans as short as they got (each still solves): one 27x26x25 level with ~50-step
+    plans took over 5 hours in e1/r01."""
     steps = [split_steps(p) for p in plans]
     active = [i for i, s in enumerate(steps) if len(s) > 1]
-    while active:
+    end = time.time() + budget
+    while active and time.time() < end:
         cands = {}
         for i in active:
             seen, c = set(), []
@@ -471,8 +475,9 @@ def round_(a):
     attempt(model, vocab, levels, a, save)
     timed("attempt")
 
-    # 3. Prefix resampling, twice.
-    for i in range(len(PREFIX_WORDS)):
+    # 3. Prefix resampling, twice (--no-prefix: none; round 0 spent 31% of its time on it for 6%
+    # of its solved levels).
+    for i in range(0 if a.no_prefix else len(PREFIX_WORDS)):
         n = prefix_pass(model, vocab, levels, a, i, save)
         timed("prefix")
         save()
@@ -546,7 +551,7 @@ def round_(a):
     summary = {
         "name": a.name, "round": a.round, "model": str(a.model), "seed": seed, "drawn": len(levels),
         "drawn_tried": drawn_counts["tried"], "drawn_new": drawn_counts["new"],
-        "candidates": len(pool), "k": a.k, "constrained": not a.free,
+        "candidates": len(pool), "k": a.k, "constrained": not a.free, "prefix": not a.no_prefix,
         "solved_greedy": greedy, "solved_by_sample": by_sample, "solved_by_prefix": by_prefix,
         "solved_by_kind": dict(kinds), "liberal_only": liberal,
         "solved_levels": len(solved_levels), "newly_solved": len(newly),
@@ -617,6 +622,7 @@ def main():
     r.add_argument("--chunk", type=int, default=128, help="levels sampled and checked at a time")
     r.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
     r.add_argument("--free", action="store_true", help="let the net write any token (no glados-score env)")
+    r.add_argument("--no-prefix", action="store_true", help="skip prefix resampling (step 3)")
     r.add_argument("--seed", type=int, default=None,
                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     r.set_defaults(func=round_)

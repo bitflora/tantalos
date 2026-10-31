@@ -21,6 +21,11 @@ SetOrigin, portal_place) and counted as recovered, and the run carries on. The t
 one line per step.
 
     python train/play.py --list LEVELS.txt --launch --fast --out out/play/NAME
+    python train/play.py --plans PLANS.jsonl --launch --fast --out out/play/NAME
+
+--plans plays given plans (Goblin's) instead of the solver's: JSONL rows with "p2c" (the level,
+relative to the file's folder or absolute), "plan" (plan tokens) and optionally "mode"
+(liberal routes a plan only the liberal model accepts).
 
 --out keeps the evidence, per level: legs.jsonl (each step's tries, problems, events, probes),
 trace.jsonl (every look: player, portals, cubes), events.jsonl (what happened unasked: a portal
@@ -1573,10 +1578,12 @@ class NoRoute(Exception):
     """`glados-score route` can't play the level."""
 
 
-def route(exe, level, plan=None):
+def route(exe, level, plan=None, mode=None):
     """(head, legs) of `glados-score route` for the level: the solver's plan, or with `plan` (plan
-    tokens) that one, as far as it fits (src/bin/glados-score.rs print_route)."""
-    cmd = [str(exe), "route"] + (["--plan", plan] if plan is not None else []) + [str(level)]
+    tokens) that one, as far as it fits, routed by the `mode` model (conservative, the default,
+    or liberal) (src/bin/glados-score.rs print_route)."""
+    cmd = ([str(exe), "route"] + (["--plan", plan] if plan is not None else [])
+           + (["--mode", mode] if plan is not None and mode else []) + [str(level)])
     out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if out.returncode != 0:
         raise NoRoute(f"{level}: {out.stderr.strip() or out.stdout.strip()}")
@@ -2217,6 +2224,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("levels", nargs="*", help=".p2c files (or folders of them)")
     ap.add_argument("--list", help="a file naming more .p2c files, one a line")
+    ap.add_argument("--plans", help="JSONL of levels with the plan to play: p2c, plan, mode")
     ap.add_argument("--launch", action="store_true", help="start the game (and quit it at the end)")
     ap.add_argument("--keep", action="store_true", help="leave a launched game running")
     ap.add_argument("--port", type=int, help="console port of a game you started")
@@ -2237,9 +2245,18 @@ def main():
     a = ap.parse_args()
     exe = glados_exe(a.glados)
     names = a.levels + (Path(a.list).read_text().split() if a.list else [])
-    if not names:
+    given = {}  # level path -> (plan, mode)
+    if a.plans:
+        base = Path(a.plans).parent
+        for line in Path(a.plans).read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                p = Path(r["p2c"]) if Path(r["p2c"]).is_absolute() else base / r["p2c"]
+                given[p] = (r["plan"], r.get("mode"))
+    if not names and not given:
         ap.error("no levels")
     paths = [g for f in map(Path, names) for g in (sorted(f.glob("*.p2c")) if f.is_dir() else [f])]
+    paths += [p for p in given if p not in paths]
     out = Path(a.out) if a.out else None
     done = set()
     if out:
@@ -2258,7 +2275,7 @@ def main():
         if level_key(p) in done:
             continue
         try:
-            routes.append((p, *route(exe, p)))
+            routes.append((p, *route(exe, p, *given.get(p, (None, None)))))
         except NoRoute as e:
             if not out:
                 sys.exit(str(e))  # refuse unplayable levels up front

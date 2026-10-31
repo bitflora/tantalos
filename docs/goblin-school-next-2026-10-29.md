@@ -120,6 +120,34 @@ probe 283/297, test-hard 2/3: noise. Fits the buffer's make-up: 304 of the 421 s
 were the level net's, 117 Workshop. Prefix resampling took 7,429 s of 24,022 for 24 levels.
 Next: replay the buffer's plans in Portal 2 (`train/stage_school_play.py`, `play.py --plans`)
 before training on more of it, then E1 round 1 from the pilot.
+
+Replay (2026-10-30, paused at 92 of 109 staged levels; 89 more of the 198 picked can't be routed
+yet): 6 clean, 25 recovered, 50 failed, 11 didn't play. The user played five failures
+(`plan?`, careful retry failed too) by hand, out/school-play/e1-r00/PLAYTEST.md; all solvable:
+- 00022 (ws 68526134): the faith plate can't be used; jump to the button from a higher
+  platform. The plan doesn't say how to reach the button.
+- 00048 (ws 98107591): plan viable; the harness probably found no angle to shoot the ceiling.
+- 00099 (ws 3423083482): plan viable; the laser must destroy the turrets in its way before the
+  door opens, a long delay the harness doesn't wait for.
+- 00105 (ws 3769193216): needs timed portal placement to reach a moving platform, then moving
+  the portals and walking through quickly.
+- 00172 (gen): plan good; probably the harness didn't duck under a laser through the portal.
+So the failures are mostly harness gaps (shot angles, waits, timing, lasers), not exploited
+model gaps; a failed replay is not evidence that a buffer plan is wrong.
+
+Round e1/r01 (2026-10-31, from goblin-school-r00-b, `--no-prefix`): 391/4096 solved (142
+greedy, 249 by a sample), all beyond BFS; 31 liberal only; buffer 812 levels, 1,256 plans.
+Attempt 18,382 s. Polish hung 5 h on one 27x26x25 Workshop level (ws:132677917, ~50-step
+plans; staged as glados-school-r01-02755); polish now stops after POLISH_SECONDS (300) a level.
+
+Paused 2026-10-31 by the user, to resume: export both rounds (writes only at the end; it was
+stopped part way, nothing written), then a 2-hour guarded run from goblin-v6init-12h-b with the
+pilot's settings (`--task goblin --quick --constrained-eval --batch 8 --accum 2`), the export
+repeated to keep the school share near 20% (about x5 now, measure with audit_mix.py):
+
+```bash
+.venv/Scripts/python train/school.py export e1 --out data/school/e1-r01.jsonl
+```
 The initial sandbox launch `goblin-school-r00` exited before creating a log; its status
 is preserved. The replacement was launched outside the sandbox. Monitor it with an
 unrestricted `run.py wait`: sandbox process visibility can falsely report DIED for
@@ -137,3 +165,11 @@ sampling with a bounded step-level beam or best-first search, at equal wall-cloc
 
 This decides whether a value head is needed. It is a separate piece of code. It must not run
 while B holds the GPU.
+
+Result `goblin-school-r01-2h` (2026-10-31, 2 h, rounds 0+1 export x5, 18.9% school, guard
+passed): headline 58.9% (580/984) vs parent 57.3% and pilot 57.8%; pass@8 83.6 vs 82.3;
+frontier greedy 4 vs 3 of 256. Paired greedy wins/losses vs the parent: test-gen 118/78
+(p ~ 0.005, again the one real change), test-ws 27/23, test-v6 65/53, probe 328/291
+(p ~ 0.15), test-hard 3/3. Four times the training and twice the buffer did not move Workshop or
+frontier levels; the buffer is still mostly level-net levels and the beyond-BFS solves are ones
+the model nearly had already. More of the same rounds is unlikely to pay off.
