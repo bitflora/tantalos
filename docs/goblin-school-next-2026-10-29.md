@@ -135,6 +135,29 @@ yet): 6 clean, 25 recovered, 50 failed, 11 didn't play. The user played five fai
 So the failures are mostly harness gaps (shot angles, waits, timing, lasers), not exploited
 model gaps; a failed replay is not evidence that a buffer plan is wrong.
 
+Three of those gaps are closed in the harness (2026-10-31, train/play.py, tests/test_play.py,
+none of it tried in the game yet):
+
+- **A shut exit door is waited at** for `--exit-wait` seconds (40 by default) while still
+  walking into it, which covers a door that opens late: the laser burning through the turrets
+  in its way (00099), a platform arriving. A timed escape (`dash`) doesn't wait, since its door
+  shuts again and the time is the point.
+- **A laser beam across the way is ducked under or jumped**, by how high the emitters put it
+  (`glados_lasers`, `beam_over`): over 40 units above the feet it is ducked under (crouched the
+  player is 36 tall), lower it is jumped as before. Burnt again by what was tried, the other
+  way is tried once. A beam bent by a reflection cube or sent through a portal is still not
+  found, and then the jump comes first, as before (00172).
+- **A face whose middle is out of sight is shot at off-centre**: `clear_aim` traces to the
+  middle and then to four points 32 units off in the face's plane, and fires at the first the
+  shot reaches (00048). A deployed panel's own aim point stands outside the face, so it stays.
+
+Left alone: 00105 (timed portal placement onto a moving platform) and 00022, where the plan
+itself doesn't say how the button is reached, so there is nothing for the harness to play.
+
+Next, with the user at the game: replay those five levels and the 17 of 109 staged levels that
+round 0 didn't reach, plus out/school-play/e1-r01-2755 (ws:132677917, staged but unplayed), and
+see which of the 50 failures the three fixes turn into clean runs.
+
 Round e1/r01 (2026-10-31, from goblin-school-r00-b, `--no-prefix`): 391/4096 solved (142
 greedy, 249 by a sample), all beyond BFS; 31 liberal only; buffer 812 levels, 1,256 plans.
 Attempt 18,382 s. Polish hung 5 h on one 27x26x25 Workshop level (ws:132677917, ~50-step

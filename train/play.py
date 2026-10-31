@@ -20,6 +20,11 @@ disagree with the solver). Only then is it put right by teleporting (setpos, a c
 SetOrigin, portal_place) and counted as recovered, and the run carries on. The terminal gets
 one line per step.
 
+Some of what the game asks of a player the harness does itself: a laser beam across the way is
+ducked under or jumped, by how high the emitters put it; a face whose middle is out of sight is
+shot at off-centre; and a shut exit door is waited at (--exit-wait), since one can open late (a
+laser burning through the turrets in its way, a platform arriving). A timed escape never waits.
+
     python train/play.py --list LEVELS.txt --launch --fast --out out/play/NAME
     python train/play.py --plans PLANS.jsonl --launch --fast --out out/play/NAME
 
@@ -61,6 +66,10 @@ TURN_RATE = 270.0  # degrees a second, turning to look or to walk somewhere
 MIN_SPEED = 50.0   # slowest walk while easing into a stop
 PEDESTAL_TOP = 40.0  # a pedestal button's button, over the entity's origin (its base)
 MOVES = ("forward", "back", "moveleft", "moveright")
+EXIT_WAIT = 40.0   # longest wait at a shut exit door: the laser burning through the turrets in
+                   # its way, a platform arriving (a timed escape never waits)
+DUCK_HEIGHT = 40.0  # a beam higher than this over the feet is ducked under, not jumped (the
+                    # player is 72 tall standing, 36 crouched)
 DIRS = {"-x": (-1, 0, 0), "+x": (1, 0, 0), "-y": (0, -1, 0), "+y": (0, 1, 0), "-z": (0, 0, -1), "+z": (0, 0, 1)}
 
 VSCRIPT = r"""// Written by train/play.py and deleted when it quits: reports what the player steers by.
@@ -128,6 +137,13 @@ function glados_start() {
 function glados_trace(ax, ay, az, bx, by, bz) {
 	printl("GLADOS_TRACE " + TraceLine(Vector(ax, ay, az), Vector(bx, by, bz), GetPlayer()))
 }
+// The laser emitters and where they point (what burnt the player).
+function glados_lasers() {
+	local e = null
+	while ((e = Entities.FindByClassname(e, "env_portal_laser")) != null)
+		printl("GLADOS_LASER {\"o\":" + glados_v(e.GetOrigin()) + ",\"a\":" + glados_v(e.GetAngles()) + "}")
+	printl("GLADOS_LASER_END")
+}
 // What is within r of a point: class, name, origin (what a blocked walk ran into).
 function glados_near(x, y, z, r) {
 	local e = null
@@ -165,6 +181,49 @@ def yaw_of(d):
     return math.degrees(math.atan2(d[1], d[0]))
 
 
+def heading(angles):
+    """The way an entity's angles (pitch, yaw, roll) point."""
+    pitch, yaw = math.radians(angles[0]), math.radians(angles[1])
+    return (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), -math.sin(pitch))
+
+
+def beam_over(lasers, feet, reach=40.0):
+    """How high over `feet` a laser beam crosses: of the beams in `lasers` (each {"o", "a"},
+    from `glados_lasers`) whose line passes within `reach` of the column over `feet`, the
+    lowest one's height over the feet, or None if none does. Only the straight beam an
+    emitter makes is found this way: one bent by a reflection cube or sent through a portal
+    is not, and nor is one the level has switched off."""
+    best = None
+    for l in lasers:
+        o, u = l["o"], heading(l["a"])
+        flat = math.hypot(u[0], u[1])
+        if flat < 1e-3:
+            continue  # straight up or down: not something to duck under or jump
+        # Where the beam's line is nearest the column over the feet, along the beam.
+        along = ((feet[0] - o[0]) * u[0] + (feet[1] - o[1]) * u[1]) / (flat * flat)
+        if along < 0:
+            continue  # behind the emitter: it points the other way
+        x, y = o[0] + u[0] * along, o[1] + u[1] * along
+        if math.hypot(x - feet[0], y - feet[1]) > reach:
+            continue
+        h = o[2] + u[2] * along - feet[2]
+        if best is None or h < best:
+            best = h
+    return best
+
+
+def aim_points(centre, face_dir, spread=32.0):
+    """Points on a face to aim at, its centre first, then points offset in its plane: a shot
+    at the middle can be blocked (a pane's frame, a panel's edge) where the face is open."""
+    out = [tuple(float(v) for v in centre)]
+    for i in (i for i in range(3) if i != "xyz".index(face_dir[1])):
+        for away in (-spread, spread):
+            q = [float(v) for v in centre]
+            q[i] += away
+            out.append(tuple(q))
+    return out
+
+
 def fmt(p):
     return "(" + ", ".join(f"{v:.0f}" for v in p[:3]) + ")"
 
@@ -174,9 +233,10 @@ def fmt(p):
 class Game:
     """The player in a running level: what it sees (via glados_play.nut) and its controls."""
 
-    def __init__(self, con, origin=(0.0, 0.0, 0.0), turn_rate=TURN_RATE):
+    def __init__(self, con, origin=(0.0, 0.0, 0.0), turn_rate=TURN_RATE, exit_wait=EXIT_WAIT):
         self.con = con
         self.turn_rate = turn_rate  # degrees a second; math.inf snaps (--fast)
+        self.exit_wait = exit_wait  # seconds to wait at a shut exit door
         self.origin = origin
         self.n = 0
         self.held = set()
@@ -414,6 +474,18 @@ class Game:
                             f"{b[0]:.1f},{b[1]:.1f},{b[2]:.1f})"], 5) or ""
         m = re.search(r"GLADOS_TRACE ([-\d.e]+)", out)
         return float(m.group(1)) if m else None
+
+    def lasers(self):
+        """Every laser emitter: {"o": origin, "a": angles}, for `beam_over`."""
+        out = self.con.ask(["script glados_lasers()"], 5) or ""
+        found = []
+        for l in out.splitlines():
+            if l.startswith("GLADOS_LASER {"):
+                try:
+                    found.append(json.loads(l.split(" ", 1)[1]))
+                except ValueError:
+                    pass
+        return found
 
     def near(self, p, r):
         """Entities within r of p: [class name origin angles], nearest first."""
@@ -677,10 +749,11 @@ class Game:
                         return s
                     if launched and s["v"][2] > 150:
                         return s  # thrown: hands off (steering in the air spoils the arc)
-                    # Burnt (a laser beam across the way, which also pushes back): jump it.
+                    # Burnt (a laser beam across the way, which also pushes back): duck
+                    # under it or jump it.
                     if now - getattr(self, "hurt_at", 0.0) < 0.3 and now - beam_t > 3.0 and abs(s["v"][2]) < 5:
                         beam_t = now
-                        self.jump_beam(s, p)
+                        self.beam_pass(s, p)
                         best, best_t = 1e9, time.time()
                         continue
                     d = hdist(s["o"], p)
@@ -776,6 +849,54 @@ class Game:
         finally:
             self.release(*MOVES)
 
+    def duck_beam(self, s, p, back=64.0):
+        """Under a laser beam across the way to p: back off, crouch and walk through. A beam
+        at chest height can't be jumped; crouched the player is 36 tall, so it passes over."""
+        burnt = s["o"][:2]
+        d = hdist(burnt, p)
+        u = ((p[0] - burnt[0]) / max(d, 1), (p[1] - burnt[1]) / max(d, 1))
+        self.event("laser duck", f"burnt at {fmt(s['o'])}: ducking under", shot=False)
+        self.release(*MOVES)
+        self.turn(0, math.degrees(math.atan2(u[1], u[0])))
+        self.shift_to([burnt[0] - u[0] * back, burnt[1] - u[1] * back], tol=8, timeout=4)
+        self.hold("duck")
+        time.sleep(0.2)
+        self.set_speed(self.top_speed)
+        self.hold("forward")
+        try:
+            end = time.time() + 8  # crouched the player walks at about a third of the speed
+            while time.time() < end:
+                q = self.obs()
+                ahead = (q["o"][0] - burnt[0]) * u[0] + (q["o"][1] - burnt[1]) * u[1]
+                if ahead > 56:
+                    break
+        finally:
+            self.release(*MOVES)
+            self.release("duck")
+
+    def beam_pass(self, s, p):
+        """Past a laser beam across the way to p: ducked under where it crosses high, else
+        jumped (the emitters say which, `beam_over`; a bent beam or one through a portal isn't
+        found, and then the jump is tried first, as before). Burnt again by what was tried,
+        the other way is tried once."""
+        try:
+            high = beam_over(self.lasers(), s["o"])
+        except GameUnavailable:
+            raise
+        except (OSError, ValueError):
+            high = None
+        duck_first = high is not None and high > DUCK_HEIGHT
+        self.event("laser", f"burnt at {fmt(s['o'])}: beam "
+                   + (f"{high:.0f} over the feet" if high is not None else "not found")
+                   + f": {'duck' if duck_first else 'jump'} first", shot=False)
+        for way in ((self.duck_beam, self.jump_beam) if duck_first else (self.jump_beam, self.duck_beam)):
+            hurt = getattr(self, "hurt_at", 0.0)
+            way(s, p)
+            self.obs()
+            if getattr(self, "hurt_at", 0.0) <= hurt:
+                return  # through it untouched
+        self.event("laser", "burnt ducking and jumping it", shot=False)
+
     def move_toward(self, yaw, speed):
         """Moves toward heading `yaw` whatever way the view faces: forward/back and the strafe
         keys, at speeds in proportion."""
@@ -858,6 +979,22 @@ class Game:
     def act_walk(self, leg):
         return True
 
+    def clear_aim(self, face, target, eye):
+        """Where on `face` to aim from `eye`: its middle, or, with something solid in the way
+        (a pane's frame, a panel's edge), a point offset in the face's plane that the shot
+        reaches. Its middle where no trace comes back, as before."""
+        n = DIRS[face["dir"]]
+        for q in aim_points(target, face["dir"]):
+            # 4 units out from the face, on the room's side of it: a clear line gets there.
+            frac = self.trace_line(eye, [q[i] - n[i] * 4 for i in range(3)])
+            if frac is None:
+                return target
+            if frac > 0.999:
+                return list(q)
+        self.event("aim", f"nothing on {face['cell']} {face['dir']} is in sight from "
+                   f"{fmt(eye)}: firing at its middle", shot=False)
+        return target
+
     def act_fire(self, leg):
         color, face = leg["color"], leg["face"]
         # A deployed angled panel sticks out of its face: aim at its middle.
@@ -870,7 +1007,10 @@ class Game:
             # Devices take a moment: a field switched off by the button stood on, a panel.
             time.sleep(1.0 if "stand on" in leg["text"] and k == 0 else 1.5 * k)
             s = self.settle()
-            self.look_at(target, s["eye"])
+            # The middle of a face can be out of sight (a pane in the way) where the rest of
+            # it is open; a panel's own aim point stands outside the face, so it stays.
+            aim = target if leg.get("aim") else self.clear_aim(face, target, s["eye"])
+            self.look_at(aim, s["eye"])
             time.sleep(0.15)
             before = {p["id"]: p for p in self.obs()["portals"]}
             self.firing = True
@@ -880,13 +1020,13 @@ class Game:
                 s = self.obs()
             finally:
                 self.firing = False
-            self.last_fire = {"eye": [round(v, 1) for v in s["eye"]], "target": [round(v, 1) for v in target],
+            self.last_fire = {"eye": [round(v, 1) for v in s["eye"]], "target": [round(v, 1) for v in aim],
                               "pitch": round(self.pitch, 2), "yaw": round(self.yaw, 2)}
             moved = [p for p in s["portals"] if before.get(p["id"]) != p]
             if moved:  # the first shot can make both portal entities: take the one there
-                self.portal_ids[color] = min(moved, key=lambda p: math.dist(p["o"], target))["id"]
+                self.portal_ids[color] = min(moved, key=lambda p: math.dist(p["o"], aim))["id"]
             if self.portal_on(color, face, s) or (leg.get("aim") and any(
-                    math.dist(p["o"], target) < 64 for p in s["portals"]
+                    math.dist(p["o"], aim) < 64 for p in s["portals"]
                     if self.portal_ids.get(color) in (None, p["id"]))):
                 return True
         return False
@@ -1200,7 +1340,7 @@ class Game:
         print(f"    dash took {took:.1f} s of {leg['seconds']} s", flush=True)
         if leg["escape"]:
             # The timer only has to last to the door; what counts is getting out.
-            return self.act_exit({"normal": self.exit_normal})
+            return self.act_exit({"normal": self.exit_normal, "patient": False})
         return took <= leg["seconds"]
 
     def act_fetch(self, leg):
@@ -1439,8 +1579,26 @@ class Game:
             s = self.obs()
             door = self.floor(self.exit_cell)
             near = hdist(s["o"], door) < 1.5 * VOXEL
-            raise Stuck(f"not out of the exit: stopped at {fmt(s['o'])}"
-                        + (", at its door (shut?)" if near else f", {hdist(s['o'], door):.0f} from its door"))
+            if near and leg.get("patient", True) and self.exit_wait > 0:
+                # The door may be about to open: a laser burning through the turrets in its
+                # way, a platform arriving. Wait at it, still walking into it. (A timed
+                # escape doesn't wait: its door shuts again, and the time is the point.)
+                self.event("waiting", f"at the exit door, shut: waiting up to {self.exit_wait:.0f} s",
+                           shot=False)
+                self.hold("forward")
+                end = time.time() + self.exit_wait
+                try:
+                    while not self.jumped and time.time() < end:
+                        self.obs(timeout=3)
+                except GameUnavailable:
+                    self.held.discard("forward")
+                    return True
+                self.release("forward")
+            if not self.jumped:
+                s = self.obs()
+                raise Stuck(f"not out of the exit: stopped at {fmt(s['o'])}"
+                            + (", at its door (shut?)" if near
+                               else f", {hdist(s['o'], door):.0f} from its door"))
         if self.jumped:
             # Out: leave before the elevator ends the level. A preview built from the console
             # has no editor session to go back to, so the level change shuts the server down
@@ -2093,9 +2251,10 @@ class Session:
     MAX_RESTARTS = 6  # game restarts after it went down, over the session
 
     def __init__(self, launch=False, port=None, password="", restart_every=20, turn_rate=TURN_RATE,
-                 slow=1.0, keep=False, stream=False):
+                 slow=1.0, keep=False, stream=False, exit_wait=EXIT_WAIT):
         self.launch, self.port, self.password = launch, port, password
         self.restart_every, self.turn_rate, self.slow = restart_every, turn_rate, slow
+        self.exit_wait = exit_wait
         self.keep, self.stream = keep, stream
         self.pid = self.con = None
         self.played = 0  # levels since the game started
@@ -2177,7 +2336,7 @@ class Session:
             return {"key": key, "level": str(path), "error": f"invalid: {e}"}, []
         if self.pid is not None and not portal2.focused(self.pid):
             print(f"  game window not in front; focus(): {portal2.focus(self.pid)}", flush=True)
-        game = Game(self.con, calibrate(head) or (0.0, 0.0, 0.0), self.turn_rate)
+        game = Game(self.con, calibrate(head) or (0.0, 0.0, 0.0), self.turn_rate, self.exit_wait)
         game.pid = self.pid
         game.stream = self.stream
         if self.slow != 1.0:
@@ -2240,6 +2399,9 @@ def main():
     ap.add_argument("--restart-every", type=int, default=20,
                     help="with --launch, restart the game after this many levels")
     ap.add_argument("--level-timeout", type=float, default=900, help="seconds per level")
+    ap.add_argument("--exit-wait", type=float, default=EXIT_WAIT,
+                    help="seconds to wait at a shut exit door (a laser burning through the "
+                         "turrets in its way, a platform arriving); 0 doesn't wait")
     ap.add_argument("--stream", action="store_true",
                     help="for watching on stream: smooth turning, short on-screen step text")
     a = ap.parse_args()
@@ -2285,7 +2447,7 @@ def main():
     try:
         with Session(launch=a.launch, port=a.port, password=a.password, restart_every=a.restart_every,
                      turn_rate=math.inf if a.fast else TURN_RATE, slow=a.slow, keep=a.keep,
-                     stream=a.stream) as session:
+                     stream=a.stream, exit_wait=a.exit_wait) as session:
             for path, head, legs in routes:
                 if out and (out / "STOP").exists():
                     print(f"{out / 'STOP'} found: stopping", flush=True)
