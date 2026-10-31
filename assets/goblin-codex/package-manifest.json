@@ -1,0 +1,31 @@
+{
+  "package": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\glados\\assets\\goblin-codex\\goblin-codex.vpk",
+  "mod_directory": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\glados\\out\\goblin-codex\\game",
+  "files": {
+    "models/goblin_codex/goblin_preview.dx80.vtx": 958818,
+    "models/goblin_codex/goblin_preview.dx90.vtx": 958818,
+    "models/goblin_codex/goblin_preview.mdl": 32232,
+    "models/goblin_codex/goblin_preview.sw.vtx": 958682,
+    "models/goblin_codex/goblin_preview.vtx": 958818,
+    "models/goblin_codex/goblin_preview.vvd": 3913856,
+    "models/info_character/info_character_player.dx80.vtx": 958818,
+    "models/info_character/info_character_player.dx90.vtx": 958818,
+    "models/info_character/info_character_player.mdl": 32240,
+    "models/info_character/info_character_player.sw.vtx": 958682,
+    "models/info_character/info_character_player.vtx": 958818,
+    "models/info_character/info_character_player.vvd": 3913856,
+    "materials/models/goblin_codex/goblin_atlas.vmt": 155,
+    "materials/models/goblin_codex/goblin_atlas.vtf": 2796296
+  },
+  "base_game_assets_untouched": true,
+  "vpk_roundtrip_verified": true,
+  "model_component_checksums_verified": true,
+  "valve_texture_decode_verified": true,
+  "texture_mean_abs_error_rgb": [
+    2.1415510177612305,
+    1.6551940441131592,
+    2.102008819580078
+  ],
+  "texture_format": "DXT1, full 12-level mip pyramid",
+  "runtime_directory": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\glados\\out\\goblin-codex\\packed-game"
+}

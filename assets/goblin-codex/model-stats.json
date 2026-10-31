@@ -1,0 +1,9 @@
+{
+  "mesh_objects": 248,
+  "vertices": 34696,
+  "triangles": 68160,
+  "bones": 16,
+  "height_source_units": 69.24,
+  "reference": "User-supplied goblin bot 2.webp",
+  "status": "Articulated model complete; see VALIDATION.md for runtime checks"
+}
