@@ -35,6 +35,12 @@ QLoRA recommendation, greenfield layout and time estimates are historical, not c
    search using the existing policy, without a learned value head. Record solved share, plan
    length, model/check calls and peak memory on the 4 GB card. Add a value head only after
    rollouts provide useful labels and the baseline identifies a need for learned leaf scoring.
+   **Measured 2026-11-01** (`train/goblin_search.py`, `out/search/r01-60s/`): at 60 s a level on
+   72 greedy-missed levels, sampling solves 58.3% and the beam 29.2%, a strict superset and
+   cheaper a solve; the beam wanders to the token ceiling (mean depth 226 of 256, `dead 0`)
+   rather than hitting dead ends, and 32 sampled steps collapse to 8.9 distinct children. So
+   policy-only search is not worth having, and the gap is missing leaf scoring: the value head
+   stays gated behind rollout labels, with this harness to re-measure it.
 4. **Validate the simulator in Portal 2.** Queue liberal-only plans for game confirmation;
    conservative checks are provisional too. Fix model/game disagreements with playtested
    regressions. Study refiring portals in flight with the user before extending physics.

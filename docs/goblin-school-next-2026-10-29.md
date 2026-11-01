@@ -226,3 +226,57 @@ frontier greedy 4 vs 3 of 256. Paired greedy wins/losses vs the parent: test-gen
 (p ~ 0.15), test-hard 3/3. Four times the training and twice the buffer did not move Workshop or
 frontier levels; the buffer is still mostly level-net levels and the beyond-BFS solves are ones
 the model nearly had already. More of the same rounds is unlikely to pay off.
+
+#### The answer (2026-11-01): sampling wins, and the beam's failure says what a value head is for
+
+`train/goblin_search.py` on `runs/goblin-school-r01-2h/best.pt`, 60 s a level a method, on the
+72 levels that run's greedy eval missed (24 each of test-ws, test-v6, test-frontier; seed 7,
+`out/search/r01-60s/`, 126 minutes). Best-of-N sampling in rounds of 32 against a 4-wide beam
+with 8 candidate steps a prefix, both constrained by `glados-score env`, both after a free
+greedy plan, both ending rows inside a round when the clock runs out, both restarting rather
+than returning the budget unspent.
+
+| | sampling | beam |
+|---|---|---|
+| solved (72 levels) | 58.3% | 29.2% |
+| beyond greedy | 41 of 71 | 20 of 71 |
+| test-ws / test-v6 / test-frontier | 83.3 / 87.5 / 4.2% | 33.3 / 50.0 / 4.2% |
+| mean s on the levels greedy missed | 33.5 | 73.0 |
+| forward passes a solve | 2,267 | 5,910 |
+| plan tokens a solve | 55.6k | 69.6k |
+| check plans (all 72) | 10,224 | 152 |
+| peak GPU memory | 1,089 MB | 1,107 MB |
+
+Sampling solved a strict superset: **every level the beam solved, sampling solved too**, and it
+solved 21 the beam did not. It is also cheaper a solve on every axis measured, and both methods
+sit near 1.1 GB on the 4 GB card, so memory decides nothing. The beam's one real edge is plan
+length: on the 20 levels both solved it wrote 12.7 steps against sampling's 16.8, shorter on 14
+of the 20. Ranking by mean instead of total log probability was not tried at length; it would
+only sharpen an edge that is not the one we need.
+
+Why the beam loses is the useful part. Of its failures, almost none are dead ends — the
+`why` counts read `no step 96–174, the clock 32, dead 0` on level after level, and only one
+level reported any `dead` at all. The beam reaches a mean depth of 226 words (ceiling 256) on
+the levels it fails: it does not get stuck, it **wanders to the token limit**. Its expansions
+also collapse: 8.9 distinct children a round out of 32 sampled steps, so the real branching is
+about 2 a parent. A confident policy proposes nearly the same step eight times, and total log
+probability then ranks those near-identical children by nothing that correlates with progress.
+The env says "dead" too rarely to prune, so a policy-only beam has no signal at all about which
+branch is closer to the exit.
+
+That is the finding the roadmap gate wanted: **bounded search over this policy, with no learned
+leaf scoring, is worse than simply sampling more plans** — and the reason is missing leaf
+evaluation, not missing search. The other half of the gap is that sampling gets 140 solver
+verdicts a level while the beam gets 2: the conservative `check` is the only true progress
+signal either method has, and sampling spends it freely while the beam asks for it only when
+the env already says the plan is at the goal. So the value head stays gated behind rollout
+labels (it has nothing to learn from yet), but when those labels exist this is what they buy,
+and `train/goblin_search.py --methods beam` is the harness that will re-measure it.
+
+Two caveats. The frontier is untouched by either method (1 of 24 each, the same level), so
+nothing here says how to reach levels our BFS cannot. And one row is an outlier: the beam on
+`ws:3386989029` took 1,758 s against a 60 s budget, stalled on 2 forward passes with the run's
+lowest peak memory (349 MB) and 7 env asks, while the env replays that level's whole greedy
+prefix instantly and sampling finished it in 61 s — a machine stall, not the level. The
+deadline forces EOS between token steps, so it cannot preempt a single blocked forward pass.
+Excluding the level entirely leaves the verdict unchanged.
