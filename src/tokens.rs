@@ -95,9 +95,9 @@ use crate::solver::DECORATIVE;
 /// Largest coordinate, size or count a token can hold.
 pub const MAX_NUM: i32 = 32;
 
-const CUBE_KINDS: [&str; 5] = ["standard", "companion", "reflection", "sphere", "franken"];
-const BUTTON_KINDS: [&str; 3] = ["weighted", "cube", "sphere"];
-const PAINT_KINDS: [&str; 4] = ["bounce", "speed", "portal", "water"];
+pub(crate) const CUBE_KINDS: [&str; 5] = ["standard", "companion", "reflection", "sphere", "franken"];
+pub(crate) const BUTTON_KINDS: [&str; 3] = ["weighted", "cube", "sphere"];
+pub(crate) const PAINT_KINDS: [&str; 4] = ["bounce", "speed", "portal", "water"];
 /// Words added after the first models were trained: they go at the end of the vocabulary,
 /// so earlier tokens keep their ids.
 const LATER_WORDS: [&str; 4] = ["turret", "gel", "stream", "splat"];

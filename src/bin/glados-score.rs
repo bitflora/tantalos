@@ -47,6 +47,15 @@ const USAGE: &str = "usage:
                                   (end: the plan solves if it stops here; dead: no step
                                   fits; whole: the plan so far is whole steps)
                                 {\"op\":\"close\",\"ids\":[ID,...]} -> {\"ok\":true}
+  glados-score grammar [--check FILE]
+                                the legal next level tokens, for the level net's constrained
+                                decoding (src/grammar.rs): a JSONL server on stdin/stdout, one
+                                answer line per request line, flushed.
+                                {\"levels\":[TOKENS,...]} (each a level's tokens so far)
+                                  -> {\"results\":[{\"allowed\":[TOKEN,...],\"end\":B} or {\"error\":...},...]}
+                                  (end: the level may end here)
+                                --check FILE: whether each line's \"tokens\" (JSONL) is a whole
+                                legal level; one JSON line per input, {\"ok\":B[,\"error\":...]}
   glados-score route [--plan TOKENS [--mode conservative|liberal]] <file.p2c>
                                 the conservative plan made concrete for playing it in the game:
                                 where to stand, look, fire and walk (JSON lines, src/route.rs).
@@ -63,6 +72,7 @@ fn main() -> ExitCode {
         Some("check") => Some(run_check(&args[1..])),
         Some("route") => Some(run_route(&args[1..])),
         Some("env") => Some(run_env(&args[1..])),
+        Some("grammar") => Some(run_grammar(&args[1..])),
         _ => None,
     })
 }
@@ -372,6 +382,62 @@ fn run_env(args: &[String]) -> Result<()> {
             _ => error("\"op\" is open, next or close", "unparsed"),
         };
         writeln!(out, "{answer}")?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
+fn run_grammar(args: &[String]) -> Result<()> {
+    use glados::grammar::Grammar;
+    use glados::mutate::{json_array, json_field};
+    use std::io::BufRead;
+    let mut check = None;
+    let mut rest = Vec::new();
+    for (flag, value) in flags(args, &mut rest)? {
+        match flag {
+            "--check" => check = Some(value),
+            _ => return Err(format!("unknown flag {flag}
+{USAGE}").into()),
+        }
+    }
+    if !rest.is_empty() {
+        return Err(format!("grammar takes no arguments
+{USAGE}").into());
+    }
+    let mut grammar = Grammar::new();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    if let Some(file) = check {
+        for line in std::io::BufReader::new(std::fs::File::open(file)?).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let toks = json_field(&line, "tokens").unwrap_or_default();
+            match grammar.check(&toks.split_whitespace().collect::<Vec<_>>()) {
+                Ok(()) => writeln!(out, "{{\"ok\":true}}")?,
+                Err(e) => writeln!(out, "{{\"ok\":false,\"error\":{}}}", dataset::json_str(&e))?,
+            }
+        }
+        out.flush()?;
+        return Ok(());
+    }
+    for line in std::io::stdin().lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let results: Vec<String> = json_array(&line, "levels")
+            .unwrap_or_default()
+            .iter()
+            .map(|level| match grammar.next(&level.split_whitespace().collect::<Vec<_>>()) {
+                Ok(n) => {
+                    let allowed: Vec<String> = n.allowed.iter().map(|t| dataset::json_str(t)).collect();
+                    format!("{{\"allowed\":[{}],\"end\":{}}}", allowed.join(","), n.end)
+                }
+                Err(e) => format!("{{\"error\":{}}}", dataset::json_str(&e)),
+            })
+            .collect();
+        writeln!(out, "{{\"results\":[{}]}}", results.join(","))?;
         out.flush()?;
     }
     Ok(())

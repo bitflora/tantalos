@@ -26,6 +26,7 @@ pub mod env;
 pub mod evolve;
 pub mod fixtures;
 pub mod gel;
+pub mod grammar;
 pub mod generator;
 pub mod geom;
 pub mod kv;

@@ -224,14 +224,18 @@ def section(s, prompt_tokens, temperature):
     return lines
 
 
-def run(model, vocab, n, glados, budget=50_000, temperature=1.0, top_k=None, batch=32, p2c_dir=None):
-    """Sample n levels with the rated prompt and assess them: (summary, rows, prompt)."""
+def run(model, vocab, n, glados, budget=50_000, temperature=1.0, top_k=None, batch=32, p2c_dir=None,
+        constrained=False):
+    """Sample n levels with the rated prompt and assess them: (summary, rows, prompt).
+    `constrained`: sample only tokens `glados-score grammar` allows (sample.generate)."""
     import sample
 
     toks = prompt(vocab)
     t = time.time()
-    print(f"rated: sampling {n} x {' '.join(toks)} at temperature {temperature}", flush=True)
-    lines = sample.generate(model, vocab, n, toks, (), temperature, top_k, batch)
+    how = ", constrained" if constrained else ""
+    print(f"rated: sampling {n} x {' '.join(toks)} at temperature {temperature}{how}", flush=True)
+    lines = sample.generate(model, vocab, n, toks, (), temperature, top_k, batch, constrained=constrained,
+                            glados=glados)
     print(f"rated: sampled in {time.time() - t:.0f}s; scoring", flush=True)
     t = time.time()
     rows = assess(lines, glados, budget, p2c_dir)
@@ -251,6 +255,9 @@ def main():
     ap.add_argument("--top-k", type=int, default=None)
     ap.add_argument("--budget", type=int, default=50_000)
     ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    ap.add_argument("--constrained", action="store_true",
+                    help="sample only tokens `glados-score grammar` allows (src/grammar.rs)")
+    ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--out", default=None, help="directory (default <checkpoint dir>/rated)")
     ap.add_argument("--seed", type=int, default=None)
     a = ap.parse_args()
@@ -260,8 +267,9 @@ def main():
     model, vocab, _ = sample.load_checkpoint(a.checkpoint, device)
     out = Path(a.out) if a.out else Path(a.checkpoint).parent / "rated"
     out.mkdir(parents=True, exist_ok=True)
-    s, rows, toks = run(model, vocab, a.n, a.glados, a.budget, a.temperature, a.top_k)
-    s.update(prompt=toks, temperature=a.temperature, top_k=a.top_k, seed=seed)
+    s, rows, toks = run(model, vocab, a.n, a.glados, a.budget, a.temperature, a.top_k, a.batch,
+                        constrained=a.constrained)
+    s.update(prompt=toks, temperature=a.temperature, top_k=a.top_k, seed=seed, constrained=a.constrained)
     (out / "rated.json").write_text(json.dumps(s, indent=1))
     with open(out / "samples.jsonl", "w", encoding="utf-8") as f:
         f.writelines(json.dumps({k: v for k, v in r.items() if k != "desc"}) + "\n" for r in rows)
