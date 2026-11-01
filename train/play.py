@@ -66,8 +66,10 @@ TURN_RATE = 270.0  # degrees a second, turning to look or to walk somewhere
 MIN_SPEED = 50.0   # slowest walk while easing into a stop
 PEDESTAL_TOP = 40.0  # a pedestal button's button, over the entity's origin (its base)
 MOVES = ("forward", "back", "moveleft", "moveright")
-EXIT_WAIT = 40.0   # longest wait at a shut exit door: the laser burning through the turrets in
-                   # its way, a platform arriving (a timed escape never waits)
+EXIT_WAIT = 10.0   # longest wait at a shut exit door: a platform arriving, the laser burning
+                   # through the turrets in its way. Short because it has yet to earn its keep:
+                   # of 36 waits over 18 levels (2026-10-31, e1-r00 retry, 40 s each), no door
+                   # opened. A timed escape and a careful retry don't wait at all.
 DUCK_HEIGHT = 40.0  # a beam higher than this over the feet is ducked under, not jumped (the
                     # player is 72 tall standing, 36 crouched)
 DIRS = {"-x": (-1, 0, 0), "+x": (1, 0, 0), "-y": (0, -1, 0), "+y": (0, 1, 0), "-z": (0, 0, -1), "+z": (0, 0, 1)}
@@ -1579,10 +1581,11 @@ class Game:
             s = self.obs()
             door = self.floor(self.exit_cell)
             near = hdist(s["o"], door) < 1.5 * VOXEL
-            if near and leg.get("patient", True) and self.exit_wait > 0:
-                # The door may be about to open: a laser burning through the turrets in its
-                # way, a platform arriving. Wait at it, still walking into it. (A timed
-                # escape doesn't wait: its door shuts again, and the time is the point.)
+            if near and leg.get("patient", True) and self.exit_wait > 0                     and not getattr(self, "careful", False):
+                # The door may be about to open: a platform arriving, a laser burning through
+                # the turrets in its way. Wait at it, still walking into it. (A timed escape
+                # doesn't wait: its door shuts again, and the time is the point. Nor does the
+                # careful retry, which would only wait at the same door twice.)
                 self.event("waiting", f"at the exit door, shut: waiting up to {self.exit_wait:.0f} s",
                            shot=False)
                 self.hold("forward")
@@ -1937,6 +1940,7 @@ def attempt(game, leg, before, careful=False):
     rate = game.turn_rate
     game.last_fire = None
     intended = game.intended = intended_fields(game, before, leg)
+    game.careful = careful
     try:
         if careful:
             game.turn_rate = math.inf

@@ -135,8 +135,7 @@ yet): 6 clean, 25 recovered, 50 failed, 11 didn't play. The user played five fai
 So the failures are mostly harness gaps (shot angles, waits, timing, lasers), not exploited
 model gaps; a failed replay is not evidence that a buffer plan is wrong.
 
-Three of those gaps are closed in the harness (2026-10-31, train/play.py, tests/test_play.py,
-none of it tried in the game yet):
+Three of those gaps are closed in the harness (2026-10-31, train/play.py, tests/test_play.py):
 
 - **A shut exit door is waited at** for `--exit-wait` seconds (40 by default) while still
   walking into it, which covers a door that opens late: the laser burning through the turrets
@@ -154,9 +153,29 @@ none of it tried in the game yet):
 Left alone: 00105 (timed portal placement onto a moving platform) and 00022, where the plan
 itself doesn't say how the button is reached, so there is nothing for the harness to play.
 
-Next, with the user at the game: replay those five levels and the 17 of 109 staged levels that
-round 0 didn't reach, plus out/school-play/e1-r01-2755 (ws:132677917, staged but unplayed), and
-see which of the 50 failures the three fixes turn into clean runs.
+What they were worth, replayed (2026-11-01, out/school-play/e1-r00/retry-play: the 50 levels of
+round 0's replay that had a failed step, played again with the fixes, all 50 played):
+
+- 7 levels came out with no failed step, 10 with fewer, 31 unchanged, 2 worse.
+- **Ducking is the win.** 276 beams were met: 142 ducked first, 78 jumped first (146 of them with
+  a height read from the emitters), 180 ducks in all, 56 burnt both ways. Laser jumps fell 284 to
+  113, deaths 114 to 83, hurt 306 to 280. 00172, the level the user played by hand, is clean.
+  Of the 7 clean levels 4 logged ducks; 00061, 00067 and 00107 came clean with no new mechanism
+  at all and 2 levels got worse, so run-to-run noise here is about plus or minus 3 levels.
+- **The exit-door wait earned nothing.** 18 levels waited, 36 waits of 40 s, and no door opened.
+  00099's four steps all passed and its door stayed shut for 80 s, so the hand-play guess (a long
+  delay while the laser burns through the turrets) is not what stops it: something keeps the laser
+  off the turrets, and that is a solver or converter question, not a harness one. The wait is now
+  10 s by default and the careful retry doesn't wait at the same door a second time.
+- **Off-centre aiming hardly fires.** Of 142 fire steps 1 aimed off-centre (and that step still
+  failed), while 22 found nothing in sight and fell back to the middle, as before: those are most
+  likely shots through a portal, which no trace from the eye can reach. 00048, the ceiling shot,
+  wasn't in the retry set (its old run had no failed step), so that case is still untested.
+
+Next: the 17 of 109 staged levels round 0 never reached, out/school-play/e1-r01-2755
+(ws:132677917, staged but unplayed), and 00048 on its own for the ceiling shot. A failed replay
+is still not evidence that a buffer plan is wrong, but after the duck fix it is better evidence
+than it was.
 
 Round e1/r01 (2026-10-31, from goblin-school-r00-b, `--no-prefix`): 391/4096 solved (142
 greedy, 249 by a sample), all beyond BFS; 31 liberal only; buffer 812 levels, 1,256 plans.

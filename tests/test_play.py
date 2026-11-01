@@ -195,10 +195,10 @@ class ExitDoorTests(unittest.TestCase):
                 g.jumped = True
             return {"o": [100.0, 0.0, 0.0], "v": [0.0, 0.0, 0.0], "eye": [100.0, 0.0, 64.0]}
 
-        g = bare_game(obs=obs, turn=lambda pitch, yaw: None,
-                      floor=lambda cell: [100.0, 0.0, 0.0],  # the player is at the door
-                      exit_cell=[1, 0, 0], exit_normal="+x",
-                      con=type("Con", (), {"send": lambda self, *a: None})(), **attrs)
+        g = bare_game(**{"obs": obs, "turn": lambda pitch, yaw: None, "exit_wait": 40.0,
+                         "floor": lambda cell: [100.0, 0.0, 0.0],  # the player is at the door
+                         "exit_cell": [1, 0, 0], "exit_normal": "+x",
+                         "con": type("Con", (), {"send": lambda self, *a: None})(), **attrs})
         g.hold = lambda key: g.held.add(key)
         g.release = lambda *keys: [g.held.discard(k) for k in keys]
         g.looks = looks
@@ -223,6 +223,12 @@ class ExitDoorTests(unittest.TestCase):
             g.act_exit({"normal": "+x", "patient": False})
         self.assertEqual(g.events, [])
         self.assertLess(g.looks[0], 200)
+
+    def test_a_careful_retry_does_not_wait_at_the_same_door_again(self):
+        g = self.exit_game(opens_after=200, careful=True)
+        with self.assertRaises(play.Stuck):
+            g.act_exit({"normal": "+x"})
+        self.assertEqual(g.events, [])
 
     def test_no_wait_asked_for_does_not_wait(self):
         g = self.exit_game(opens_after=200, exit_wait=0.0)
