@@ -269,7 +269,8 @@ class GPT(nn.Module):
         return outs
 
     @torch.no_grad()
-    def generate_many(self, prompts, max_new, stop, temperature=1.0, top_k=None, batch=64, constrain=None):
+    def generate_many(self, prompts, max_new, stop, temperature=1.0, top_k=None, batch=64, constrain=None,
+                      logprob=False):
         """`generate` for many prompts, `batch` rows at a time, started in the order given: a row
         that finishes starts the next prompt at once, as in `generate_refill`, instead of waiting
         for the longest row of its batch (Goblin's constrained plans: half run to `max_new`, the
@@ -280,7 +281,12 @@ class GPT(nn.Module):
         `constrain`, if given, is asked before every token: `constrain(idx, seqs)` with the
         prompt index of each row still writing and its new ids so far returns a bool mask
         (rows x vocab, on the CPU) of the tokens each may write next; `constrain.finish(i, seq)`
-        is told when prompt i ends and returns its ids to keep (goblin_eval.LegalSteps)."""
+        is told when prompt i ends and returns its ids to keep (goblin_eval.LegalSteps).
+
+        With `logprob`, returns (ids, scores): each prompt's total log probability of the tokens
+        it wrote, under the distribution they were drawn from (constrained if `constrain`, before
+        `temperature` and `top_k`), not counting `stop`. Tokens a `constrain.finish` drops stay
+        in the score."""
         device = next(self.parameters()).device
         amp = (
             torch.autocast("cuda", dtype=torch.bfloat16)
@@ -289,7 +295,7 @@ class GPT(nn.Module):
         )
         n = len(prompts)
         if n == 0:
-            return []
+            return ([], []) if logprob else []
         block = self.cfg.block_size
         size = min(block, max(len(p) for p in prompts) + max_new)
         b = min(batch, n)
@@ -306,6 +312,7 @@ class GPT(nn.Module):
 
         slots = [None] * b  # the prompt each row is writing (None: no more to start)
         outs = [None] * n
+        scores = [0.0] * n
         plen = [0] * b
         logits = torch.zeros((b, self.cfg.vocab_size), device=device)
         started = 0
@@ -349,6 +356,7 @@ class GPT(nn.Module):
             lg = logits
             if allowed is not None:
                 lg = lg.masked_fill(~allowed.to(device), -float("inf"))
+            lp = F.log_softmax(lg.float(), dim=-1) if logprob else None
             if top_k == 1:
                 nxt = lg.argmax(dim=-1)
             else:
@@ -363,9 +371,12 @@ class GPT(nn.Module):
             at = [0] * b
             going = [False] * b
             toks = nxt.tolist()
+            chosen = lp.gather(1, nxt[:, None]).squeeze(1).tolist() if lp is not None else None
             for r in rows:
                 i, t = slots[r], toks[r]
                 if t != stop:
+                    if chosen is not None:
+                        scores[i] += chosen[r]
                     outs[i].append(t)
                     if len(outs[i]) < max_new and plen[r] + len(outs[i]) < block:
                         at[r], going[r] = plen[r] + len(outs[i]) - 1, True
@@ -390,7 +401,7 @@ class GPT(nn.Module):
                 logits = torch.where(keep, new[:, -1, :].float(), logits)
             allowed = asked.result() if asked is not None else None
         pool.shutdown()
-        return outs
+        return (outs, scores) if logprob else outs
 
     def _generate_padded(self, prompts, max_new, stop, temperature, top_k, device):
         """`generate` for prompts of different lengths, as one batch: each is padded on the left
