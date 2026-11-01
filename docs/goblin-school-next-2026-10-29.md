@@ -172,10 +172,21 @@ round 0's replay that had a failed step, played again with the fixes, all 50 pla
   likely shots through a portal, which no trace from the eye can reach. 00048, the ceiling shot,
   wasn't in the retry set (its old run had no failed step), so that case is still untested.
 
-Next: the 17 of 109 staged levels round 0 never reached, out/school-play/e1-r01-2755
-(ws:132677917, staged but unplayed), and 00048 on its own for the ceiling shot. A failed replay
-is still not evidence that a buffer plan is wrong, but after the duck fix it is better evidence
-than it was.
+The 17 staged levels round 0 never reached were then played with the fixes (2026-11-01, the
+same out/school-play/e1-r00/play folder, resumed; that run still had the 40 s wait): 7 clean, 7
+with a failed step, and 3 that never played at all — the editor marks 00181 and 00188 invalid (a
+turret, a flip panel) and 00196 didn't build, which is a converter or editor-rule gap, not the
+model's. 9 of them ducked (56 ducks, 29 jumps). Six waited at a shut exit door and no door opened
+there either, so over both runs 24 levels waited and none got out that way; 00184's careful retry
+then got out on its own, without waiting. Turning the wait off by default would cost nothing that
+has been measured.
+
+Where the 109 staged levels stand, counting each level's latest run: 45 with no failed step, 50
+with one, 14 that never played. A failed replay is still not evidence that a buffer plan is
+wrong, but after the duck fix it is better evidence than it was.
+
+Next: out/school-play/e1-r01-2755 (ws:132677917, staged but unplayed), 00048 on its own for the
+ceiling shot, and the 14 that never played — those are worth a look as converter bugs.
 
 Round e1/r01 (2026-10-31, from goblin-school-r00-b, `--no-prefix`): 391/4096 solved (142
 greedy, 249 by a sample), all beyond BFS; 31 liberal only; buffer 812 levels, 1,256 plans.
