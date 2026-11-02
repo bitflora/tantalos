@@ -15,7 +15,8 @@ QLoRA recommendation, greenfield layout and time estimates are historical, not c
   managed by `train/run.py`. Follow `CLAUDE.md` for every run; do not bypass its workflow.
 - Goblin, the solution-policy net; checked plans and symmetry augmentation; identity-based
   data splits; legal-token decoding through `glados-score env`; a manual self-play round in
-  `train/school.py`. Automated school training, a value head and tree search are still future work.
+  `train/school.py`. Automated school training, a value head and tree search are still future work;
+  rollout value labels and a probe for them are in `train/goblin_rollouts.py`.
 
 ## Next milestones
 
@@ -41,6 +42,13 @@ QLoRA recommendation, greenfield layout and time estimates are historical, not c
    rather than hitting dead ends, and 32 sampled steps collapse to 8.9 distinct children. So
    policy-only search is not worth having, and the gap is missing leaf scoring: the value head
    stays gated behind rollout labels, with this harness to re-measure it.
+   **Labels collected 2026-11-01** (`train/goblin_rollouts.py`, `out/rollouts/r01/`): 108
+   train-side levels, 48 checked samples each, 177k step prefixes labelled by eventual success.
+   A head on frozen Goblin states reaches AUC 0.89 on held-out levels, but that is depth (a
+   failed plan wanders long; depth alone scores 0.83). Among prefixes of one level at one depth it
+   scores 0.56 against log probability's 0.565, and among the beam's children its pick is worth
+   0.48 against the beam's 0.53 (best child 0.655). No value-head run on this evidence; first a
+   head must beat log probability within a level and depth on more, mixed-outcome levels.
 4. **Validate the simulator in Portal 2.** Queue liberal-only plans for game confirmation;
    conservative checks are provisional too. Fix model/game disagreements with playtested
    regressions. Study refiring portals in flight with the user before extending physics.

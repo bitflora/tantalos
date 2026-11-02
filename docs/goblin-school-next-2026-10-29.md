@@ -280,3 +280,72 @@ lowest peak memory (349 MB) and 7 env asks, while the env replays that level's w
 prefix instantly and sampling finished it in 61 s — a machine stall, not the level. The
 deadline forces EOS between token steps, so it cannot preempt a single blocked forward pass.
 Excluding the level entirely leaves the verdict unchanged.
+
+#### Rollout labels (2026-11-01): the labels exist, a frozen-feature head finds no signal in them
+
+`train/goblin_rollouts.py collect` on `runs/goblin-school-r01-2h/best.pt` (seed 7, 40 minutes,
+`out/rollouts/r01/`): 108 Goblin *train-side* levels (`school.test_identities()` never drawn),
+a quarter each from the school's solved and unsolved levels and from data/goblin's Workshop and
+v6 training levels. Each got a greedy plan and 48 constrained samples at temperature 1.0, all
+checked conservatively. Every step prefix of a sample is labelled by whether that sample went on
+to solve: 177,222 distinct prefixes, 188,578 (prefix, rollout) instances, 13% of them
+successes, with what `glados-score env` says at each (allowed next tokens, dead, end; the env
+hands out no state). A level's split is a hash of its identity: 72 to fit a head on, 36 to
+measure it on.
+
+| stratum | levels | greedy solved | sampled solved | both outcomes |
+|---|---|---|---|---|
+| school-solved | 28 | 18 | 63.8% | 22 |
+| school-unsolved | 28 | 0 | 0.1% | 1 |
+| train-ws | 28 | 10 | 28.3% | 14 |
+| train-v6 | 24 | 12 | 60.3% | 16 |
+
+Only levels with both outcomes teach anything within a level: 53 of 108. The school's unsolved
+levels are almost all dead weight (1 sample in 1,344 solved).
+
+`goblin_rollouts.py probe`: Goblin's final hidden state (after ln_f, frozen) at each prefix's
+end, a logistic head and a 128-unit MLP head fitted by binomial log loss on the 72 levels
+(epoch chosen on a fifth of them), measured on the other 36:
+
+| predictor | all prefixes | levels (roots) | within a level | same level and depth |
+|---|---|---|---|---|
+| MLP head | 0.892 | 0.752 | 0.784 | 0.560 |
+| linear head | 0.824 | 0.659 | 0.721 | 0.545 |
+| prefix log probability | 0.835 | — | 0.788 | 0.565 |
+| fewer steps (1 − depth AUC) | 0.834 | — | 0.782 | — |
+
+The headline 0.89 is mostly **depth**: a failed sample wanders to the 256-word ceiling and
+leaves forty-odd prefixes behind, a solved one a dozen, so "how far in is this" alone scores
+0.83, and cumulative log probability, which falls with every step, scores the same. Between
+levels the head does see something (0.75 on the roots: it can tell an easy level from a hard
+one). But compared where a beam compares, among prefixes of one level at the same depth (572
+groups), it scores 0.56, no better than log probability's 0.565.
+
+The direct check says the same. On 13 held-out levels with both outcomes, at the root and two
+random sample prefixes each (39 parents), 8 single steps were sampled as the beam does
+(4.2 distinct children a parent) and each child got 8 rollouts. On the 25 parents whose children's
+values differ:
+
+| pick | mean value of the chosen child |
+|---|---|
+| beam (top log probability) | 0.530 |
+| linear head | 0.480 |
+| MLP head | 0.475 |
+| random child | 0.462 |
+| best child | 0.655 |
+
+The head's pick beat the beam's on 6 (linear) or 4 (MLP) parents and lost on 11; over the 231 child
+pairs of different value, log probability ordered 129 right, the heads 121 and 116. The
+headroom is real (the best child is worth 0.655 against the beam's 0.530), but this head doesn't
+capture it, and the beam's log probability is a little better than chance, not worse.
+
+So: **a value head on frozen Goblin states is not worth a run on this evidence.** The labels
+carry level difficulty and depth, which a beam doesn't need, and nothing beyond log probability
+among siblings. Caveats, all pointing to a bigger test before writing it off: 72 fitting levels
+is little (train AUC 0.90–0.92 against 0.82–0.89 held out); the features are frozen, where a
+trained head would fine-tune the trunk; child values from 8 rollouts are coarse; and these are
+train-side levels the policy has seen, unlike the 72 greedy-missed test levels the beam lost on.
+What would change the verdict is a fitted head that beats log probability *within a level and
+depth* (0.565 here) on more levels — measure that first, with `goblin_rollouts.py probe`, before
+any value-head training. The cheap way to get more useful labels is to skip the school's
+unsolved levels and draw levels where greedy fails but sampling sometimes solves.
