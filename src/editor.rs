@@ -207,6 +207,14 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
 
     let mut owner: HashMap<Cell, usize> = HashMap::new();
     for (i, it) in level.items.iter().enumerate() {
+        // A door is sunk into solid wall: the game flagged every door with an open voxel in
+        // its 3x3x4, in the wall's own layer (a floor beside the frame) or deeper (a thin
+        // wall): 476 of 476 in the stored in-game checks (2026-11-02).
+        if matches!(it.kind, ItemKind::EntryDoor | ItemKind::ExitDoor)
+            && embedded(it).iter().any(|&c| !level.solid(c))
+        {
+            flags.add(it, "door-not-embedded");
+        }
         for c in embedded(it) {
             match owner.get(&c) {
                 Some(&j) if j != i => flags.pair(&level.items[j], it, "embedded-overlap"),
@@ -590,7 +598,17 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
     // Voxels the later items are sunk into (EmbeddedVoxels in editoritems.txt: the one behind
     // the surface; a piston's two; under each step of stairs). Two can't share one: the game
     // flagged 75 of 75 such pairs (a laser in the wall a faith plate stands on, say), 2026-10-20.
+    // A rail platform is sunk into the wall behind its whole track: the game flagged 144 of 144
+    // items sunk there too (flip panels on the floor above the track, lasers, stairs, pistons;
+    // stored in-game checks, 2026-11-02).
     let mut sunk: HashMap<Cell, usize> = HashMap::new();
+    for (i, it) in level.items.iter().enumerate() {
+        let (ItemKind::Rail, Some(n)) = (&it.kind, it.normal) else { continue };
+        let Some(r) = level.rails.iter().find(|r| r.item == it.index) else { continue };
+        for c in r.track() {
+            sunk.entry(step(c, n.opposite())).or_insert(i);
+        }
+    }
     for (i, it) in level.items.iter().enumerate() {
         let Some(n) = it.normal else { continue };
         let wall = step(it.cell, n.opposite());
@@ -643,7 +661,8 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
     // 2026-10-22 add: a turret on a floor button (27 of 27; pedestals 0 of 32) or on a laser
     // relay on the same surface (6 of 6), a pedestal button whose column stands against an
     // exit door (9 of 9; across the door 1 of 15), a loose cube on a floor button (8 of 8; a
-    // dropper's cube there is fine).
+    // dropper's cube there is fine). And a loose cube on a turret: the game flagged both, 66 of
+    // 66 flags in the stored in-game checks (2026-11-02).
     for (i, a) in level.items.iter().enumerate() {
         for b in &level.items[i + 1..] {
             if a.cell != b.cell {
@@ -658,6 +677,7 @@ pub fn editor_flags(level: &Level) -> Vec<Flag> {
                     b.normal.is_some_and(|n| pedestal_side(a) == Some(n.opposite()))
                 }
                 (ItemKind::Cube, ItemKind::FloorButton) => level.loose_cube(a.index),
+                (ItemKind::Cube, ItemKind::Turret) => level.loose_cube(a.index),
                 _ => false,
             };
             if (button(a) && button(b)) || (dropper(a) && dropper(b)) || collide(a, b) || collide(b, a) {

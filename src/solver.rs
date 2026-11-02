@@ -35,7 +35,8 @@
 //! - Funnel sweeps (`Action::Sweep`, `lasers::Sweep`): a reflection cube put into a funnel
 //!   redirects each beam it crosses for a moment. If that opens the exit, the player escapes
 //!   when they reach the exit cell's middle before the cube reaches the beam, at `FUNNEL_SPEED`
-//!   (the door doesn't close on a player in its doorway).
+//!   (the door doesn't close on a player in its doorway). The swept beam stops at a turret
+//!   still standing: burning one down takes several seconds.
 //! - Fizzlers: walking or falling through an active one clears both portals and destroys a
 //!   held cube, which respawns where it started. A cube falling through one respawns too.
 //!   Active fizzlers stop portal shots. Laser fields: the player can't pass an active one;
@@ -2879,7 +2880,16 @@ impl Model {
                                 lit |= 1 << k;
                             }
                         }
-                        Event::Turret(t) => hit |= 1 << t,
+                        // A laser takes several seconds to destroy a turret, so only a beam
+                        // that stays gets past one (the ones in steady beams are down by
+                        // now); one swept on for a moment stops at it.
+                        Event::Turret(t) => {
+                            if sweep.is_some() && self.turret_enabled[t] && s[DOWN] & (1 << t) == 0 {
+                                stopped = true;
+                                break;
+                            }
+                            hit |= 1 << t;
+                        }
                         Event::Panel { p, front } => {
                             if dev_of(s) & (1 << self.devices.panel_bit[p]) == 0 {
                                 continue;

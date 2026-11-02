@@ -188,6 +188,38 @@ wrong, but after the duck fix it is better evidence than it was.
 Next: out/school-play/e1-r01-2755 (ws:132677917, staged but unplayed), 00048 on its own for the
 ceiling shot, and the 14 that never played — those are worth a look as converter bugs.
 
+The 14 that never played, looked at offline (2026-11-02). 12 the editor marked invalid, not 2:
+
+- 8 Workshop levels (00038, 00046, 00062, 00064, 00108, 00122, 00129, 00131): our own rules flag
+  every one of them too (fields overlapping or across a door, plate targets in the air, rails
+  sharing cells). The real maps passed the editor, so these are converter output, and the stager
+  should have left them out: `glados-p2c editor` on the staged p2c says so before the game does.
+- 4 level-net levels our rules let through, three gaps in src/editor.rs, now closed and each
+  scored against every stored in-game check (74,053 levels, runs/*/eval/ingame): a loose cube on
+  a turret (00143, 00181; 66 of 66 flags), a door with an open voxel in the wall it is sunk into
+  (00174; 476 of 476), an item sunk into the wall behind a rail's track (00188, flip panels on the
+  floor above it; 144 of 144). Together 516 more of the game's flags, and no flag the game didn't
+  give; door misses fell from 907 to 482. On 4,000 ws5 train levels they newly flag 1 (a rail),
+  on 4,000 data/v6 generated levels 29 (0.7%, nearly all doors). Since the grammar keeps items
+  clear of these rules, constrained decoding now avoids them too; levels labelled before keep
+  their old labels (not rescored).
+- 00196 (level net, 105 gel droppers) didn't build: very likely VBSP's entity limit (see the
+  "too many items" note), not a placement rule. 00170 (level net, 27x27x25, two funnels and a
+  laser) took the game down twice on load; only the game or its crash dumps can say why.
+
+00099 can't be settled offline. The plan sends the laser through a portal and up the x=15 column
+to the catcher, through 18 turrets in a row. src/lasers.rs assumes a beam destroys every turret in
+its cells at once and reaches the catcher; by hand the door opened only after a long delay, and
+not within the harness's 80 s.
+The user confirmed it (2026-11-02): a laser takes several seconds to destroy each turret. So the
+plan is right and the level solvable; only the time is missing. In the solver that matters only
+where a beam is on for a moment: steady beams wait in a settled state (their turrets go down in
+`settle_devices`), and timed dashes don't recompute beams at all. A funnel sweep's beam now stops
+at a turret still standing (src/solver.rs `beam_hits_with`; tests/playtested.rs, the sweep test
+with a turret in the swept beam's way). Left for the harness: play.py waits 10 s at a shut exit
+door, which can't cover 18 turrets; it would need the number of turrets a step's beams burn down
+(from `route`) and wait several seconds for each.
+
 Round e1/r01 (2026-10-31, from goblin-school-r00-b, `--no-prefix`): 391/4096 solved (142
 greedy, 249 by a sample), all beyond BFS; 31 liberal only; buffer 812 levels, 1,256 plans.
 Attempt 18,382 s. Polish hung 5 h on one 27x26x25 Workshop level (ws:132677917, ~50-step

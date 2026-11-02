@@ -211,6 +211,18 @@ fn reflection_cube_rising_in_a_funnel_sweeps_the_beam_onto_the_catcher() {
         let model = Model::new(&level(&tokens), Mode::Liberal).unwrap();
         assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable, "{other}");
     }
+    // Nor with a turret in the swept beam's way to the catcher (on a block at (1,1,1)): a
+    // laser takes several seconds to destroy a turret (play-tested, 2026-11-02), and the cube
+    // crosses the beam for a moment. Beside the beam it's no obstacle.
+    let block = |t: &str| {
+        TIMED_LAZER_CHANGE
+            .replacen("o4 | o4 | o4 | s4 | / o4", "o4 | o1 s1 o2 | o4 | s4 | / o4", 1)
+            .replace("funnel 1 3 0 +z on", &format!("funnel 1 3 0 +z on {t}"))
+    };
+    let model = Model::new(&level(&block("turret 0 1 0 3")), Mode::Liberal).unwrap();
+    assert!(matches!(model.solve(BUDGET).verdict, Verdict::Solved(_)));
+    let model = Model::new(&level(&block("turret 1 1 2 3")), Mode::Liberal).unwrap();
+    assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable);
 }
 
 /// 252742140 "Parkour, Parkour PARKOUR PARKOUR": strips of floor between one-voxel channels of

@@ -7,7 +7,10 @@
 //!   relay by one crossing its cell along its surface; the beam goes on through a relay and
 //!   stops at a catcher. Both are senders: they drive what they are wired to while powered.
 //!   Centred and offset items behave the same: an offset beam is still in its cell.
-//! - A turret in a beam's cell is destroyed.
+//! - A turret in a beam's cell is destroyed, and then the beam goes on. In-game that takes
+//!   several seconds a turret (play-tested, 2026-11-02: a beam through 18 turrets opened the
+//!   exit only after a long wait), so a beam that is on only for a moment (a funnel sweep)
+//!   stops at a turret still standing.
 //! - A reflection cube resting on the floor of a cell a beam crosses (sideways, or down onto
 //!   it) sends the beam on out of its lens, in whichever horizontal direction the player set
 //!   it down facing (from the cell behind it, looking that way: a held cube faces where the
