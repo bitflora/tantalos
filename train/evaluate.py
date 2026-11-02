@@ -189,7 +189,8 @@ def report(ev):
         f"# Evaluation of `{ev['checkpoint']}`",
         "",
         f"Step {ev['step']}, val loss {ev['val_loss']:.4f}. Temperature {ev['temperature']}, "
-        f"top-k {ev['top_k']}, solver budget {ev['budget']}, seed {ev['seed']}.",
+        f"top-k {ev['top_k']}, solver budget {ev['budget']}, seed {ev['seed']}"
+        + (", constrained decoding (glados-score grammar)." if ev.get("constrained") else ", free decoding."),
         "",
         f"## Validity ({v['n']} levels asked for `{SOLVABLE}`)",
         "",
@@ -305,6 +306,9 @@ def main():
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--cpu", action="store_true", help="sample on the CPU (e.g. while training)")
+    ap.add_argument("--constrained", action="store_true",
+                    help="sample only tokens `glados-score grammar` allows (src/grammar.rs), here and in "
+                    "the rated-style section; EVAL and yield then compare only with constrained runs")
     ap.add_argument("--rated-n", type=int, default=512,
                     help="levels for the rated-style section (train/rated.py; 0: skip)")
     ap.add_argument("--rated-temperature", type=float, default=0.7,
@@ -334,7 +338,8 @@ def main():
     for name, conds, n in settings:
         print(f"sampling {n:>4} x {' '.join(conds) or '(no conditions)'}", flush=True)
         t = time.time()
-        got = sample.generate(model, vocab, n, conds, (), args.temperature, args.top_k, args.batch)
+        got = sample.generate(model, vocab, n, conds, (), args.temperature, args.top_k, args.batch,
+                              constrained=args.constrained, glados=args.glados)
         if name == "baseline":
             baseline_gen_s = time.time() - t
         lines += got
@@ -428,7 +433,8 @@ def main():
     rated_summary = None
     if args.rated_n:
         rated_summary, rated_rows, rated_prompt = rated.run(
-            model, vocab, args.rated_n, args.glados, args.budget, args.rated_temperature)
+            model, vocab, args.rated_n, args.glados, args.budget, args.rated_temperature,
+            constrained=args.constrained)
         rated_summary.update(prompt=rated_prompt, temperature=args.rated_temperature)
         with open(out / "rated-samples.jsonl", "w", encoding="utf-8") as f:
             f.writelines(json.dumps({k: v for k, v in r.items() if k != "desc"}) + "\n" for r in rated_rows)
@@ -441,6 +447,7 @@ def main():
         "temperature": args.temperature,
         "top_k": args.top_k,
         "budget": args.budget,
+        "constrained": args.constrained,
         "validity": validity,
         "conditioning": conditioning,
         "novelty": novelty,

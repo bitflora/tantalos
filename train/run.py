@@ -16,7 +16,8 @@
 detached, and survives the terminal or session that started it. Every run does every step, in
 order, with nothing to remember:
   1. train (train.py) for --hours
-  2. evaluate best.pt (evaluate.py, about 5 minutes)
+  2. evaluate best.pt (evaluate.py --constrained: levels written from the tokens `glados-score
+     grammar` allows, clear of the editor's rules; --quick runs decode freely)
   3. check the evaluation's levels in Portal 2's own editor (ingame.py, about 15 minutes). It
      launches the game itself, unless the game is already running (someone playing): then it
      is skipped, and `status` says INCOMPLETE until `run.py ingame NAME` redoes it.
@@ -274,8 +275,10 @@ def start(a):
                     continue
     else:
         evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
-        if a.quick:
+        if a.quick:  # broadcast rounds: free decoding keeps the round short
             evaluate += ["--n-cond", "8", "--generator-count", "0", "--neighbours", "64", "--rated-n", "0"]
+        else:  # since 2026-11-01: levels written from legal tokens only (glados-score grammar)
+            evaluate += ["--constrained"]
     if a.dry_run:
         print("train:   ", " ".join(train))
         print("evaluate:", " ".join(evaluate))
@@ -369,6 +372,14 @@ def eval_score(eval_dir, task):
         return None
 
 
+def decoding(eval_dir):
+    """Whether eval_dir's samples were written from legal tokens only (None: no evaluation)."""
+    try:
+        return bool(json.loads((Path(eval_dir) / "eval.json").read_text()).get("constrained"))
+    except (OSError, ValueError):
+        return None
+
+
 def quick_guard(d, s):
     """--quick: WORSE if this run's EVAL is too far under its parent's; returns (final model, line)."""
     task = task_name(s.get("task"))
@@ -376,6 +387,8 @@ def quick_guard(d, s):
         return constrained_guard(d, s)
     new = eval_score(d / "eval", task)
     old = eval_score(Path(s["init"]).parent / "eval", task)
+    if old is not None and decoding(d / "eval") != decoding(Path(s["init"]).parent / "eval"):
+        old = None  # constrained and free EVALs don't compare
     if new is None:
         (d / "WORSE").touch()
         return Path(s["init"]), "no EVAL score: the parent stays the final model"
@@ -588,8 +601,9 @@ def pipeline(d, steps=STEPS):
                 phase("away", away_train(d, s) + ["--until", until], "away/train.log")
                 if not (d / "away" / "best.pt").exists():
                     raise RuntimeError("it saved no model (too short to reach its first eval); see away/train.log")
-                phase("evaluating", ["train/evaluate.py", str(d / "away" / "best.pt"), "--data", *s["data"]],
-                      "away/evaluate.log")
+                constrained = ["--constrained"] if "--constrained" in s.get("evaluate", []) else []
+                phase("evaluating", ["train/evaluate.py", str(d / "away" / "best.pt"), "--data", *s["data"],
+                                     *constrained], "away/evaluate.log")
                 main, away = solvable(d / "eval"), solvable(d / "away" / "eval")
                 if main is not None and away is not None and away < main - AWAY_WORSE:
                     (d / "away" / "WORSE").touch()
@@ -616,7 +630,7 @@ def pipeline(d, steps=STEPS):
                 else:
                     shutil.rmtree(d / "playtest", ignore_errors=True)
                     phase("picking", ["train/abtest.py", "pick", d.name, str(final_dir(d) / "best.pt"),
-                                      s.get("init") or "workshop", "--out", str(d / "playtest")]
+                                      s.get("init") or "workshop", "--out", str(d / "playtest"), "--constrained"]
                           + (["--game"] if game else []), "pick.log")
             except RuntimeError as e:
                 say(f"{e} (carrying on)")
@@ -714,8 +728,10 @@ def describe(d):
     elif ev.exists():
         e = json.loads(ev.read_text())
         v = e["validity"]
-        lines.append(f"  EVAL: {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse "
-                     f"(a guardrail since 2026-10-25, RATED STYLE is the headline; differences under ~10 points are noise)")
+        how = "constrained" if e.get("constrained") else "free decoding"
+        lines.append(f"  EVAL: {v['solvable']:.0%} solvable, {v['parsed']:.0%} parse, {how} "
+                     f"(a guardrail since 2026-10-25, RATED STYLE is the headline; differences under ~10 points are noise;"
+                     f" compare only runs with the same decoding)")
         if e.get("rated"):
             r = e["rated"]
             gap = f"{r['profile_gap']:.1f}" if r["profile_gap"] is not None else "-"

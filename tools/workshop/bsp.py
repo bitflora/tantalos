@@ -41,6 +41,35 @@ def slim(header: bytes, lumps: dict) -> bytes:
     return bytes(out + body)
 
 
+# Downloaded maps (out/workshop/bsp) are stored as <id>.bsp.zst since 2026-11-01, zstd level 19
+# (about 6x smaller); older plain <id>.bsp files are read the same way.
+ZSTD_LEVEL = 19
+
+
+def map_files(directory):
+    """Every map in `directory`, plain or zstd-compressed, by name."""
+    return sorted([*directory.glob("*.bsp"), *directory.glob("*.bsp.zst")])
+
+
+def map_id(path):
+    """The Workshop id a map file is named after (<id>.bsp or <id>.bsp.zst)."""
+    return path.name.split(".")[0]
+
+
+def map_path(directory, wid):
+    """The file holding map `wid` in `directory` (compressed or plain), or None."""
+    for name in (f"{wid}.bsp.zst", f"{wid}.bsp"):
+        if (directory / name).exists():
+            return directory / name
+    return None
+
+
+def write_map(directory, wid, blob: bytes):
+    """Save a downloaded map compressed, as <id>.bsp.zst."""
+    import zstandard
+    (directory / f"{wid}.bsp.zst").write_bytes(zstandard.ZstdCompressor(level=ZSTD_LEVEL).compress(blob))
+
+
 def entities_ok(lump: bytes):
     """Whether an entity lump looks like one: text, starting with the worldspawn."""
     head = lump[:4096].lstrip()
@@ -62,6 +91,10 @@ class Bsp:
 
     @classmethod
     def open(cls, path):
+        if str(path).endswith(".zst"):
+            import zstandard
+            with open(path, "rb") as f:
+                return cls(zstandard.ZstdDecompressor().decompress(f.read()))
         opener = gzip.open if str(path).endswith(".gz") else open
         with opener(path, "rb") as f:
             return cls(f.read())

@@ -6,7 +6,7 @@ the compiled map, as glados tokens, and label it with the solver like any genera
 
 ```bash
 python tools/workshop/fetch.py list --pages 100   # out/workshop/items.jsonl (30 puzzles a page)
-python tools/workshop/fetch.py download           # out/workshop/bsp/<id>.bsp, fetched.jsonl
+python tools/workshop/fetch.py download           # out/workshop/bsp/<id>.bsp.zst (zstd), fetched.jsonl
 python tools/workshop/fetch.py download --retry-errors
 python tools/workshop/fetch.py build              # out/workshop/levels.jsonl, report.jsonl
 python tools/workshop/check.py                    # converter vs. known puzzles (needs release glados)

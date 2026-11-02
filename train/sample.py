@@ -45,24 +45,43 @@ def prompt(vocab, conds, prefix):
 
 
 class Grammar:
-    """`glados-score grammar` (src/grammar.rs), running: the level tokens that may come next."""
+    """`glados-score grammar` (src/grammar.rs), running: the level tokens that may come next.
+    Keeping items clear of the editor's rules makes it about 3 times slower a token, so it runs
+    `procs` servers, each level always on the same one (by its first tokens) to keep their caches."""
 
-    def __init__(self, glados=DEFAULT_GLADOS):
-        self.proc = subprocess.Popen([str(Path(glados).resolve()), "grammar"], stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
+    KEY = 24  # tokens: the geometry's start, which a level keeps once written
+
+    def __init__(self, glados=DEFAULT_GLADOS, procs=4):
+        self.procs = [subprocess.Popen([str(Path(glados).resolve()), "grammar"], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
+                      for _ in range(procs)]
 
     def next(self, levels):
         """Per level's tokens so far (a string): {allowed: [tokens], end} or {error}."""
-        self.proc.stdin.write(json.dumps({"levels": levels}) + "\n")
-        self.proc.stdin.flush()
-        line = self.proc.stdout.readline()
-        if not line:
-            raise RuntimeError(f"glados-score grammar stopped (exit code {self.proc.poll()})")
-        return json.loads(line)["results"]
+        parts = [[] for _ in self.procs]
+        for i, level in enumerate(levels):
+            parts[hash(" ".join(level.split()[: self.KEY])) % len(self.procs)].append(i)
+        for proc, part in zip(self.procs, parts):  # all asked first, so they work at once
+            if part:
+                proc.stdin.write(json.dumps({"levels": [levels[i] for i in part]}) + "\n")
+                proc.stdin.flush()
+        results = [None] * len(levels)
+        for proc, part in zip(self.procs, parts):
+            if not part:
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                raise RuntimeError(f"glados-score grammar stopped (exit code {proc.poll()})")
+            for i, r in zip(part, json.loads(line)["results"]):
+                results[i] = r
+        return results
 
     def stop(self):
-        self.proc.stdin.close()
-        self.proc.wait()
+        for proc in self.procs:
+            proc.stdin.close()
+        for proc in self.procs:
+            proc.wait()
+            proc.stdout.close()
 
 
 class LegalLevels:

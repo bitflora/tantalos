@@ -1,7 +1,7 @@
 """Collect Puzzle Maker chambers from the Portal 2 Workshop as glados training levels.
 
     python tools/workshop/fetch.py list --pages 100       # find puzzles: out/workshop/items.jsonl
-    python tools/workshop/fetch.py download               # fetch them:   out/workshop/bsp/<id>.bsp
+    python tools/workshop/fetch.py download               # fetch them:   out/workshop/bsp/<id>.bsp.zst
     python tools/workshop/fetch.py build                  # convert+solve: out/workshop/levels.jsonl
     python tools/workshop/fetch.py pipeline               # download while converting+scoring
 
@@ -40,7 +40,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bsp import HEADER_SIZE, USED_LUMPS, Bsp, BspError, entities_ok, lump_table, parse_entities, slim  # noqa: E402
+from bsp import (HEADER_SIZE, USED_LUMPS, Bsp, BspError, entities_ok, lump_table, map_files, map_id,  # noqa: E402
+                 parse_entities, slim, write_map)
 from convert import Unsupported, convert, screen  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -340,7 +341,7 @@ def fetch_once(item, bsp_dir):
             lumps[i] = data[table[i][0] - o:table[i][0] - o + table[i][1]]
     blob = slim(header, lumps)
     Bsp(blob).check()
-    (bsp_dir / f"{item['id']}.bsp").write_bytes(blob)
+    write_map(bsp_dir, item["id"], blob)
     return {"status": "ok", "bytes": fetched}
 
 
@@ -441,30 +442,30 @@ def cmd_build(a):
         ok = read_ids(out / "fetched.jsonl", status="ok")
         now = time.time()
         paths = []
-        for path in sorted((out / "bsp").glob("*.bsp")):
-            if path.stem in done:
+        for path in map_files(out / "bsp"):
+            if map_id(path) in done:
                 continue
             try:
                 old = now - path.stat().st_mtime > 60
             except OSError:
                 continue
-            if path.stem in ok or old:
+            if map_id(path) in ok or old:
                 paths.append(path)
         if not paths:
             return 0
     else:
-        paths = sorted((out / "bsp").glob("*.bsp"))
+        paths = map_files(out / "bsp")
     ids, lines, problems = [], [], {}
     with open(out / "report.jsonl", "a" if incremental else "w", encoding="utf-8") as report:
         for path in paths:
-            rec = {"id": path.stem}
+            rec = {"id": map_id(path)}
             try:
                 rec["tokens"] = convert(Bsp.open(path))
-                ids.append(path.stem)
+                ids.append(map_id(path))
                 lines.append(rec["tokens"])
             except (Unsupported, BspError) as e:
                 rec["error"] = str(e)
-                problems[path.stem] = str(e)
+                problems[map_id(path)] = str(e)
             report.write(json.dumps(rec) + "\n")
     print(f"converted {len(lines)} of {len(paths)}; {len(problems)} unsupported "
           f"(see report.jsonl)", file=sys.stderr)

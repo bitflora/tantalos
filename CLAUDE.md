@@ -98,7 +98,8 @@ for good and records it.
 
 Binaries (`src/bin/`, each prints its usage when run without arguments):
 `glados-score` (`score`, `check`, `route`: what training, evaluation and play call; `grammar`: the legal
-next level tokens, for `sample.py`/`rated.py --constrained`; `env`: the
+next level tokens, items kept clear of the editor's rules, for `--constrained` in `sample.py`,
+`rated.py`, `evaluate.py` and `abtest.py pick`; `env`: the
 legal next plan tokens, for `goblin_eval.py --constrained`),
 `glados-data` (`dataset`, `mutate`), `glados-p2c` (`info`, `solve`, `tokens`, `vocab`, `editor`,
 `roundtrip`, `fixtures`), `glados-view`, `glados-workbench`, `glados-evolve`, and `reverse`.
@@ -112,6 +113,11 @@ levels at temperature 0.7. **Yield**: valid, novel, not solver-unsolvable levels
 uses 2+ state-changing mechanics and at most 1 trick, per 1,000. **Profile gap**: mean
 difference in points between the samples' item-family mix and 5-star levels' (lower is better).
 Baseline, v5-cont-10h-d (2026-10-25, runs/v5-cont-10h-d/rated/): yield 207, strong 8, gap 23.5.
+Since 2026-11-01 level runs sample their evaluation and play-test levels with constrained
+decoding (`glados-score grammar`: levels that parse, items clear of the editor's rules), shown
+as `decoding` in runs.csv: their EVAL and RATED STYLE compare only with constrained runs. The
+constrained baseline is v6-fresh-12h/away (seed 7): yield 422, strong 25, gap 7.4 (it was 182,
+20, 11.0 constrained without the editor's rules, 2026-11-01).
 **EVAL solvable %** (share of levels asked for `<verdict:solvable>` our solver solves) is now a
 guardrail, not the target; differences under about 10 points are noise. Val loss: lower is
 better, but only comparable between runs on the same data; since 2026-10-25 val is split by
