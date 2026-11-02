@@ -66,6 +66,9 @@ TURN_RATE = 270.0  # degrees a second, turning to look or to walk somewhere
 MIN_SPEED = 50.0   # slowest walk while easing into a stop
 PEDESTAL_TOP = 40.0  # a pedestal button's button, over the entity's origin (its base)
 MOVES = ("forward", "back", "moveleft", "moveright")
+CUBE_WAIT = 8.0   # longest wait for a cube the route expects somewhere to get there
+AIR_DECEL = 4.8   # in the air, change of speed along a held key a second, per unit of its speed
+ROLL = 192.0       # how far from its cell a dropped sphere may have rolled on (a cell and a half)
 EXIT_WAIT = 10.0   # longest wait at a shut exit door: a platform arriving, the laser burning
                    # through the turrets in its way. Short because it has yet to earn its keep:
                    # of 36 waits over 18 levels (2026-10-31, e1-r00 retry, 40 s each), no door
@@ -138,6 +141,13 @@ function glados_start() {
 // How far a straight line from a to b gets before something solid stops it (0..1).
 function glados_trace(ax, ay, az, bx, by, bz) {
 	printl("GLADOS_TRACE " + TraceLine(Vector(ax, ay, az), Vector(bx, by, bz), GetPlayer()))
+}
+// The light bridges, as boxes (origin + bounds): world traces go straight through them.
+function glados_bridges() {
+	local e = null
+	while ((e = Entities.FindByClassname(e, "projected_wall_entity")) != null)
+		printl("GLADOS_BRIDGE {\"lo\":" + glados_v(e.GetOrigin() + e.GetBoundingMins()) + ",\"hi\":" + glados_v(e.GetOrigin() + e.GetBoundingMaxs()) + "}")
+	printl("GLADOS_BRIDGE_END")
 }
 // The laser emitters and where they point (what burnt the player).
 function glados_lasers() {
@@ -214,6 +224,68 @@ def beam_over(lasers, feet, reach=40.0):
     return best
 
 
+def fall_time(s, target, gravity=600.0):
+    """Seconds until a player in the air (look `s`) comes down to `target`'s height."""
+    z, vz = s["o"][2] - target[2], s["v"][2]
+    return max((vz + math.sqrt(max(vz * vz + 2 * gravity * max(z, 0.0), 0.0))) / gravity, 0.05)
+
+
+def want_velocity(s, target):
+    """The velocity across (xy) that comes down on `target` (a floor point) from look `s`."""
+    t = fall_time(s, target)
+    return [(target[i] - s["o"][i]) / t for i in range(2)]
+
+
+def air_push(s, target, per_unit=AIR_DECEL, lag=0.25, slack=5.0, gain=0.85):
+    """How to push in the air to come down on `target`: (back, left) key speeds (cl_backspeed,
+    cl_sidespeed; negative: forward, right; None: let go), facing the way of the motion, or
+    None if nothing needs doing. In the air a key at speed k changes the speed along it by
+    about `per_unit` * k a second (measured 2026-11-02: cl_backspeed 40 braked 102 in 0.53 s),
+    so each takes the speed that makes up `gain` of its difference in the time left (less
+    `lag`, about how late a key takes). Tuned on 00117 of round 0 (2026-11-02): the whole
+    difference braked it to a stop 30 short of the portal's middle, 0.6 sailed past it, 0.85
+    put two of its three loops back in at full speed."""
+    v = s["v"][:2]
+    sp = math.hypot(*v)
+    if sp < 1:
+        return None
+    m = [v[0] / sp, v[1] / sp]
+    left = [-m[1], m[0]]
+    want = want_velocity(s, target)
+    dv = [want[i] - v[i] for i in range(2)]
+    along = dv[0] * m[0] + dv[1] * m[1]
+    side = dv[0] * left[0] + dv[1] * left[1]
+    t = max(fall_time(s, target) - lag, 0.1)
+    key = lambda d: None if abs(d) < slack else math.copysign(
+        min(max(gain * abs(d) / t / per_unit, 10.0), 450.0), d)
+    # In the air, pushing on adds speed only while slower than about 30 along the push.
+    back = key(-along) if along < 0 or sp < 30 else None
+    return None if back is None and key(side) is None else (back, key(side))
+
+
+def loop_shot_ready(eye, aim, normal, last, min_cos=0.42):
+    """Whether to shoot now, falling in a portal loop: the eye sees the face (its centre `aim`,
+    `normal` into the room) at a fair angle (the route's 25 degrees), or it is down to `last`
+    (no later chance)."""
+    v = [eye[i] - aim[i] for i in range(3)]
+    d = math.sqrt(sum(x * x for x in v)) or 1.0
+    return sum(v[i] * normal[i] for i in range(3)) / d >= min_cos or eye[2] <= last
+
+
+def bridge_rise(bridges, p, feet, below=24.0, above=44.0):
+    """How high a light bridge under point `p` (xy) is over the feet, if one is there (within
+    `below` under the feet and `above` over them): the player's 16-unit half-width counts as on
+    it. None if no bridge is."""
+    best = None
+    for b in bridges:
+        lo, hi = b["lo"], b["hi"]
+        top = hi[2]
+        if (lo[0] - 16 <= p[0] <= hi[0] + 16 and lo[1] - 16 <= p[1] <= hi[1] + 16
+                and -below <= top - feet <= above):
+            best = top - feet if best is None else max(best, top - feet)
+    return best
+
+
 def aim_points(centre, face_dir, spread=32.0):
     """Points on a face to aim at, its centre first, then points offset in its plane: a shot
     at the middle can be blocked (a pane's frame, a panel's edge) where the face is open."""
@@ -268,6 +340,9 @@ class Game:
         out = con.ask(["cl_sidespeed"], 5) or ""
         m = re.search(r'"cl_sidespeed" = "([\d.]+)"', out)
         self.side_speed = float(m.group(1)) if m else 175.0
+        out = con.ask(["cl_backspeed"], 5) or ""
+        m = re.search(r'"cl_backspeed" = "([\d.]+)"', out)
+        self.back_speed = float(m.group(1)) if m else 175.0
 
     # positions: route voxels -> world units
     def world(self, p):
@@ -476,6 +551,18 @@ class Game:
                             f"{b[0]:.1f},{b[1]:.1f},{b[2]:.1f})"], 5) or ""
         m = re.search(r"GLADOS_TRACE ([-\d.e]+)", out)
         return float(m.group(1)) if m else None
+
+    def bridges(self):
+        """Every light bridge as a box {"lo", "hi"} (world units; a bridge is 64 wide and flat)."""
+        out = self.con.ask(["script glados_bridges()"], 5) or ""
+        found = []
+        for l in out.splitlines():
+            if l.startswith("GLADOS_BRIDGE {"):
+                try:
+                    found.append(json.loads(l.split(" ", 1)[1]))
+                except ValueError:
+                    pass
+        return found
 
     def lasers(self):
         """Every laser emitter: {"o": origin, "a": angles}, for `beam_over`."""
@@ -728,12 +815,14 @@ class Game:
                 still = None
         return self.obs()
 
-    def walk(self, points, tol=8.0, stop=True, timeout=None, on_jump="stop", launched=False):
+    def walk(self, points, tol=8.0, stop=True, timeout=None, on_jump="stop", launched=False, floors=True):
         """Walks through world points (xy), turning smoothly toward each and walking on once
         roughly facing it. Intermediate points are passed within about a quarter voxel; the
         last within `tol`, easing into a stop if `stop`. A jump (portal, linked door) ends the
         walk when `on_jump` is "stop"; going up fast (a faith plate) ends it when `launched`.
-        Raises Stuck if no progress is made for 2.5 s."""
+        Raises Stuck if no progress is made for 2.5 s. `floors`: look for the floor ahead
+        (waiting for one that isn't there yet); off where the route knows it is there and a
+        world trace can't see it (deployed stairs)."""
         self.jumped = False
         tick = time.time()
         try:
@@ -776,7 +865,7 @@ class Game:
                         self.event("hop", f"no headway at {fmt(s['o'])}: jumped", shot=False)
                     # Level ahead with no floor (a rail platform's track while the platform is
                     # elsewhere): wait for the floor to come, then go on (riding it).
-                    if len(p) > 2 and abs(p[2] - s["o"][2]) < 20 and now - floor_t > 0.25:
+                    if floors and len(p) > 2 and abs(p[2] - s["o"][2]) < 20 and now - floor_t > 0.25:
                         floor_t = now
                         rise = self.ground_ahead(s, p)
                         if rise is not None and 18 < rise <= 40 and not hopped and abs(s["v"][2]) < 5:
@@ -824,7 +913,11 @@ class Game:
         frac = self.trace_line([x, y, s["o"][2] + 44], [x, y, s["o"][2] - 24])
         if frac is None:
             return 0.0
-        return None if frac >= 1.0 else 44 - 68 * frac
+        if frac >= 1.0:
+            # A world trace goes straight through a light bridge (measured 2026-11-02): look
+            # for one there. Its top is 16-19 over the floor it spans, just over step height.
+            return bridge_rise(self.bridges(), [x, y], s["o"][2])
+        return 44 - 68 * frac
 
     def jump_beam(self, s, p, back=80.0):
         """Over a laser beam across the way to p: back off from where it burnt, run at it and
@@ -919,7 +1012,7 @@ class Game:
             self.con.send(f"cl_sidespeed {v}")
             self.side_now = v
 
-    def walk_cells(self, cells, tol=8.0):
+    def walk_cells(self, cells, tol=8.0, floors=True):
         """Walks the route's cells (each one step or a drop from the last), straight lines
         merged."""
         if not cells:
@@ -927,7 +1020,7 @@ class Game:
         pts = [self.floor(c) for c in cells]
         keep = [p for i, p in enumerate(pts)
                 if i in (0, len(pts) - 1) or not self._collinear(cells[i - 1], cells[i], cells[i + 1])]
-        return self.walk(keep, tol)
+        return self.walk(keep, tol, floors=floors)
 
     def walk_points(self, points, cells, tol=8.0):
         """Walks a leg's straightened walk (`points`: cells to head for in turn, straight
@@ -1109,6 +1202,11 @@ class Game:
         for _ in range(2):
             s = self.obs()
             cube = self.nearest_cube(s, home, within=96)
+            if cube is None:
+                # A sphere rolls: dropped onto a ledge, it can stop a cell over, on that floor.
+                cube = self.nearest_cube(s, home, within=ROLL)
+                if cube is not None and abs(cube["o"][2] - home[2]) > 24:
+                    cube = None
             if cube is None:
                 return False
             if hdist(s["o"], cube["o"]) > 80:
@@ -1471,7 +1569,9 @@ class Game:
         return self.in_cell(self.wait_landed(timeout=10)["o"], leg["to"])
 
     def act_climb(self, leg):
-        self.walk_cells(leg["path"], tol=16)
+        # Deployed stairs are a model a world trace goes through (00112 of round 0 waited 30 s
+        # on them for a floor): the route says they are down, so no looking for a floor.
+        self.walk_cells(leg["path"], tol=16, floors=False)
         return self.in_cell(self.obs()["o"], leg["path"][-1])
 
     def act_funnel(self, leg):
@@ -1542,27 +1642,95 @@ class Game:
         went = self.jumped
         return went and self.in_cell(self.wait_landed(timeout=10)["o"], leg["landing"])
 
-    def air_steer(self, s, target, gravity=600.0):
-        """One tick of air control toward landing on `target` (a floor point): the velocity
-        that would get there by the time the fall reaches its height, pushed for with the
-        move keys whatever way the view faces. In the air the keys only add speed up to 30
-        units a second along where they push (Source's air control), so in practice this
-        brakes: it aims a little long (better to brake late than fall short) and only pushes
-        where that does something."""
-        z, vz = s["o"][2] - target[2], s["v"][2]
-        # Time until the fall comes down to the target's height: z + vz t - g t^2 / 2 = 0.
-        t = (vz + math.sqrt(max(vz * vz + 2 * gravity * max(z, 0.0), 0.0))) / gravity
-        t = max(t, 0.1)
-        v = s["v"][:2]
-        sp = math.hypot(*v)
-        long = [v[i] / sp * 10 if sp > 1 else 0.0 for i in range(2)]
-        want = [(target[i] + long[i] - s["o"][i]) / t for i in range(2)]
-        dv = [want[i] - v[i] for i in range(2)]
-        n = math.hypot(*dv)
-        if n < 20 or (v[0] * dv[0] + v[1] * dv[1]) / n >= 30:
-            self.release(*MOVES)  # close enough, or pushing that way can't add speed
-        else:
-            self.move_toward(math.degrees(math.atan2(dv[1], dv[0])), self.top_speed)
+    def act_loop(self, leg):
+        """Onto the floor portal (the walk ends on it), out of the other one and back down into
+        it. Out of a wall portal the player comes out at the speed they fell in at (about 200)
+        and would sail over the floor portal (00117 of round 0 landed 1.5 cells past it), so
+        they brake in the air, gently, down to the speed that comes down on its middle.
+        With a refire, the other portal is shot at its new face on the way down (aimed from
+        where the eye will be a moment on), once the eye sees it at a fair angle or the fall is
+        nearly over: just out of a wall portal the player hugs that wall, and a shot along it
+        never lands (2026-11-02). Then out of the new one at the speed of the fall; without a
+        refire, out of the old one. There is one go: a missed shot flies out of the old one."""
+        face, re = leg["face"], leg.get("refire")
+        if not self.jumped:
+            self.walk([self.floor(face["cell"])], tol=4, stop=False, timeout=4)
+        end = time.time() + 4
+        while not self.jumped and time.time() < end:
+            self.obs()
+        if not self.jumped:
+            raise Stuck(f"on the floor portal in {face['cell']} but not through it")
+        self.release(*MOVES)
+        self.jumped = False
+        portal = self.floor(face["cell"])
+        if re:
+            aim = self.world(re["face"]["centre"])
+            n = [-v for v in DIRS[re["face"]["dir"]]]  # out of the face, into the room
+        lead = 0.12  # about one look and the shot's own round trip
+        braked, fired, s = False, not re, self.last
+        end = time.time() + 6
+        try:
+            while not self.jumped and time.time() < end:
+                # Steer the speed across toward what comes down on the middle (`air_push`):
+                # facing the way of the motion (the view after a portal is whatever the portal
+                # made it: a push on a stale heading went sideways), back and the strafe keys at
+                # speeds that brake or shift about as much as it takes, no more.
+                push = air_push(s, portal)
+                if push:
+                    if not braked:
+                        braked = True
+                        self.event("loop brake", f"at {fmt(s['o'])}, {self.speed(s):.0f} across, "
+                                   f"{math.hypot(*want_velocity(s, portal)):.0f} wanted", shot=False)
+                    self.look(0.0, math.degrees(math.atan2(s["v"][1], s["v"][0])))
+                    for key, other, v in (("back", "forward", push[0]), ("moveleft", "moveright", push[1])):
+                        if v is None:
+                            self.release(key, other)
+                            continue
+                        name = "cl_backspeed" if key == "back" else "cl_sidespeed"
+                        self.con.send(f"{name} {abs(v):.0f}")
+                        self.release(other if v > 0 else key)
+                        self.hold(key if v > 0 else other)
+                else:
+                    self.release(*MOVES)
+                eye = [s["eye"][i] + s["v"][i] * lead for i in range(2)] + [
+                    s["eye"][2] + s["v"][2] * lead - 300.0 * lead * lead]
+                if not fired and loop_shot_ready(eye, aim, n, portal[2] + 96):
+                    fired = True
+                    self.fire_falling(re, eye, aim, s)
+                s = self.obs()
+        finally:
+            self.release(*MOVES)
+            if braked:
+                self.con.send(f"cl_backspeed {self.back_speed:.0f}")
+                self.con.send(f"cl_sidespeed {self.side_speed:.0f}")
+                self.side_now = None
+        if not self.jumped:
+            self.event("loop", f"didn't fall back into the floor portal on {face['cell']}: "
+                       f"at {fmt(s['o'])}", shot=True)
+        elif not fired:
+            self.event("loop shot", f"no moment to shoot {re['face']['cell']} {re['face']['dir']} "
+                       "before falling back in", shot=False)
+        landed = self.wait_landed(timeout=10)
+        return self.in_cell(landed["o"], leg["landing"])
+
+    def fire_falling(self, re, eye, aim, s):
+        """The loop's shot at the refire face, from `eye` (where the eye will be) mid-fall."""
+        self.look(*angle_to(eye, aim))
+        before = {p["id"]: p for p in s["portals"]}
+        self.firing = True
+        try:
+            self.tap(FIRE_KEY[re["color"]], 0.05)
+            s = self.obs()
+        finally:
+            self.firing = False
+        self.last_fire = {"eye": [round(v, 1) for v in eye], "target": [round(v, 1) for v in aim],
+                          "pitch": round(self.pitch, 2), "yaw": round(self.yaw, 2), "falling": True}
+        moved = [p for p in s["portals"] if before.get(p["id"]) != p]
+        if moved:
+            self.portal_ids[re["color"]] = min(moved, key=lambda p: math.dist(p["o"], aim))["id"]
+        if not self.portal_on(re["color"], re["face"], s):
+            self.event("loop shot", f"the {re['color']} portal isn't on {re['face']['cell']} "
+                       f"{re['face']['dir']} just after a shot from {fmt(eye)} mid-fall")
 
     def act_exit(self, leg):
         """Out through the exit door: done at its linked door, or when the level restarts
@@ -1637,6 +1805,12 @@ class Game:
 
     # --- checking and putting right ----------------------------------------------------
 
+    def cube_slack(self, i):
+        """How far (units) cube `i` of the route may rest outside its cell: a sphere rolls a
+        cell over and stays on that floor, and the plan only cares which floor (region)."""
+        kinds = [c.get("kind") for c in getattr(self, "head", None) and self.head.get("cubes", []) or []]
+        return ROLL - 64 if i < len(kinds) and kinds[i] == "sphere" else 16
+
     def problems(self, after, slack=12):
         """How the game differs from what the route expects after a leg. `slack`: how far
         (units) the player may be outside their cell."""
@@ -1649,14 +1823,14 @@ class Game:
                 out.append(f"no {color} portal on {face['cell']} {face['dir']}")
         held = self.holding(s)
         free = [c for c in s["cubes"] if held is None or c["id"] != held["id"]]
-        for want in after["cubes"]:
+        for i, want in enumerate(after["cubes"]):
             if want == "gone":
                 continue
             if want is None:
                 if held is None or not self.follows_view(held["id"]):
                     out.append("not holding the cube")
                 continue
-            here = next((c for c in free if self.in_cell(c["o"], want, slack=16)), None)
+            here = next((c for c in free if self.in_cell(c["o"], want, slack=self.cube_slack(i))), None)
             if here is None:
                 f = self.floor(want)
                 near = min(free, key=lambda c: math.dist(c["o"], f), default=None)
@@ -1694,7 +1868,7 @@ class Game:
         s = self.obs()
         held = self.holding(s)
         used = {held["id"]} if held else set()
-        for want in after["cubes"]:
+        for i, want in enumerate(after["cubes"]):
             if want == "gone":
                 continue
             if want is None:
@@ -1711,7 +1885,7 @@ class Game:
                         used.add(cube["id"])
                 continue
             here = next((c for c in s["cubes"] if c["id"] not in used
-                         and self.in_cell(c["o"], want, slack=16)), None)
+                         and self.in_cell(c["o"], want, slack=self.cube_slack(i))), None)
             if here is None:
                 f = self.floor(want)
                 cube = self.nearest_cube(s, f, skip=used)
@@ -1910,7 +2084,7 @@ PLACED = ("fire", "pickup", "putdown", "toss", "throw", "press", "knock", "enter
           "bounce", "fetch", "reach", "jump")
 # Lining up a cube or reaching for something can take the player half a cell over.
 SLACK = ("pickup", "putdown", "toss", "throw", "press", "knock", "funnel", "plate", "dive", "ride",
-         "reach")
+         "reach", "loop")
 
 
 def intended_fields(game, before, leg):
@@ -1968,7 +2142,14 @@ def attempt(game, leg, before, careful=False):
         time.sleep(2.0)  # a device carried the player: let it get there
         game.wait_landed()
     exit_leg = leg["action"] == "exit" or leg.get("escape")
-    problems = [] if exit_leg else game.problems(leg["after"], 64 if leg["action"] in SLACK else 12)
+    slack = 64 if leg["action"] in SLACK else 12
+    problems = [] if exit_leg else game.problems(leg["after"], slack)
+    # A cube can be on its way: a dropper's next one after the last fell into goo (or a field
+    # the leg just put across its fall), a cube still sliding. Give it a moment.
+    end = time.time() + CUBE_WAIT
+    while any(p.startswith("no cube in cell") for p in problems) and time.time() < end:
+        time.sleep(1.0)
+        problems = game.problems(leg["after"], slack)
     # A cube for a button has to rest near its middle (in its cell but on the plate's rim, it
     # doesn't press it; that only shows later, as a door that stays shut).
     target = leg.get("at") if leg["action"] == "putdown" and leg.get("button") else         leg.get("landing") if leg["action"] in ("throw", "toss") and "button" in leg["text"] else None

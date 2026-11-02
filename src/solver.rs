@@ -4523,7 +4523,7 @@ struct Target {
 /// Portal loops' falls: out of a wall portal on `face` at walking speed, the floor cells the
 /// player can fall onto (straight down, or a cell further out) and how far (at least
 /// `MIN_DIVE` voxels), where that floor takes portals.
-fn loop_falls(level: &Level, (c, d): Face) -> Vec<(Cell, i32)> {
+pub(crate) fn loop_falls(level: &Level, (c, d): Face) -> Vec<(Cell, i32)> {
     let mut out = Vec::new();
     if d.axis() == 2 {
         return out;

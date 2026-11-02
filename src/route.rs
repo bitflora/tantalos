@@ -27,7 +27,7 @@ use crate::metrics::{replay, replay_part};
 use crate::plan::{step_text, step_verb, Step};
 use crate::portals::{self, Face};
 use crate::regions::{Cond, Geo, Move};
-use crate::solver::{Action, Color, Cube, CubeLoc, Mode, Model, Signal, State, Verdict};
+use crate::solver::{loop_falls, Action, Color, Cube, CubeLoc, Mode, Model, Signal, State, Verdict};
 
 /// Shots preferably meet the face at least this steeply (cosine to its normal, about 25°).
 const MIN_SHOT_COS: f64 = 0.42;
@@ -189,6 +189,17 @@ pub enum Act {
         exit: Face,
         landing: Cell,
     },
+    /// Step onto the floor portal on `face` (the walk's end), come out of `out` and fall
+    /// back into it; with `refire`, fire that colour at its face on the way down (from the
+    /// eye point given, which sees it). Fly out of `exit` at the speed of the fall and land in
+    /// `landing`.
+    Loop {
+        face: Face,
+        out: Face,
+        refire: Option<(Color, Face, [f64; 3])>,
+        exit: Face,
+        landing: Cell,
+    },
     /// Walk out through the exit door in `cell`, against its `normal`.
     Exit {
         cell: Cell,
@@ -302,7 +313,7 @@ fn ground(level: &Level, model: &Model, plan: &[Action], states: &[State], exit:
     let mut legs = Vec::new();
     for (i, a) in plan.iter().enumerate() {
         let mut leg = g
-            .leg(&here, &states[i], a, &states[i + 1])
+            .leg(&here, &states[i], a, &states[i + 1], g.loop_faces(plan, states, i, &here).as_deref())
             .ok_or_else(|| format!("step {}: can't ground \"{}\"", i + 1, model.describe(a)))?;
         g.check(&leg.after, &states[i + 1])
             .map_err(|e| format!("step {}: {e}", i + 1))?;
@@ -475,6 +486,22 @@ impl<'a> Grounder<'a> {
             Some((hinge, 90)) => (step(f.0, hinge), hinge.opposite()),
             _ => f,
         }
+    }
+
+    /// Out of a portal on `out` at the speed of a fall of `height`, as the solver's nominal
+    /// trial has it: the face really flown out of, where it comes to rest and the fields on
+    /// the way.
+    fn fling(&self, out: Face, dev: u64, height: i32) -> Option<(Face, Cell, u64)> {
+        let (exit, tilt) = match self.deployed_panel(out, dev) {
+            Some((t, 90)) => (self.live_face(out, dev), Some((t, 0))),
+            Some(t) => (out, Some(t)),
+            None => (out, None),
+        };
+        let e = flings::exit_vector(exit.1, tilt.filter(|t| t.1 != 0));
+        let speed = flings::dive_speed(height);
+        let v: [f64; 3] = std::array::from_fn(|a| e[a] * speed);
+        let (landing, hz) = flings::fly(self.level, flings::exit_point(exit.0, exit.1), v)?;
+        Some((exit, landing, hz))
     }
 
     /// What follows by itself after a step, as the solver's `settle` has it in `next`: portals
@@ -798,7 +825,45 @@ impl<'a> Grounder<'a> {
         out
     }
 
-    fn leg(&self, h: &Here, s: &State, a: &Action, next: &State) -> Option<Leg> {
+    /// For a shot (`plan[i]`) at a portal that a later portal loop uses: the faces of its class
+    /// that make the loop, a floor portal under a wall portal that falls `height` back into it.
+    /// A class can hold wall and floor faces alike, and any of them is the solver's portal; a
+    /// loop needs the right pair.
+    fn loop_faces(&self, plan: &[Action], states: &[State], i: usize, h: &Here) -> Option<Vec<Face>> {
+        let Action::Fire { color, class, .. } = plan[i] else { return None };
+        let k = color as usize;
+        for (j, a) in plan.iter().enumerate().skip(i + 1) {
+            match *a {
+                Action::Fire { color: c, .. } if c == color => return None,
+                Action::Loop { color: lc, height, .. } => {
+                    let fl = lc as usize;
+                    let (floor_class, wall_class) = (states[j].portals[fl]?, states[j].portals[1 - fl]?);
+                    let classes = &self.model.portals.classes;
+                    // The other portal where it already is, else any face of its class.
+                    let placed = |p: usize, c: usize| match h.portals[p] {
+                        Some(f) if self.class_of.get(&f) == Some(&c) => vec![f],
+                        _ => classes[c].faces.clone(),
+                    };
+                    let (floors, walls) = if k == fl {
+                        (classes[class].faces.clone(), placed(1 - fl, wall_class))
+                    } else {
+                        (placed(fl, floor_class), classes[class].faces.clone())
+                    };
+                    let floors: Vec<Face> = floors.into_iter().filter(|f| f.1 == Dir::NegZ).collect();
+                    let pairs = |f: &Face, w: &Face| loop_falls(self.level, *w).contains(&(f.0, height));
+                    return Some(if k == fl {
+                        floors.into_iter().filter(|f| walls.iter().any(|w| pairs(f, w))).collect()
+                    } else {
+                        walls.into_iter().filter(|w| floors.iter().any(|f| pairs(f, w))).collect()
+                    });
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn leg(&self, h: &Here, s: &State, a: &Action, next: &State, prefer: Option<&[Face]>) -> Option<Leg> {
         let (level, model) = (self.level, self.model);
         let on = model.hazards_on_in(s, None);
         let dev = s.dev;
@@ -1055,11 +1120,11 @@ impl<'a> Grounder<'a> {
             } => {
                 let k = color as usize;
                 let stops = model.shot_stops_in(s, stand_on.map(Signal::Floor));
-                let faces = &model.portals.classes[class].faces;
+                let all = &model.portals.classes[class].faces;
                 let other = h.portals[1 - k];
                 // A shot along a wall from close to it rarely lands in the game: first look for
                 // a face seen at a fair angle (from a farther cell if need be), then any.
-                let at_angle = |min_cos: f64| {
+                let at_angle = |faces: &[Face], min_cos: f64| {
                     self.find(h, s, |c| {
                         match stand_on {
                             Some(b) if c != model.buttons[b].cell => return None,
@@ -1118,7 +1183,14 @@ impl<'a> Grounder<'a> {
                         })
                     })
                 };
-                at_angle(MIN_SHOT_COS).or_else(|| at_angle(-1.0))
+                let shoot = |faces: &[Face]| {
+                    at_angle(faces, MIN_SHOT_COS).or_else(|| at_angle(faces, -1.0))
+                };
+                // The faces a later portal loop needs, if any of them can be shot.
+                match prefer.filter(|p| !p.is_empty()) {
+                    Some(p) => shoot(p).or_else(|| shoot(all)),
+                    None => shoot(all),
+                }
             }
 
             Action::Enter { color } => {
@@ -1148,25 +1220,111 @@ impl<'a> Grounder<'a> {
                 })
             }
 
+            Action::Loop {
+                color,
+                height,
+                refire,
+                to,
+            } => {
+                let k = color as usize;
+                let (face, out) = (h.portals[k]?, h.portals[1 - k]?);
+                let face = self.live_face(face, dev);
+                if face.1 != Dir::NegZ {
+                    return None;
+                }
+                let out_live = self.live_face(out, dev);
+                // Where the eye is on the way down, out of the other portal and back in, top
+                // first: just out of the portal, in the middle of its cell, a cell further out
+                // (`loop_falls`). A refired portal is shot from there; with no second go, only
+                // at a fair angle (an edge-on shot along the wall it comes out of never lands).
+                // The solver's check is a shot from where they walked in.
+                let (xc, xd) = out_live;
+                let away = xd.opposite().vector().map(f64::from);
+                let fall: Vec<[f64; 3]> = (0..=xc[2] - face.0[2])
+                    .flat_map(|dz| {
+                        [0.15, 0.5, 1.5].map(|o| {
+                            let mut e = [xc[0] as f64 + 0.5, xc[1] as f64 + 0.5, (xc[2] - dz) as f64 + 0.7];
+                            for a in 0..2 {
+                                e[a] += (o - 0.5) * away[a];
+                            }
+                            e
+                        })
+                    })
+                    .filter(|e| !level.solid(e.map(|v| v.floor() as i32)))
+                    .collect();
+                let other = [Color::Orange, Color::Blue][k];
+                let stops = model.shot_stops_in(s, None);
+                // Each way out: (refire, the face flown out of, landing, fields), best shot first.
+                let mut ways: Vec<(f64, Option<(Color, Face, [f64; 3])>, Face, Cell, u64)> = Vec::new();
+                match refire {
+                    None => {
+                        let (exit, landing, hz) = self.fling(out, dev, height)?;
+                        ways.push((0.0, None, exit, landing, hz));
+                    }
+                    Some(c) => {
+                        for &f in &model.portals.classes[c].faces {
+                            if f == face || f == out {
+                                continue;
+                            }
+                            let p = face_centre(f);
+                            let n = f.1.opposite().vector();
+                            // The first eye on the way down that sees it at a fair angle.
+                            let seen = fall.iter().find_map(|&eye| {
+                                let v: [f64; 3] = std::array::from_fn(|a| eye[a] - p[a]);
+                                let d2: f64 = v.iter().map(|x| x * x).sum();
+                                let cos = (0..3).map(|a| v[a] * n[a] as f64).sum::<f64>() / d2.sqrt();
+                                let cell = eye.map(|v| v.floor() as i32);
+                                (cos >= MIN_SHOT_COS
+                                    && portals::shots_from(level, cell, eye, f, rules.sight)
+                                        .any(|m| m & stops == 0))
+                                .then_some((eye, d2 / cos.powi(2)))
+                            });
+                            let Some((eye, score)) = seen else { continue };
+                            let Some((exit, landing, hz)) = self.fling(f, dev, height) else {
+                                continue;
+                            };
+                            ways.push((score, Some((other, f, eye)), exit, landing, hz));
+                        }
+                        ways.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    }
+                }
+                self.find(h, s, |c| {
+                    if c != face.0 {
+                        return None;
+                    }
+                    ways.iter().find_map(|&(_, re, exit, landing, hz)| {
+                        if self.region(landing) != Some(to) {
+                            return None;
+                        }
+                        let mut after = h.clone();
+                        after.player = landing;
+                        if let Some((col, f, _)) = re {
+                            after.portals[col as usize] = Some(f);
+                        }
+                        if fizzles(hz, on) {
+                            Self::fizzle(&mut after);
+                        }
+                        let act = Act::Loop {
+                            face,
+                            out: out_live,
+                            refire: re,
+                            exit,
+                            landing,
+                        };
+                        self.fits(after, next).map(|after| (act, after))
+                    })
+                })
+            }
+
             // Not grounded yet: the play harness has no leg for it, so such plans don't route.
-            Action::Loop { .. }
-            | Action::PortalReach { .. }
+            Action::PortalReach { .. }
             | Action::DoubleDash { .. }
             | Action::Sweep { .. } => None,
 
             Action::Dive { color, height, to } => {
                 let k = color as usize;
                 let (face, out) = (h.portals[k]?, h.portals[1 - k]?);
-                // The way out at the speed of the fall, as the solver's nominal trial has it.
-                let (exit, tilt) = match self.deployed_panel(out, dev) {
-                    Some((t, 90)) => (self.live_face(out, dev), Some((t, 0))),
-                    Some(t) => (out, Some(t)),
-                    None => (out, None),
-                };
-                let e = flings::exit_vector(exit.1, tilt.filter(|t| t.1 != 0));
-                let speed = flings::dive_speed(height);
-                let v: [f64; 3] = std::array::from_fn(|a| e[a] * speed);
-                let (landing, hz) = flings::fly(level, flings::exit_point(exit.0, exit.1), v)?;
+                let (exit, landing, hz) = self.fling(out, dev, height)?;
                 if self.region(landing) != Some(to) {
                     return None;
                 }
@@ -1929,6 +2087,25 @@ fn act_json(act: &Act) -> String {
             cell_json(*edge),
             dir_name(*dir),
             face_json(*face),
+            face_json(*exit),
+            cell_json(*landing)
+        ),
+        Act::Loop {
+            face,
+            out,
+            refire,
+            exit,
+            landing,
+        } => format!(
+            "\"action\":\"loop\",\"face\":{},\"out\":{},{}\"exit\":{},\"landing\":{}",
+            face_json(*face),
+            face_json(*out),
+            refire.map_or(String::new(), |(c, f, eye)| format!(
+                "\"refire\":{{\"color\":\"{}\",\"face\":{},\"eye\":{}}},",
+                color_name(c),
+                face_json(f),
+                point_json(eye)
+            )),
             face_json(*exit),
             cell_json(*landing)
         ),

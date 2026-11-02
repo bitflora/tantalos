@@ -239,3 +239,111 @@ class ExitDoorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RolledSphereTests(unittest.TestCase):
+    """A sphere dropped onto a ledge rolls a cell over (out_school-play_e1-r01_p2c_00035: from
+    cell [7, 8, 4] to x 1068, 108 units off its cell's middle): still where the plan has it."""
+
+    def game(self, cubes):
+        g = bare_game(origin=(0.0, 0.0, 0.0), head={"cubes": [{"kind": "sphere", "home": [7, 8, 4]},
+                                                             {"kind": "standard", "home": [1, 1, 0]}]})
+        g.obs = lambda timeout=3: {"o": [960.0, 1088.0, 512.0], "portals": [], "cubes": cubes}
+        g.holding = lambda s: None
+        return g
+
+    def test_a_rolled_sphere_is_no_problem(self):
+        g = self.game([{"id": 1, "o": [1068.0, 1027.0, 532.0]}, {"id": 2, "o": [192.0, 192.0, 20.0]}])
+        after = {"player": [7, 8, 4], "portals": [None, None], "cubes": [[7, 8, 4], [1, 1, 0]]}
+        self.assertEqual(g.problems(after), [])
+
+    def test_a_cube_that_far_off_is(self):
+        g = self.game([{"id": 1, "o": [960.0, 1088.0, 532.0]}, {"id": 2, "o": [300.0, 192.0, 20.0]}])
+        after = {"player": [7, 8, 4], "portals": [None, None], "cubes": [[7, 8, 4], [1, 1, 0]]}
+        self.assertEqual(len(g.problems(after)), 1)
+
+    def test_a_sphere_on_another_floor_is(self):
+        g = self.game([{"id": 1, "o": [1068.0, 1027.0, 20.0]}, {"id": 2, "o": [192.0, 192.0, 20.0]}])
+        after = {"player": [7, 8, 4], "portals": [None, None], "cubes": [[7, 8, 4], [1, 1, 0]]}
+        self.assertEqual(len(g.problems(after)), 1)
+
+
+class BridgeTests(unittest.TestCase):
+    """World traces go through light bridges; the bridge entity's box says where one is
+    (out_school-play_e1-r01_p2c_00036, measured 2026-11-02: out of a wall portal at x 0, 64 wide,
+    its top 18.75 over the floor at z 256, where a player dropped on it came to rest)."""
+
+    BRIDGE = {"lo": [0.13, 158.8, 274.73], "hi": [1535.9, 222.8, 274.75]}
+
+    def test_a_bridge_ahead_is_a_low_step(self):
+        rise = play.bridge_rise([self.BRIDGE], [704.0, 183.0], 256.03)
+        self.assertAlmostEqual(rise, 18.72, places=1)
+        self.assertTrue(18 < rise <= 40)  # walk() hops onto it
+
+    def test_beside_or_far_under_a_bridge_is_no_floor(self):
+        self.assertIsNone(play.bridge_rise([self.BRIDGE], [704.0, 100.0], 256.0))
+        self.assertIsNone(play.bridge_rise([self.BRIDGE], [704.0, 192.0], 128.0))
+
+    def test_ground_ahead_falls_back_on_bridges(self):
+        g = bare_game()
+        g.trace_line = lambda a, b: 1.0
+        g.bridges = lambda: [self.BRIDGE]
+        s = {"o": [704.0, 143.0, 256.03]}
+        self.assertAlmostEqual(g.ground_ahead(s, [704.0, 192.0, 256.0]), 18.72, places=1)
+        g.bridges = lambda: []
+        self.assertIsNone(g.ground_ahead(s, [704.0, 192.0, 256.0]))
+
+
+class LoopShotTests(unittest.TestCase):
+    """Falling out of a wall portal the player hugs that wall (out_school-play_e1-r00_p2c_00080:
+    the eye 5 units off the y = 2688 wall, the new face on the same wall 220 under it): a shot
+    along the wall never lands, so wait for a fair angle, or the last moment."""
+
+    AIM, NORMAL = [320.0, 2688.0, 2112.0], [0.0, -1.0, 0.0]
+
+    def test_along_the_wall_waits(self):
+        self.assertFalse(play.loop_shot_ready([336.0, 2683.0, 2234.0], self.AIM, self.NORMAL, 1632.0))
+
+    def test_out_from_the_wall_shoots(self):
+        self.assertTrue(play.loop_shot_ready([336.0, 2560.0, 2234.0], self.AIM, self.NORMAL, 1632.0))
+
+    def test_the_last_moment_shoots_anyway(self):
+        self.assertTrue(play.loop_shot_ready([336.0, 2683.0, 1620.0], self.AIM, self.NORMAL, 1632.0))
+
+
+class LoopBrakeTests(unittest.TestCase):
+    """Out of the wall portal of a loop at 208 across (out_school-play_e1-r00_p2c_00117, x 1277,
+    955 up, rising at 142), the floor portal's middle 189 short of where it would land: about
+    93 across comes down on it."""
+
+    PORTAL = [1088.0, 576.0, 0.0]
+
+    def test_the_speed_that_lands_on_the_middle(self):
+        s = {"o": [1277.0, 576.0, 955.0], "v": [-208.0, 0.0, 142.0]}
+        self.assertAlmostEqual(play.fall_time(s, self.PORTAL), 2.04, delta=0.01)
+        self.assertAlmostEqual(play.want_velocity(s, self.PORTAL)[0], -189 / 2.036, delta=0.5)
+
+    def test_brakes_about_as_hard_as_it_takes(self):
+        s = {"o": [1277.0, 576.0, 955.0], "v": [-208.0, 0.0, 142.0]}
+        back, left = play.air_push(s, self.PORTAL)
+        # 115 to lose in about 1.9 s: about 12.6 a unit of speed a second.
+        self.assertAlmostEqual(back, max(0.85 * 115 / 1.786 / play.AIR_DECEL, 10.0), delta=1.0)
+        self.assertIsNone(left)
+
+    def test_past_the_middle_brakes_hard_and_drift_is_pushed_back(self):
+        # 00115: past the portal's middle at 104 across, falling the last 300 units.
+        s = {"o": [574.0, 637.0, 236.0], "v": [-2.0, -104.0, -307.0]}
+        back, left = play.air_push(s, [576.0, 704.0, 0.0])
+        self.assertGreater(back, 50)
+        s = {"o": [1100.0, 634.0, 600.0], "v": [-100.0, 30.0, -300.0]}
+        back, left = play.air_push(s, self.PORTAL)
+        self.assertIsNotNone(left)  # drifting off to the side: pushed back toward y 576
+
+    def test_nearly_stopped_short_pushes_on(self):
+        # 00117: braked to a stop 30 short of the middle, 300 up.
+        back, left = play.air_push({"o": [1058.0, 576.0, 300.0], "v": [2.0, 0.0, -890.0]}, self.PORTAL)
+        self.assertLess(back, 0)  # forward, toward the middle
+
+    def test_on_course_lets_go(self):
+        s = {"o": [1277.0, 576.0, 955.0], "v": [-92.8, 0.0, 142.0]}
+        self.assertIsNone(play.air_push(s, self.PORTAL))
