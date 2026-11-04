@@ -46,6 +46,13 @@ the end unless --keep. For a game you started yourself, add
 --password. --spike checks the console, VScript, coordinates, movement and the commands the
 player uses on the first level, and prints what it found instead of playing.
 
+--thirdperson watches the player from behind (the camera only: the harness aims and steers by
+the player's own view angles and positions, so it plays the same; checked 2026-11-04 on
+worked_example, laser_cube and fling). The game drops back to first person by itself (a level
+starting, a save loaded, a portal), so the harness says `thirdperson` again at most once a second
+while it plays, with cam_collision 1 so the camera stays out of walls; the player's own
+cam_collision is put back at the end.
+
 Keep the game window focused while it plays: in the background, a level built from the console
 never starts (unlit, entry door shut, droppers holding their cubes), and arrival gets stuck.
 """
@@ -334,6 +341,8 @@ class Game:
         self.last_fire = None
         self.intended = set()   # hazard indices the route's walk crosses this leg
         self.crossed = set()    # (leg, cube, hazard) crossings already noted
+        self.thirdperson = False  # keep the camera behind the player (--thirdperson)
+        self.view_said = 0.0
         out = con.ask(["cl_forwardspeed"], 5) or ""
         m = re.search(r'"cl_forwardspeed" = "([\d.]+)"', out)
         self.top_speed = float(m.group(1)) if m else 175.0
@@ -362,6 +371,11 @@ class Game:
         moved further than walking could since the last look (a portal or a linked door)."""
         self.n += 1
         n = self.n
+        if self.thirdperson and time.time() - self.view_said > 1.0:
+            # The game drops back to first person by itself (a level starting, a load, a
+            # portal); saying it again while in third person changes nothing.
+            self.con.send("thirdperson")
+            self.view_said = time.time()
         self.con.send(f"script glados_obs({n})")
         got = self.con.until(lambda l: l.strip() == f"GLADOS_END {n}", timeout)
         if got is None:
@@ -2436,11 +2450,13 @@ class Session:
     MAX_RESTARTS = 6  # game restarts after it went down, over the session
 
     def __init__(self, launch=False, port=None, password="", restart_every=20, turn_rate=TURN_RATE,
-                 slow=1.0, keep=False, stream=False, exit_wait=EXIT_WAIT):
+                 slow=1.0, keep=False, stream=False, exit_wait=EXIT_WAIT, thirdperson=False):
         self.launch, self.port, self.password = launch, port, password
         self.restart_every, self.turn_rate, self.slow = restart_every, turn_rate, slow
         self.exit_wait = exit_wait
         self.keep, self.stream = keep, stream
+        self.thirdperson = thirdperson
+        self.cam_collision = None  # the player's own setting, put back at the end
         self.pid = self.con = None
         self.played = 0  # levels since the game started
         self.downs = 0
@@ -2453,6 +2469,7 @@ class Session:
 
     def __exit__(self, *exc):
         SCRIPT.unlink(missing_ok=True)
+        self.own_view()
         if self.pid is not None and not self.keep:
             portal2.quit_game(self.saved, self.pid, self.con)
         elif self.pid is None:
@@ -2481,8 +2498,28 @@ class Session:
         """Ends the game this session launched (it is launched again for the next level). A game
         this session didn't launch (someone is playing) is never touched."""
         if self.pid is not None:
+            self.own_view()
             portal2.quit_game(self.saved, self.pid, self.con)
         self.pid = self.con = None
+
+    def third_person(self):
+        """Behind the player, the camera kept out of walls (cam_collision, a saved setting:
+        the player's own value is remembered and put back by own_view)."""
+        if self.cam_collision is None:
+            out = self.con.ask(["cam_collision"], 5) or ""
+            m = re.search(r'"cam_collision" = "([\d.]+)"', out)
+            self.cam_collision = m.group(1) if m else "0"
+        self.con.ask(["cam_collision 1", "thirdperson"], 5)
+
+    def own_view(self):
+        """First person and the player's own cam_collision again (after --thirdperson)."""
+        if self.cam_collision is None or self.con is None:
+            return
+        try:
+            self.con.ask(["firstperson", f"cam_collision {self.cam_collision}"], 5)
+        except GameUnavailable:
+            pass
+        self.cam_collision = None
 
     def play_level(self, path, head, legs, folder=None, on_leg=None, timeout=900, spike=False, retry=None):
         """Loads, builds and plays one level's route; returns (summary row, leg records). With
@@ -2524,6 +2561,9 @@ class Session:
         game = Game(self.con, calibrate(head) or (0.0, 0.0, 0.0), self.turn_rate, self.exit_wait)
         game.pid = self.pid
         game.stream = self.stream
+        if self.thirdperson:
+            self.third_person()
+            game.thirdperson = True
         if self.slow != 1.0:
             self.con.send(f"host_timescale {self.slow}")
         if spike:
@@ -2587,6 +2627,8 @@ def main():
     ap.add_argument("--exit-wait", type=float, default=EXIT_WAIT,
                     help="seconds to wait at a shut exit door (a laser burning through the "
                          "turrets in its way, a platform arriving); 0 doesn't wait")
+    ap.add_argument("--thirdperson", action="store_true",
+                    help="watch from behind the player (camera only; it plays the same)")
     ap.add_argument("--stream", action="store_true",
                     help="for watching on stream: smooth turning, short on-screen step text")
     a = ap.parse_args()
@@ -2632,7 +2674,7 @@ def main():
     try:
         with Session(launch=a.launch, port=a.port, password=a.password, restart_every=a.restart_every,
                      turn_rate=math.inf if a.fast else TURN_RATE, slow=a.slow, keep=a.keep,
-                     stream=a.stream, exit_wait=a.exit_wait) as session:
+                     stream=a.stream, exit_wait=a.exit_wait, thirdperson=a.thirdperson) as session:
             for path, head, legs in routes:
                 if out and (out / "STOP").exists():
                     print(f"{out / 'STOP'} found: stopping", flush=True)
