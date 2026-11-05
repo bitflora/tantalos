@@ -63,6 +63,57 @@ class CheckpointTests(unittest.TestCase):
 
 
 class GenerationTests(unittest.TestCase):
+    def test_batched_prefill_matches_independent_greedy_and_scores(self):
+        torch.manual_seed(17)
+        for norm in [False, True]:
+            model = GPT(Config(16, 16, 2, 2, 8, dropout=0, qk_norm=norm)).eval()
+            prompts = [[1, 2], [3, 4, 5], [3, 4, 5], [6], [7] * 14, [8, 9], [10, 11, 12]]
+            expected = [model.generate([p], 5, 0, top_k=1)[0] for p in prompts]
+            calls = []
+            hook = model.register_forward_pre_hook(lambda m, args: calls.append(tuple(args[0].shape)))
+            actual, scores = model.generate_many(prompts, 5, 0, top_k=1, batch=3, logprob=True)
+            hook.remove()
+            self.assertEqual(actual, expected)
+            self.assertTrue(any(b > 1 and t > 1 for b, t in calls))
+            with torch.no_grad():
+                for p, seq, score in zip(prompts, actual, scores):
+                    reference = 0
+                    for j, token in enumerate(seq):
+                        logits, _ = model(torch.tensor([p + seq[:j]]))
+                        reference += logits[0, -1].log_softmax(-1)[token].item()
+                    self.assertAlmostEqual(score, reference, places=5)
+
+    def test_prefill_preserves_constrained_refills_and_sample_order(self):
+        class Constraint:
+            def __init__(self):
+                self.finished = []
+
+            def __call__(self, idx, seqs):
+                mask = torch.zeros(len(idx), 16, dtype=torch.bool)
+                for r, (i, seq) in enumerate(zip(idx, seqs)):
+                    if len(seq) >= i % 3 + 1:
+                        mask[r, 0] = True
+                    else:
+                        mask[r, 1:4] = True
+                return mask
+
+            def finish(self, i, seq):
+                self.finished.append(i)
+                return seq
+
+        model = GPT(Config(16, 16, 2, 2, 8, dropout=0, qk_norm=True)).eval()
+        prompts = [[1, 2], [3, 4, 5], [1, 2], [6, 7, 8], [9, 10], [9, 10]]
+        results = []
+        for size in [1, 4]:
+            constraint = Constraint()
+            torch.manual_seed(7)
+            seqs, scores = model.generate_many(prompts, 5, 0, batch=3, constrain=constraint,
+                                               logprob=True, prefill_batch=size)
+            self.assertEqual(sorted(constraint.finished), list(range(len(prompts))))
+            results.append((seqs, scores))
+        self.assertEqual(results[0][0], results[1][0])
+        torch.testing.assert_close(torch.tensor(results[0][1]), torch.tensor(results[1][1]))
+
     def test_last_only_preserves_logits_and_full_kv_cache(self):
         for norm in [False, True]:
             model = GPT(Config(16, 16, 2, 2, 8, dropout=0, qk_norm=norm)).eval()

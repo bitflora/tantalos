@@ -274,13 +274,14 @@ class GPT(nn.Module):
 
     @torch.no_grad()
     def generate_many(self, prompts, max_new, stop, temperature=1.0, top_k=None, batch=64, constrain=None,
-                      logprob=False):
+                      logprob=False, prefill_batch=4):
         """`generate` for many prompts, `batch` rows at a time, started in the order given: a row
         that finishes starts the next prompt at once, as in `generate_refill`, instead of waiting
         for the longest row of its batch (Goblin's constrained plans: half run to `max_new`, the
-        rest end within a few dozen tokens). Each prompt runs alone through the net once and its
-        keys and values are copied into its row; consecutive copies of one prompt (k samples of
-        a level) share that run. Returns the new ids per prompt, without `stop`.
+        rest end within a few dozen tokens). Up to `prefill_batch` distinct, similarly sized
+        upcoming prompts run together, and their keys and values are copied into decoding rows.
+        Repeated prompts share that work. Prefetch is bounded to one decoding batch of prompts,
+        with at most four unique prefills by default. Returns ids in input order, without `stop`.
 
         `constrain`, if given, is asked before every token: `constrain(idx, seqs)` with the
         prompt index of each row still writing and its new ids so far returns a bool mask
@@ -300,19 +301,46 @@ class GPT(nn.Module):
         n = len(prompts)
         if n == 0:
             return ([], []) if logprob else []
+        if prefill_batch < 1:
+            raise ValueError("prefill_batch must be positive")
         block = self.cfg.block_size
         size = min(block, max(len(p) for p in prompts) + max_new)
         b = min(batch, n)
         caches = None
-        memo = {}  # the last prompt run: its ids, keys and values per layer, last logits
+        memo = {}  # a bounded group of prefetched prompts, including repeated copies
 
-        def run(p):
-            if memo.get("ids") != p:
-                first = [{"size": len(p)} for _ in self.blocks]
+        def run(i):
+            key = tuple(prompts[i])
+            if key not in memo:
+                memo.clear()
+                unique = dict.fromkeys([key])
+                for p in prompts[i + 1:i + b]:
+                    if len(unique) >= prefill_batch:
+                        break
+                    if max(len(p), len(key)) > 2 * min(len(p), len(key)):
+                        break
+                    unique.setdefault(tuple(p), None)
+                pending = list(unique)
+                width = max(map(len, pending))
+                ids = torch.tensor([[0] * (width - len(p)) + list(p) for p in pending], device=device)
+                positions = mask = None
+                if any(len(p) != width for p in pending):
+                    pads = torch.tensor([width - len(p) for p in pending], device=device)
+                    positions = (torch.arange(width, device=device)[None, :] - pads[:, None]).clamp(min=0)
+                    real = torch.arange(width, device=device)[None, :] >= pads[:, None]
+                    causal = torch.ones((width, width), dtype=torch.bool, device=device).tril()
+                    mask = ((causal[None] & real[:, None, :])
+                            | torch.eye(width, dtype=torch.bool, device=device)[None])[:, None]
+                first = [{"size": width} for _ in self.blocks]
                 with amp:
-                    lg, _ = self(torch.tensor([p], device=device), caches=first, last_only=True)
-                memo.update(ids=p, kv=[(c["k"], c["v"]) for c in first], logits=lg[0, -1].float())
-            return memo["kv"], memo["logits"]
+                    lg, _ = self(ids, caches=first, positions=positions, mask=mask, last_only=True)
+                for row, p in enumerate(pending):
+                    pad = width - len(p)
+                    # Own compact tensors, so cached rows do not retain the padded batch.
+                    kv = [(c["k"][row:row + 1, :, pad:].clone(),
+                           c["v"][row:row + 1, :, pad:].clone()) for c in first]
+                    memo[p] = kv, lg[row, -1].float().clone()
+            return memo[key]
 
         slots = [None] * b  # the prompt each row is writing (None: no more to start)
         outs = [None] * n
@@ -328,7 +356,7 @@ class GPT(nn.Module):
                 slots[r] = None
                 return
             i, started = started, started + 1
-            kv, lg = run(prompts[i])
+            kv, lg = run(i)
             if caches is None:
                 # Zeros, not new_empty: a masked-out NaN still poisons attention (0 * NaN). The
                 # dtypes differ under QK-norm.
