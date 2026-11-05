@@ -445,20 +445,33 @@ class Levels:
         learn = [False] * (len(conds) + 2) + [True] * (len(level) + 1)
         return ids, learn
 
+    def prepare(self, i, drop):
+        """Prefix and learned tokens as CPU tensors; EOS is added by batch_prepared."""
+        p = random.uniform(0, drop)
+        conds = [c if random.random() >= p else a for c, a in zip(self.conds[i], self.any_ids)]
+        return (torch.tensor([BOS] + conds + [SEP]),
+                self.level_ids[self.offsets[i] : self.offsets[i + 1]])
+
     def batch(self, idx, drop, device):
         """Inputs, targets (-100 = ignored), padded to the longest sequence in the batch, and
         the number of targets (counted here, so the caller needn't wait on the GPU for it)."""
-        seqs = [self.sequence(i, drop) for i in idx]
-        width = max(len(ids) for ids, _ in seqs) - 1
-        x = torch.full((len(seqs), width), PAD, dtype=torch.long)
-        y = torch.full((len(seqs), width), -100, dtype=torch.long)
-        for row, (ids, learn) in enumerate(seqs):
-            n = len(ids) - 1
-            x[row, :n] = torch.tensor(ids[:-1])
-            target = torch.tensor(ids[1:])
-            target[~torch.tensor(learn[1:])] = -100
-            y[row, :n] = target
-        targets = int((y != -100).sum())
+        return self.batch_prepared([self.prepare(i, drop) for i in idx], device)
+
+    @staticmethod
+    def batch_prepared(seqs, device):
+        """Copy stored token spans directly, without converting every token to Python."""
+        width = max(len(prefix) + len(tokens) for prefix, tokens in seqs)
+        pinned = torch.device(device).type == "cuda"
+        x = torch.full((len(seqs), width), PAD, dtype=torch.long, pin_memory=pinned)
+        y = torch.full((len(seqs), width), -100, dtype=torch.long, pin_memory=pinned)
+        targets = 0
+        for row, (prefix, tokens) in enumerate(seqs):
+            p, n = len(prefix), len(tokens)
+            x[row, :p] = prefix
+            x[row, p:p + n] = tokens
+            y[row, p - 1:p + n - 1] = tokens
+            y[row, p + n - 1] = EOS
+            targets += n + 1
         return x.to(device, non_blocking=True), y.to(device, non_blocking=True), targets
 
 
@@ -561,6 +574,16 @@ class GoblinPlans(Levels):
         ids = [BOS] + level + [SEP] + plan + [EOS]
         learn = [False] * (len(level) + 2) + [True] * (len(plan) + 1)
         return ids, learn
+
+    def prepare(self, i, drop=0.0):
+        a, b = int(self.groups[i]), int(self.groups[i + 1])
+        s = a + self.shortest[i]
+        j = random.randrange(s, b) if s < b and random.random() < ALTERNATIVE_SHARE else random.randrange(a, s)
+        level = self.prompt_ids[self.prompt_offsets[i] : self.prompt_offsets[i + 1]]
+        prefix = torch.empty(len(level) + 2, dtype=torch.long)
+        prefix[0], prefix[-1] = BOS, SEP
+        prefix[1:-1] = level
+        return prefix, self.level_ids[self.offsets[j] : self.offsets[j + 1]]
 
 
 class LengthStats:
