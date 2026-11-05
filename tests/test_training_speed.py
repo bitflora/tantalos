@@ -62,6 +62,27 @@ class CheckpointTests(unittest.TestCase):
         torch.testing.assert_close(loaded(tokens)[0], model(tokens)[0])
 
 
+class GenerationTests(unittest.TestCase):
+    def test_last_only_preserves_logits_and_full_kv_cache(self):
+        for norm in [False, True]:
+            model = GPT(Config(16, 16, 2, 2, 8, dropout=0, qk_norm=norm)).eval()
+            tokens = torch.tensor([[1, 2, 3], [4, 5, 6]])
+            full = [{"size": 5} for _ in model.blocks]
+            last = [{"size": 5} for _ in model.blocks]
+            with torch.no_grad():
+                expected, _ = model(tokens, caches=full)
+                actual, _ = model(tokens, caches=last, last_only=True)
+                torch.testing.assert_close(actual, expected[:, -1:])
+                for a, b in zip(full, last):
+                    for key in ["k", "v"]:
+                        torch.testing.assert_close(a[key][:, :, :3], b[key][:, :, :3])
+                torch.testing.assert_close(model(tokens[:, :1], caches=full, start=3)[0],
+                                           model(tokens[:, :1], caches=last, start=3)[0])
+            self.assertEqual(model(tokens)[0].shape, (2, 3, 16))
+            with self.assertRaises(ValueError):
+                model(tokens, tokens, last_only=True)
+
+
 if __name__ == "__main__":
     torch.set_num_threads(1)
     unittest.main()

@@ -116,10 +116,13 @@ class GPT(nn.Module):
     def n_params(self):
         return sum(p.numel() for p in self.parameters()) - self.pos.weight.numel()
 
-    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None, last_only=False):
         """`caches` (one dict per layer) and `start` (position of idx's first token) are for
         generation: feed the prompt once, then one new token per call. A padded batch gives
-        each row's `positions` (batch x tokens) and the attention `mask` instead (Block)."""
+        each row's `positions` (batch x tokens) and the attention `mask` instead (Block).
+        `last_only` projects just the final position during generation; losses need all positions."""
+        if last_only and targets is not None:
+            raise ValueError("last_only cannot be used with training targets")
         t = idx.shape[1]
         if positions is None:
             assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
@@ -127,7 +130,7 @@ class GPT(nn.Module):
         x = self.drop(self.tok(idx) + self.pos(positions))
         for i, block in enumerate(self.blocks):
             x = block(x, caches[i] if caches is not None else None, mask)
-        logits = self.head(self.ln_f(x))
+        logits = self.head(self.ln_f(x[:, -1:, :] if last_only else x))
         if targets is None:
             return logits, None
         loss = F.cross_entropy(
@@ -169,7 +172,8 @@ class GPT(nn.Module):
             steps = min(max_new, self.cfg.block_size - n)
             caches = [{"size": n + steps} for _ in self.blocks]
             with amp:
-                logits, _ = self(torch.tensor([prompts[i] for i in rows], device=device), caches=caches)
+                logits, _ = self(torch.tensor([prompts[i] for i in rows], device=device), caches=caches,
+                                last_only=True)
             done = torch.zeros(len(rows), dtype=torch.bool, device=device)
             new = []
             for step in range(steps):
@@ -213,7 +217,7 @@ class GPT(nn.Module):
         b = min(batch, n)
         with amp:
             first = [{"size": p} for _ in self.blocks]
-            prompt_logits, _ = self(torch.tensor([prompt], device=device), caches=first)
+            prompt_logits, _ = self(torch.tensor([prompt], device=device), caches=first, last_only=True)
         prompt_logits = prompt_logits[0, -1].float()
         caches = []
         for c in first:
@@ -306,7 +310,7 @@ class GPT(nn.Module):
             if memo.get("ids") != p:
                 first = [{"size": len(p)} for _ in self.blocks]
                 with amp:
-                    lg, _ = self(torch.tensor([p], device=device), caches=first)
+                    lg, _ = self(torch.tensor([p], device=device), caches=first, last_only=True)
                 memo.update(ids=p, kv=[(c["k"], c["v"]) for c in first], logits=lg[0, -1].float())
             return memo["kv"], memo["logits"]
 
@@ -424,7 +428,7 @@ class GPT(nn.Module):
         causal = torch.ones((n, n), dtype=torch.bool, device=device).tril()
         # A pad looks only at itself, so no row of the softmax is empty.
         mask = (causal[None] & real[:, None, :n]) | torch.eye(n, dtype=torch.bool, device=device)[None]
-        logits, _ = self(ids, caches=caches, positions=pos, mask=mask[:, None])
+        logits, _ = self(ids, caches=caches, positions=pos, mask=mask[:, None], last_only=True)
         done = torch.zeros(b, dtype=torch.bool, device=device)
         # A row's last step: where it reaches max_new, or the end of the block.
         last = torch.clamp(self.cfg.block_size - lens, max=max_new) - 1
