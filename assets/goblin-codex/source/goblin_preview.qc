@@ -22,8 +22,26 @@ $attachment "weapon_bone" "weapon_bone" 0 0 0 rotate 0 0 0
 $attachment "portalgun" "weapon_bone" 0 0 0 rotate 0 0 0
 $sequence "ref" "player_idle.smd" fps 24
 $sequence "idle_raw" "player_idle.smd" fps 24
-$sequence "portalgun_standing_idle" "player_idle.smd" fps 24 loop
-$sequence "portalgun_crouch_idle" "player_crouch.smd" fps 24 loop
+$animation "run_nw" "player_run_nw.smd" fps 30 LX LY loop
+$animation "run_n" "player_run_n.smd" fps 30 LX LY loop
+$animation "run_ne" "player_run_ne.smd" fps 30 LX LY loop
+$animation "run_w" "player_run_w.smd" fps 30 LX LY loop
+$animation "run_center" "player_idle.smd" fps 30
+$animation "run_e" "player_run_e.smd" fps 30 LX LY loop
+$animation "run_sw" "player_run_sw.smd" fps 30 LX LY loop
+$animation "run_s" "player_run_s.smd" fps 30 LX LY loop
+$animation "run_se" "player_run_se.smd" fps 30 LX LY loop
+$animation "crouchwalk_nw" "player_crouchwalk_nw.smd" fps 30 LX LY loop
+$animation "crouchwalk_n" "player_crouchwalk_n.smd" fps 30 LX LY loop
+$animation "crouchwalk_ne" "player_crouchwalk_ne.smd" fps 30 LX LY loop
+$animation "crouchwalk_w" "player_crouchwalk_w.smd" fps 30 LX LY loop
+$animation "crouchwalk_center" "player_crouch.smd" fps 30
+$animation "crouchwalk_e" "player_crouchwalk_e.smd" fps 30 LX LY loop
+$animation "crouchwalk_sw" "player_crouchwalk_sw.smd" fps 30 LX LY loop
+$animation "crouchwalk_s" "player_crouchwalk_s.smd" fps 30 LX LY loop
+$animation "crouchwalk_se" "player_crouchwalk_se.smd" fps 30 LX LY loop
+$sequence "portalgun_standing_idle" "player_idle.smd" fps 24 loop ACT_MP_STAND_PRIMARY 1
+$sequence "portalgun_crouch_idle" "player_crouch.smd" fps 24 loop ACT_MP_CROUCH_PRIMARY 1
 $sequence "portalgun_standing_jump" "player_jump.smd" fps 24
 $sequence "portalgun_standing_jump_blue_paint" "player_jump.smd" fps 24
 $sequence "portalgun_jump_float" "player_float.smd" fps 24 loop
@@ -33,8 +51,22 @@ $sequence "portalgun_jump_land" "player_idle.smd" fps 24
 $sequence "portalgun_tractorbeam_float" "player_float.smd" fps 24 loop
 $sequence "portalgun_standing_fire" "player_idle.smd" fps 24
 $sequence "portalgun_crouch_fire" "player_crouch.smd" fps 24
-$sequence "portalgun_crouchWalk" "player_crouchwalk.smd" fps 24 loop
-$sequence "portalgun_run" "player_run.smd" fps 24 loop
+$sequence "portalgun_run" {
+ "run_nw" "run_n" "run_ne" "run_w" "run_center" "run_e" "run_sw" "run_s" "run_se"
+ blendwidth 3
+ blend move_y -1 1
+ blend move_x 1 -1
+ loop
+ ACT_MP_RUN_PRIMARY 1
+}
+$sequence "portalgun_crouchWalk" {
+ "crouchwalk_nw" "crouchwalk_n" "crouchwalk_ne" "crouchwalk_w" "crouchwalk_center" "crouchwalk_e" "crouchwalk_sw" "crouchwalk_s" "crouchwalk_se"
+ blendwidth 3
+ blend move_y -1 1
+ blend move_x 1 -1
+ loop
+ ACT_MP_CROUCHWALK_PRIMARY 1
+}
 $sequence "portalgun_standing_aimmatrix" {
  "player_aim_0_0.smd"
  "player_aim_0_1.smd"
@@ -67,8 +99,8 @@ $sequence "portalgun_crouch_aimmatrix" {
  subtract "idle_raw" 0
  delta
 }
-$sequence "nogun_standing_idle" "player_idle.smd" fps 24 loop
-$sequence "nogun_crouch_idle" "player_crouch.smd" fps 24 loop
+$sequence "nogun_standing_idle" "player_idle.smd" fps 24 loop ACT_MP_STAND_IDLE 1
+$sequence "nogun_crouch_idle" "player_crouch.smd" fps 24 loop ACT_MP_CROUCH_IDLE 1
 $sequence "nogun_standing_jump" "player_jump.smd" fps 24
 $sequence "nogun_standing_jump_blue_paint" "player_jump.smd" fps 24
 $sequence "nogun_jump_float" "player_float.smd" fps 24 loop
@@ -78,8 +110,22 @@ $sequence "nogun_jump_land" "player_idle.smd" fps 24
 $sequence "nogun_tractorbeam_float" "player_float.smd" fps 24 loop
 $sequence "nogun_standing_fire" "player_idle.smd" fps 24
 $sequence "nogun_crouch_fire" "player_crouch.smd" fps 24
-$sequence "nogun_crouchWalk" "player_crouchwalk.smd" fps 24 loop
-$sequence "nogun_run" "player_run.smd" fps 24 loop
+$sequence "nogun_run" {
+ "run_nw" "run_n" "run_ne" "run_w" "run_center" "run_e" "run_sw" "run_s" "run_se"
+ blendwidth 3
+ blend move_y -1 1
+ blend move_x 1 -1
+ loop
+ ACT_MP_RUN 1
+}
+$sequence "nogun_crouchWalk" {
+ "crouchwalk_nw" "crouchwalk_n" "crouchwalk_ne" "crouchwalk_w" "crouchwalk_center" "crouchwalk_e" "crouchwalk_sw" "crouchwalk_s" "crouchwalk_se"
+ blendwidth 3
+ blend move_y -1 1
+ blend move_x 1 -1
+ loop
+ ACT_MP_CROUCHWALK 1
+}
 $sequence "nogun_standing_aimmatrix" {
  "player_aim_0_0.smd"
  "player_aim_0_1.smd"
@@ -113,5 +159,5 @@ $sequence "nogun_crouch_aimmatrix" {
  delta
 }
 $sequence "idle" "player_idle.smd" fps 24 loop ACT_IDLE 1
-$sequence "walk" "player_run.smd" fps 24 loop ACT_WALK 1
-$sequence "run" "player_run.smd" fps 30 loop ACT_RUN 1
+$sequence "walk" "run_n" fps 24 loop ACT_WALK 1
+$sequence "run" "run_n" fps 30 loop ACT_RUN 1

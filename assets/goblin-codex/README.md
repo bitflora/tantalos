@@ -60,7 +60,9 @@ named model, selects it for the player, and enables third person. It enables
 `sv_cheats` for this preview session.
 
 The replacement provides Portal 2's `portalgun_*` and `nogun_*` sequence names with
-custom idle, walk, jump and crouch motions, plus an additive head aim matrix. The
+custom idle, walk, jump and crouch motions, plus an additive head aim matrix.
+Standing and crouched movement blend eight directional steps with a centered idle.
+The walk cycle alternates planted feet and lifted steps with a slight body bob. The
 Source rig adds a seventeenth helper bone for the game's world portal gun. The
 first-person portal gun and hands use the game's existing viewmodel. Model height
 is approximately 69 Source units; the game's player collision hull and camera

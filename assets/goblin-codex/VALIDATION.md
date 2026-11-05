@@ -8,7 +8,7 @@
 - Both Source models compiled successfully with Valve's Portal 2 compiler.
   The compiler splits the model into three meshes to honor its vertex limits;
   this is the expected vertex-count warning, rather than lost geometry.
-- Final package: 18,359,665 bytes; all 14 VPK entries read back byte-for-byte.
+- Final package: 18,393,077 bytes; all 14 VPK entries read back byte-for-byte.
   MDL, VVD and every VTX variant have matching component checksums. Both current
   `.vtx` and legacy `.dx90.vtx` index filenames are included.
 - Texture: DXT1 with a full 12-level mip pyramid. Valve's own decoder reads it
@@ -26,15 +26,20 @@
   for precaching were removed before capturing the clean portal proof.
 - `goblin-in-game.png` and `goblin-through-portal.png` were captured by the game,
   converted from its TGA screenshots to PNG, and visually inspected.
+- All 16 new directional clips were checked for matching loop endpoints,
+  alternating foot lift, and stationary planted ankles after accounting for
+  travel. The compiled movement activities and blend axes match stock Bendy.
+- Third-person showroom captures show distinct gait poses during unarmed forward
+  walking, armed strafing, and armed backward crouch-walking.
+- The installed campaign alias loaded as `models/player/chell/player.mdl` in
+  `sp_a2_laser_intro`, where a third-person capture showed the Goblin mid-stride.
 
 ## Limits
 
-- Mechanical locomotion and the low gun-holding pose are first-pass animations.
-  Full directional blending, elaborate aiming/hand poses, and first-person
-  goblin hands are not implemented.
+- Locomotion blends in eight directions for both standing and crouched movement.
+  Aiming uses the existing head and low gun-holding poses.
 - Camera height and collision hull use the existing game's settings.
 - No distance LODs yet; the mesh has approximately 68k triangles.
-- The community-player asset path was tested directly. A separate Workshop map,
-  campaign Chell replacement, and co-op Atlas/P-body replacements were not tested.
+- Gameplay checks covered the isolated showroom and the installed campaign alias.
 
 This file is updated with observed results; untested behavior is not marked passed.
