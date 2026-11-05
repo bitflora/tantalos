@@ -4,6 +4,7 @@ import sys
 import random
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "train"))
 from model import Config, GPT
 from sample import load_checkpoint
 from data import Levels, GoblinPlans, PAD
+from train import batches
 
 
 def datasets():
@@ -23,6 +25,23 @@ def datasets():
 
 
 class BatchTests(unittest.TestCase):
+    def test_goblin_buckets_selected_plans_without_resampling(self):
+        _, goblin = datasets()
+        lengths = [1, 20, 2, 19, 3, 18, 4, 17]
+        selected = [(torch.tensor([1, 5, 3]), torch.full((n,), i + 10))
+                    for i, n in enumerate(lengths)]
+        with patch.object(goblin, "prepare", side_effect=selected) as prepare, \
+             patch("train.random.shuffle"):
+            stream = batches(goblin, 2, 4, 0, "cpu")
+            got = [next(stream) for _ in range(4)]
+        self.assertEqual(prepare.call_count, 8)
+        self.assertEqual([x.shape[1] for x, _, _ in got], [5, 7, 21, 23])
+        self.assertEqual(sum(n for _, _, n in got), sum(lengths) + 8)
+        actual = [x[row, 3:3 + int((y[row] != -100).sum()) - 1].tolist()
+                  for x, y, _ in got for row in range(2)]
+        expected = [tokens.tolist() for _, tokens in sorted(selected, key=lambda s: len(s[1]))]
+        self.assertEqual(actual, expected)
+
     def test_direct_copies_match_sequences_and_rng(self):
         for levels in datasets():
             for seed in range(20):

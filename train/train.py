@@ -51,7 +51,7 @@ import sample  # noqa: E402
 
 PAUSED_EXIT = 3  # exit code when a PAUSE file stopped training (run.py looks for it)
 import goblin_eval  # noqa: E402
-from data import COND_TOKENS, Away, Vocab, load, load_goblin  # noqa: E402
+from data import COND_TOKENS, Away, GoblinPlans, Vocab, load, load_goblin  # noqa: E402
 from record import GOBLIN, task_name  # noqa: E402
 from model import GPT, Config  # noqa: E402
 
@@ -466,11 +466,21 @@ def batches(levels, size, bucket, drop, device):
     """Endless training batches: `bucket` batches' worth of random levels at a time, sorted by
     length and dealt out as batches in random order, so a batch's levels are of similar length
     and pad little. (In v3 data, targets fill 85% of a batch's positions this way, and 52% in
-    random batches.)"""
-    lengths = levels.lengths()
+    random batches.) Goblin selects each plan before sorting, so alternative plans are
+    bucketed by their actual lengths and never resampled after being assigned a batch."""
+    prepare_first = isinstance(levels, GoblinPlans) and bucket > 1
+    lengths = None if prepare_first else levels.lengths()
     n = size * max(bucket, 1)
     while True:
         idx = [random.randrange(len(levels)) for _ in range(n)]
+        if prepare_first:
+            seqs = [levels.prepare(i, drop) for i in idx]
+            seqs.sort(key=lambda seq: len(seq[0]) + len(seq[1]))
+            chunks = [seqs[i : i + size] for i in range(0, n, size)]
+            random.shuffle(chunks)
+            for chunk in chunks:
+                yield levels.batch_prepared(chunk, device)
+            continue
         if bucket > 1:
             idx.sort(key=lengths.__getitem__)
         chunks = [idx[i : i + size] for i in range(0, n, size)]
