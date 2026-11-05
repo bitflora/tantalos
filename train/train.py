@@ -225,7 +225,8 @@ def main():
     number_of[numbers] = torch.arange(len(numbers))
 
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout, qk_norm=True)
-    init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
+    # Optimizer state in a warm-start checkpoint is unused; never put it on the GPU.
+    init = torch.load(args.init, map_location="cpu", weights_only=False) if args.init else None
     if init:
         # The model's shape comes from the checkpoint; --layers/--heads/--embd are ignored. Its
         # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
@@ -253,7 +254,7 @@ def main():
                 own[k] = v
         row = {t: i for i, t in enumerate(init["vocab"])}
         kept = [(i, row[t]) for i, t in enumerate(vocab.itos) if t in row]
-        own["tok.weight"][[i for i, _ in kept]] = state["tok.weight"][[j for _, j in kept]]
+        own["tok.weight"][[i for i, _ in kept]] = state["tok.weight"][[j for _, j in kept]].to(device)
         own["head.weight"] = own["tok.weight"]
         n = state["pos.weight"].shape[0]
         own["pos.weight"][:n] = state["pos.weight"]
@@ -261,14 +262,17 @@ def main():
         new = len(vocab) - len(kept)
         print(f"weights from {args.init}" + (f" ({new} new tokens, block {n} -> {args.block})"
                                              if new or n != args.block else ""))
+        del state, own, v
+    del init
     if args.resume and (out / "last.pt").exists():
-        ck = torch.load(out / "last.pt", map_location=device, weights_only=False)
+        ck = torch.load(out / "last.pt", map_location="cpu", weights_only=False)
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["optimizer"])
         step, best = ck["step"], ck["best_val"]
         done_before = ck.get("trained_s", 0.0)
         print(f"resumed at step {step}, after {done_before / 3600:.2f} h of training")
-    if init or step:
+        del ck
+    if args.init or step:
         # Otherwise a run continuing another draws the very batches that run drew first. (The
         # validation split stays: it is seeded separately, by --seed alone.)
         random.seed(f"{args.seed} {args.init} {step}")

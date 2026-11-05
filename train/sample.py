@@ -30,9 +30,11 @@ DEFAULT_GLADOS = ROOT / "target" / "release" / f"glados-score{EXE}"
 
 
 def load_checkpoint(path, device):
-    ck = torch.load(path, map_location=device, weights_only=False)
+    """Load inference weights and return metadata, without retaining training tensors."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
     model = GPT(Config(**ck["model_config"])).to(device)
-    model.load_state_dict(ck["model"])
+    model.load_state_dict(ck.pop("model"))
+    ck.pop("optimizer", None)
     model.eval()
     return model, Vocab(ck["vocab"]), ck
 
