@@ -13,7 +13,9 @@ checks them in the game (train/portal2.py) and compares. Writes
   game's word is final, so retrain.sh trains on this file without relabelling it.
 
 If it stops early (the game crashed too often, ...), run it again with --resume to keep the
-levels already checked.
+levels already checked. With --stop-file F it stops between levels once F exists (the game quit
+and its autosaves put back) and exits 3; --resume then carries on. The seed is kept in
+<out>/check.json, so --resume picks the same levels without being given it.
 
 If the game can't be used (already running, a different build, ...) it says so in the
 report and exits 0, so an unattended run carries on.
@@ -99,17 +101,24 @@ def main():
                     help="keep the levels already checked in <out>/game.jsonl (same samples and options)")
     ap.add_argument("--max-crashes", type=int, default=None,
                     help="give up after this many game crashes (default 10, or 5%% of the levels if more)")
+    ap.add_argument("--stop-file", help="stop between levels once this file exists (exit 3; --resume carries on)")
     ap.add_argument("--no-launch", action="store_true",
                     help="use a game you started with -insecure -netconport PORT -netconpassword PW")
     ap.add_argument("--port", type=int, help="with --no-launch: its -netconport")
     ap.add_argument("--password", default="", help="with --no-launch: its -netconpassword")
     a = ap.parse_args()
-    a.seed = resolve(a.seed)
     if not a.dir and not a.samples:
         ap.error("give an evaluation directory or --samples")
     samples = Path(a.samples or Path(a.dir) / "samples.jsonl")
     out = Path(a.out or (Path(a.dir) if a.dir else samples.parent) / "ingame")
     out.mkdir(parents=True, exist_ok=True)
+    meta_path = out / "check.json"  # what the .p2c files were made from, for --resume
+    meta = {}
+    if a.resume and meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if a.seed is None:
+            a.seed = meta.get("seed")
+    a.seed = resolve(a.seed)
 
     rng = random.Random(a.seed)
     records, seen = [], set()
@@ -130,7 +139,8 @@ def main():
     p2c = out / "p2c"
     files = [p2c / f"{i:05}.p2c" for i in range(1, len(picked) + 1)]
     results_path = out / "game.jsonl"
-    if not (a.resume and all(f.exists() for f in files)):
+    want = {"seed": a.seed, "samples": str(samples), "picked": len(picked), "reject_share": a.reject_share}
+    if not (a.resume and meta == want and any(f.exists() for f in files)):
         if a.resume:
             print("can't resume: the .p2c files don't match these levels; starting over", flush=True)
         if p2c.exists():
@@ -140,10 +150,21 @@ def main():
                        input="\n".join(r["tokens"] for r in picked) + "\n",
                        capture_output=True, text=True, check=True)
         results_path.unlink(missing_ok=True)
+        meta_path.write_text(json.dumps(want) + "\n", encoding="utf-8")
+    # --p2c-all writes no file for a level it can't decode (the numbering keeps its gap), so check
+    # only the files that exist and keep each paired with its level.
+    pairs = [(f, r) for f, r in zip(files, picked) if f.exists()]
+    if len(pairs) < len(files):
+        print(f"{len(files) - len(pairs)} levels have no .p2c (didn't decode); checking {len(pairs)}", flush=True)
+    files, picked = [f for f, _ in pairs], [r for _, r in pairs]
     report_path = out / "report.md"
     try:
+        stop = (lambda: Path(a.stop_file).exists()) if a.stop_file else None
         portal2.check(files, results_path, launch_game=not a.no_launch, max_crashes=a.max_crashes,
-                      progress=lambda s: print(s, flush=True), port=a.port, password=a.password)
+                      progress=lambda s: print(s, flush=True), port=a.port, password=a.password, stop=stop)
+    except portal2.Stopped as e:
+        print(f"{e}; the game is closed. To carry on: the same command with --resume", flush=True)
+        sys.exit(3)
     except portal2.GameUnavailable as e:
         text = f"## In-game editor check\n\nSkipped: Portal 2 unavailable ({e}).\n"
         report_path.write_text(text, encoding="utf-8")

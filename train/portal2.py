@@ -38,6 +38,11 @@ class GameUnavailable(Exception):
     pass
 
 
+class Stopped(Exception):
+    """check() was asked to stop (its `stop` callable): the game was quit and the autosaves put
+    back; the levels checked so far are in out_path, so checking again carries on."""
+
+
 # --- the process ---------------------------------------------------------------------------
 
 def game_process():
@@ -419,7 +424,7 @@ def check_one(path, n, con, pid, timeout=20, settle=0.1, keep_vmf=None):
 
 
 def check(files, out_path, launch_game=False, timeout=20, progress=print, restart_every=100,
-          max_crashes=None, port=None, password="", canary_every=50, max_bad=3, keep_vmf=None):
+          max_crashes=None, port=None, password="", canary_every=50, max_bad=3, keep_vmf=None, stop=None):
     """Check .p2c files, appending one JSON line each to out_path (resumable). With
     launch_game, the game is restarted every `restart_every` levels and after a crash (exports
     slow from ~0.15 s to ~0.6 s over the first 150 levels of a session, and neither
@@ -436,7 +441,10 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
     (a level the editor must call invalid) is checked first and then every `canary_every`
     levels. Results are only written
     once a canary after them has passed; if it fails, the game is restarted and those levels
-    are checked again. With keep_vmf, each valid level's export goes there as <stem>.vmf."""
+    are checked again. With keep_vmf, each valid level's export goes there as <stem>.vmf.
+    With stop (a callable), it is asked between levels; once it returns true the levels not yet
+    confirmed by a canary go back on the list, the game is quit as usual (autosaves put back) and
+    Stopped is raised. Checking the same files into the same out_path again carries on."""
     out_path = Path(out_path)
     done = set()
     if out_path.exists():
@@ -463,7 +471,11 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
                     progress(f"[{written}/{total} {time.time() - start:6.0f}s]")
             out.flush()
 
-        while todo:
+        stopped = False
+        while todo and not stopped:
+            if stop and stop():
+                stopped = True
+                break
             if launch_game:
                 pid, con = launch(saved)
             else:
@@ -500,6 +512,9 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
                 pending = []
                 healthy = canary_flagged()
                 while healthy and todo and not (launch_game and checked >= restart_every):
+                    if stop and stop():
+                        stopped = True
+                        break
                     path = todo.popleft()
                     r = one(path)
                     checked += 1
@@ -514,11 +529,15 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
                             raise GameUnavailable("the game crashed")
                         break
                     pending.append(r)
-                    if len(pending) >= canary_every or not todo or (launch_game and checked >= restart_every):
+                    if (len(pending) >= canary_every or not todo or (launch_game and checked >= restart_every)
+                            or (stop and stop())):
                         healthy = canary_flagged()
                         if healthy:
                             write(pending)
                             pending = []
+                if stopped:  # unconfirmed levels (if a canary didn't just pass them) go round again
+                    todo.extendleft(reversed([Path(x["file"]) for x in pending]))
+                    pending = []
                 if not healthy:
                     todo.extendleft(reversed([Path(x["file"]) for x in pending]))
                     bad += 1
@@ -531,6 +550,8 @@ def check(files, out_path, launch_game=False, timeout=20, progress=print, restar
                 else:
                     con.close()
                     VMF.unlink(missing_ok=True)
+        if stopped:
+            raise Stopped(f"stopped with {len(todo)} of {total} still to check")
 
 
 def p2c_files(paths):

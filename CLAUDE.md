@@ -41,16 +41,18 @@ A training run is exactly these steps:
 **Pausing a run** (when the user wants the machine back and the run continued later; never on
 your own initiative):
 
-1. `.venv/Scripts/python train/run.py pause NAME`. Only works while it is TRAINING; if it says
-   the run is past training, tell the user and let it finish. It waits until training has saved
-   and stopped (a minute or so, up to 20 if an eval is under way), then prints PAUSED and how many
-   hours are done. If a `wait NAME` was going in the background, it ends with exit code 3
-   (paused): that is not a failure.
-2. Tell the user it is paused and how many hours are done. Nothing else runs; a paused run holds
-   neither the GPU nor the machine.
+1. `.venv/Scripts/python train/run.py pause NAME`. Works while it is TRAINING or INGAME (a
+   Portal 2 check, since 2026-11-07); if it says the run is in another step (evaluating, training
+   away, picking), tell the user and let it finish. It waits until training has saved and stopped
+   (a minute or so, up to 20 if an eval is under way), or until the check has finished the level
+   in hand and quit the game (autosaves put back), then prints PAUSED. If a `wait NAME` was going
+   in the background, it ends with exit code 3 (paused): that is not a failure.
+2. Tell the user it is paused and how many hours are done (or that it paused in its Portal 2
+   check). Nothing else runs; a paused run holds neither the GPU nor the machine.
 3. Only when the user says to carry on: `.venv/Scripts/python train/run.py resume NAME`, then
-   step 2 above (`wait NAME` with `run_in_background`). It trains for the hours still owed and
-   then does every other step as usual. If it refuses (another run going), tell the user why.
+   step 2 above (`wait NAME` with `run_in_background`). It trains for the hours still owed (or
+   carries the Portal 2 check on, keeping the levels already checked) and then does every other
+   step as usual. If it refuses (another run going), tell the user why.
 
 **Training in parts.** When the user asks for part of a run now ("the first 5 hours of a 10-hour
 run"), start the whole run with `--pause-after`: `run.py start NAME --hours 10 --pause-after 5
@@ -78,7 +80,9 @@ for good and records it.
 - Defaults (data/v5b, learning rates, sizes) are already right: add no other options unless
   the user names them. The default data (every `data/v5b/levels-*.jsonl`) holds the Workshop
   levels as their 8 mirrored/turned versions, twice each (`levels-workshop-aug-x2.jsonl`), since
-  2026-10-26; the old 20 plain copies are `data/v5b/workshop-x20.jsonl`, used only if the user
+  2026-10-26; since 2026-11-06 that file is built from `data/ws6/train.jsonl` (the 2026-11-02
+  download, 42,819 levels, about 45% of the lines; the ws5-based one is
+  `data/v5b/workshop-ws5-aug-x2.jsonl`, outside the pattern); the old 20 plain copies are `data/v5b/workshop-x20.jsonl`, used only if the user
   asks (name all the files with `--data`). Anything after `--` goes to train.py. `--no-ingame` skips the Portal 2
   steps: use it only if the user says not to launch the game.
 - **Warm-start by default:** unless the user says otherwise (or names a different `--from`),

@@ -35,7 +35,10 @@ order, with nothing to remember:
      shuffled into the Puzzle Maker folder as glados-ab-NAME-NN; the verdicts go in
      runs/NAME/playtest/results.csv and `abtest.py score NAME --out runs/NAME/playtest` unblinds them
   6. record the run (and NAME/away) in train/runs.csv
-Pausing: `pause NAME` (only while it trains) has train.py save last.pt and exit; the run is then
+Pausing a Portal 2 check (steps 3 and 4): `pause NAME` while it checks has ingame.py finish the
+level in hand, quit the game (its editor autosaves put back) and exit; `resume NAME` carries the
+check on (ingame.py --resume keeps the levels already checked), then does the remaining steps.
+Pausing: `pause NAME` (while it trains) has train.py save last.pt and exit; the run is then
 PAUSED and holds neither the GPU nor the machine. `resume NAME` rebuilds the binaries and trains
 on for the time still owed (--hours less the training already done), continuing the weights,
 optimizer and learning-rate schedule, then does the remaining steps. So a run paused halfway comes out
@@ -45,7 +48,8 @@ Everything lands in runs/NAME: status.json (what it's doing now), run.log (each 
 train.log, evaluate.log, ingame.log, pick.log, eval/report.md.
 
 Settings: data/v5b (all levels-*.jsonl: generated, mutants, and the Workshop levels as their
-8 mirrored/turned versions x2 since 2026-10-26, levels-workshop-aug-x2.jsonl; the old x20 copies
+8 mirrored/turned versions x2 since 2026-10-26, levels-workshop-aug-x2.jsonl, from data/ws6 since
+2026-11-06 (the ws5 one is workshop-ws5-aug-x2.jsonl, outside the pattern); the old x20 copies
 are workshop-x20.jsonl, outside the pattern) unless --data; block 1024, batch 16. A fresh run uses
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
 in runs.csv did. Anything after `--` goes to train.py as is.
@@ -564,6 +568,26 @@ def pipeline(d, steps=STEPS):
 
     game = s.get("ingame", True)
     paused = False
+    resume_check = s.get("resume_check")  # the Portal 2 check a resume carries on (ingame.py --resume)
+    write_status(d, resume_check=None, paused_steps=None)
+
+    def check_game(step, eval_dir, logname):
+        """A Portal 2 check that `pause` can stop between levels; True if it paused."""
+        nonlocal paused
+        args = ["train/ingame.py", str(eval_dir), "--stop-file", str(d / "PAUSE")]
+        if resume_check == step:
+            args.append("--resume")
+        try:  # the game being busy (or crashing) shouldn't sink the run: status flags it
+            if phase("ingame", args, logname, may_pause=True) == PAUSED_EXIT:
+                paused = True
+                left = list(steps[list(steps).index(step):])
+                write_status(d, state="paused", paused=now().isoformat(timespec="seconds"), paused_steps=left)
+                say(f"paused in the Portal 2 check ({step}): run.py resume {name_of(d)} carries it on")
+                return True
+        except RuntimeError as e:
+            say(f"{e} (carrying on)")
+        return False
+
     try:
         if "training" in steps:
             # A resumed run (resume) trains on from last.pt for the time still owed.
@@ -586,10 +610,8 @@ def pipeline(d, steps=STEPS):
         if "evaluating" in steps:
             phase("evaluating", s["evaluate"], "evaluate.log")
         if "ingame" in steps and game:
-            try:  # the game being busy (or crashing) shouldn't sink the run: status flags it
-                phase("ingame", ["train/ingame.py", str(d / "eval")], "ingame.log")
-            except RuntimeError as e:
-                say(f"{e} (carrying on)")
+            if check_game("ingame", d / "eval", "ingame.log"):
+                return
             say(f"in-game check: {ingame_outcome(d)[1]}")
         if "away" in steps and "data" in s and INVALID.exists():
             # Train best.pt away from every level the game has rejected (this run's check adds
@@ -612,10 +634,8 @@ def pipeline(d, steps=STEPS):
             except Exception as e:  # noqa: BLE001
                 say(f"training away failed: {e} (carrying on with best.pt)")
         if "away-ingame" in steps and game and (d / "away" / "eval" / "samples.jsonl").exists():
-            try:
-                phase("ingame", ["train/ingame.py", str(d / "away" / "eval")], "away/ingame.log")
-            except RuntimeError as e:
-                say(f"{e} (carrying on)")
+            if check_game("away-ingame", d / "away" / "eval", "away/ingame.log"):
+                return
             say(f"in-game check after training away: {ingame_outcome(d / 'away')[1]}")
         if s.get("quick"):
             final, why = quick_guard(d, s)
@@ -635,6 +655,7 @@ def pipeline(d, steps=STEPS):
             except RuntimeError as e:
                 say(f"{e} (carrying on)")
             say(f"play-test levels: {picks_outcome(d)[1]}")
+        (d / "PAUSE").unlink(missing_ok=True)  # asked for after the last check: nothing left to pause
         write_status(d, state="done", ended=now().isoformat(timespec="seconds"))
         say("done")
     except BaseException as e:  # noqa: BLE001
@@ -698,6 +719,10 @@ def describe(d):
         lines.append(f"{name}: DONE at {hhmm(s['ended'])}")
     elif state == "stopped":
         lines.append(f"{name}: STOPPED at {hhmm(s['ended'])}")
+    elif state == "paused" and s.get("paused_steps"):
+        which = "after training away" if s["paused_steps"][0] == "away-ingame" else "of best.pt"
+        lines.append(f"{name}: PAUSED at {hhmm(s['paused'])} in the Portal 2 check {which} (training is over;"
+                     f" resume carries the check on, then: {', '.join(s['paused_steps'][1:]) or 'nothing else'})")
     elif state == "paused":
         lines.append(f"{name}: PAUSED at {hhmm(s['paused'])} after {trained_hours(d):.2f} of {s['hours']} hours"
                      " of training (evaluation and the other steps come after it resumes)")
@@ -779,7 +804,9 @@ def describe(d):
         todo.append("Report the log lines above to the user. Don't start the run again until the cause is fixed.")
     if state == "paused":
         lines.append("  NEXT STEPS (do all of them):")
-        lines.append(f"    1. Tell the user runs/{n} is paused and how many hours of training are done (above)."
+        what = ("in its Portal 2 check (above); the game is closed" if s.get("paused_steps")
+                else "and how many hours of training are done (above)")
+        lines.append(f"    1. Tell the user runs/{n} is paused {what}."
                      " It holds neither the GPU nor the machine now.")
         lines.append(f"    2. Only when the user says to carry on:  .venv/Scripts/python train/run.py resume {n}"
                      f"  then  .venv/Scripts/python train/run.py wait {n}  (run_in_background), as after start.")
@@ -891,20 +918,28 @@ def pause(a):
         sys.exit(f"runs/{a.name} is already paused. To carry on: train/run.py resume {a.name}")
     if state not in ACTIVE or not alive(s.get("pid", 0)):
         sys.exit(f"runs/{a.name} isn't running")
-    if state not in ("starting", "training"):
-        sys.exit(f"runs/{a.name} is past training ({state}): only training can pause. "
-                 f"Let it finish (train/run.py wait {a.name}), or stop it")
+    if state not in ("starting", "training", "ingame"):
+        sys.exit(f"runs/{a.name} is {state}: only training and the Portal 2 checks can pause. "
+                 f"Let it finish this step (train/run.py wait {a.name}), or stop it")
     if s.get("broadcast"):
         sys.exit(f"runs/{a.name} belongs to the broadcast {s['broadcast']}: don't pause it")
     (d / "PAUSE").touch()
-    print(f"asked runs/{a.name} to pause; waiting for it to save last.pt (an eval under way finishes first)")
+    if state == "ingame":
+        print(f"asked runs/{a.name} to pause; waiting for its Portal 2 check to finish the level in hand and "
+              "close the game (a minute or so)")
+    else:
+        print(f"asked runs/{a.name} to pause; waiting for it to save last.pt (an eval under way finishes first)")
     give_up = time.time() + 20 * 60
     while time.time() < give_up:
         s = read_status(d) or {}
         if s.get("state") == "paused":
             print(describe(d))
             return
-        if s.get("state") not in ("starting", "training") or not alive(s.get("pid", 0)):
+        if state == "ingame" and s.get("state") in ACTIVE and s.get("state") != "ingame" and alive(s.get("pid", 0)):
+            print(f"runs/{a.name} finished that check before it could pause (now: {s.get('state')}); "
+                  "the request stands: it pauses at its next Portal 2 check, if it has one")
+            return
+        if s.get("state") not in ("starting", "training", "ingame") or not alive(s.get("pid", 0)):
             (d / "PAUSE").unlink(missing_ok=True)
             sys.exit(f"runs/{a.name} left training before it could pause (now: {s.get('state')}); "
                      f"it carries on with its other steps: train/run.py status {a.name}")
@@ -925,6 +960,17 @@ def resume(a):
     live = broadcasts()
     if live:
         sys.exit(f"the broadcast {live[0]} is going: wait for it, or train/broadcast.py stop {live[0]}")
+    if s.get("paused_steps"):  # paused in a Portal 2 check: carry the check on, then the rest
+        if a.pause_after is not None:
+            sys.exit("--pause-after is for training, which is over for this run. Nothing resumed")
+        (d / "PAUSE").unlink(missing_ok=True)
+        steps = s["paused_steps"]
+        write_status(d, state="ingame", phase_started=now().isoformat(timespec="seconds"),
+                     resumed=now().isoformat(timespec="seconds"), resume_check=steps[0], error="")
+        p = detach(d, *steps)
+        print(f"resumed runs/{a.name} (pid {p.pid}): the Portal 2 check carries on, then {', '.join(steps[1:])}")
+        print(f"wait:   .venv/Scripts/python train/run.py wait {a.name}")
+        return
     if not (d / "last.pt").exists():
         sys.exit(f"runs/{a.name}/last.pt is missing: nothing to resume from")
     done = trained_hours(d)
@@ -1026,7 +1072,7 @@ def main():
     p = sub.add_parser("stop", help="stop a run")
     p.add_argument("name")
     p.set_defaults(fn=stop)
-    p = sub.add_parser("pause", help="pause a run's training (it keeps its place; resume carries on)")
+    p = sub.add_parser("pause", help="pause a run's training or Portal 2 check (it keeps its place; resume carries on)")
     p.add_argument("name")
     p.set_defaults(fn=pause)
     p = sub.add_parser("resume", help="carry on a paused run")
