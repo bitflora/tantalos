@@ -1,10 +1,10 @@
 //! Workshop levels our solver called unsolvable until a play-tester showed how
 //! (docs/solver-gaps-2026-10.md, "Play-tested small levels").
 
-use glados::level::Level;
-use glados::plan::{check, decode, encode};
-use glados::route::route;
-use glados::solver::{Action, Mode, Model, Verdict};
+use tantalos::level::Level;
+use tantalos::plan::{check, decode, encode};
+use tantalos::route::route;
+use tantalos::solver::{Action, Mode, Model, Verdict};
 
 const BUDGET: usize = 50_000;
 
@@ -46,7 +46,7 @@ const MARI0: &str = "size 2 19 13 open 1 1 0 1 12 7 0 4 2 1 5 2 1 6 8 1 13 12 1 
 const FLYING_A_TIMING: &str = "size 27 8 7 s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s7 | / s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s7 | / s4 o1 s2 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | s2 o3 s1 o1 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s1 o1 | s1 o4 s2 | s4 o1 s2 | / s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s4 o1 s2 | / s7 | s1 o4 s2 | s1 o4 s2 | s1 o4 s2 | g1 o4 s2 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | g1 o6 | s1 o4 s2 | s1 o4 s2 | s7 | / s7 | s7 | s1 o1 s5 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | / s7 | s7 | s1 o1 s5 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | / s7 | s7 | s1 o1 s5 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | s7 | / white +z 1 4 4 1 4 4 white -z 3 4 1 3 4 1 entry 1 2 1 +x exit 25 2 1 -x laserfield 2 5 1 -x +z 1 on dropper 19 0 6 companion button 1 0 1 weighted > stairs 0 button 25 4 1 weighted > exit pedestal 25 0 1 15 > panel 0 > panel 1 > panel 2 > panel 3 pedestal 24 0 1 inf > dropper 0 cube 2 7 1 companion laser 1 4 1 +z +y on catcher 3 4 4 -z +y > field 0 plate 14 4 2 -y 17 2 1 +z plate 17 2 1 +z 24 2 1 +z plate 4 2 2 +z 10 2 1 +z plate 10 2 1 +z 14 4 2 -y panel 19 0 3 +y -z 6 off panel 20 0 3 +y -z 6 off panel 21 0 3 +y -z 6 off panel 22 0 3 +y -z 6 off panel 24 4 1 +z -x 6 on panel 25 4 2 -x +z 6 on stairs 2 2 1 +x off rail 23 0 0 23 0 3 osc";
 
 fn level(tokens: &str) -> Level {
-    Level::from_puzzle(&glados::tokens::decode(tokens).unwrap())
+    Level::from_puzzle(&tantalos::tokens::decode(tokens).unwrap())
 }
 
 /// Solves `tokens` with conservative rules; its route's plan tokens check as solved.
@@ -66,7 +66,7 @@ fn solved(tokens: &str) -> Vec<Action> {
 #[test]
 fn stairs_left_sideways() {
     let plan = solved(STAIRS_SIDEWAYS);
-    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: glados::regions::Move::Stairs, .. })));
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: tantalos::regions::Move::Stairs, .. })));
 }
 
 #[test]
@@ -125,17 +125,17 @@ fn step_out_of_a_turret_and_reach_through_a_portal() {
 #[test]
 fn reflection_cube_on_a_button_holds_it_and_redirects() {
     let plan = solved(LASER_MANAGEMENT);
-    assert!(plan.iter().any(|a| matches!(a, Action::PutDown { at: glados::solver::CubeLoc::Spot(_) })), "{plan:?}");
+    assert!(plan.iter().any(|a| matches!(a, Action::PutDown { at: tantalos::solver::CubeLoc::Spot(_) })), "{plan:?}");
 }
 
 #[test]
 fn funnel_beam_lifts_the_player_as_its_portal_moves_up() {
-    // Not routed yet (`glados-score route` can't ground a ride up).
+    // Not routed yet (`tantalos-score route` can't ground a ride up).
     let model = Model::new(&level(GRATE_ESCAPE), Mode::Conservative).unwrap();
     let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
         panic!("not solved");
     };
-    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: glados::regions::Move::Funnel, .. })), "{plan:?}");
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: tantalos::regions::Move::Funnel, .. })), "{plan:?}");
 }
 
 #[test]
@@ -145,12 +145,12 @@ fn bounce_gel_under_ceiling_portals_carries_the_player_up() {
     let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
         panic!("not solved");
     };
-    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: glados::regions::Move::Bounce, .. })), "{plan:?}");
+    assert!(plan.iter().any(|a| matches!(a, Action::Move { kind: tantalos::regions::Move::Bounce, .. })), "{plan:?}");
 }
 
 #[test]
 fn stairs_onto_a_plate_and_a_timed_lift_to_a_respawning_cube() {
-    use glados::regions::Move;
+    use tantalos::regions::Move;
     let level = level(FLYING_A_TIMING);
     // The lift's platform is the top of its voxels: it carries the player from the floor of the
     // exit side, a voxel over its track's bottom, up to the walkway.
@@ -234,7 +234,7 @@ fn jump_one_voxel_gaps() {
     let plan = solved(PARKOUR);
     let jumps = plan
         .iter()
-        .filter(|a| matches!(a, Action::Move { kind: glados::regions::Move::Jump, .. }))
+        .filter(|a| matches!(a, Action::Move { kind: tantalos::regions::Move::Jump, .. }))
         .count();
     assert_eq!(jumps, 3, "{plan:?}");
     // Not two voxels.

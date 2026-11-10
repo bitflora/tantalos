@@ -1,8 +1,8 @@
 //! A graphical viewer for the solver's solutions.
 //!
-//! `glados-view` scans folders for saved routes — `<name>.route.jsonl` files with their
-//! `<name>.p2c` level beside them, exactly what `glados-score route` (redirected) and
-//! `glados-score check --route DIR` write — serves the app and those levels over a local port, and
+//! `tantalos-view` scans folders for saved routes — `<name>.route.jsonl` files with their
+//! `<name>.p2c` level beside them, exactly what `tantalos-score route` (redirected) and
+//! `tantalos-score check --route DIR` write — serves the app and those levels over a local port, and
 //! opens the browser. Picking a solution loads its geometry and route; nothing is re-solved, so
 //! switching levels is instant.
 //!
@@ -29,9 +29,9 @@ use crate::level::{
 };
 use crate::p2c::Puzzle;
 
-/// The page, with `__GLADOS_DATA__` where the data goes (or `null`, in server mode).
+/// The page, with `__TANTALOS_DATA__` where the data goes (or `null`, in server mode).
 const APP: &str = include_str!("viewer.html");
-const PLACEHOLDER: &str = "__GLADOS_DATA__";
+const PLACEHOLDER: &str = "__TANTALOS_DATA__";
 
 /// A pickable solution: a saved route and the level beside it.
 pub struct Found {
@@ -173,7 +173,7 @@ pub fn serve(roots: Vec<PathBuf>, port: u16, open: bool) -> Result<(), String> {
     let actual = listener.local_addr().map_err(|e| e.to_string())?.port();
     let n = found.lock().unwrap().len();
     println!(
-        "glados-view: {n} solutions under {}",
+        "tantalos-view: {n} solutions under {}",
         roots
             .iter()
             .map(|p| p.display().to_string())
@@ -181,7 +181,7 @@ pub fn serve(roots: Vec<PathBuf>, port: u16, open: bool) -> Result<(), String> {
             .join(", ")
     );
     if n == 0 {
-        println!("  (no <name>.route.jsonl + <name>.p2c pairs found; make some with `glados-score route` or `glados-score check --route`)");
+        println!("  (no <name>.route.jsonl + <name>.p2c pairs found; make some with `tantalos-score route` or `tantalos-score check --route`)");
     }
     let url = format!("http://127.0.0.1:{actual}/");
     println!("  {url}   (Ctrl-C to stop)");
@@ -409,7 +409,7 @@ fn item_json(found: &Mutex<Vec<Found>>, path: &str) -> Result<String, String> {
     ))
 }
 
-/// The level's geometry as one JSON object: what the workbench, `glados view` and
+/// The level's geometry as one JSON object: what the workbench, `tantalos view` and
 /// `train/preview.py` draw.
 pub fn geometry_json(level: &Level) -> String {
     let mut solid = Vec::new();
@@ -772,7 +772,7 @@ mod tests {
         let r = crate::route::route(&level, crate::solver::DEFAULT_MAX_STATES).unwrap();
         let lines = r.json_lines(puzzle.title(), level.size);
 
-        let dir = std::env::temp_dir().join(format!("glados-view-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tantalos-view-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p2c = dir.join("x.p2c");

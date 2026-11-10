@@ -5,13 +5,13 @@
 
 data/v5b/workshop-x20.jsonl (levels-workshop-x20.jsonl until 2026-10-26) repeats every ws5 train
 level 20 times, and models learn those levels by heart (2026-10-25: 1.59 nats a token on held-out Workshop levels against 0.24 on
-trained ones). This writes each level's versions from `glados-data augment` (src/augment.rs:
+trained ones). This writes each level's versions from `tantalos-data augment` (src/augment.rs:
 mirror in x, then 0-3 quarter turns about z; a version that repeats an earlier one's tokens, or
 whose mirrored field would lose its wall, is left out) `--copies` times each, so about the same
 number of Workshop sequences with 8 times as many distinct ones. Each version is the original
 record with its `tokens` and `n_tokens` replaced and `variant` added (r0 = the level itself, as
 re-encoded); the labels carry over, since a version plays the same (tests/augment.rs, and
-`glados-data augment --check` on Workshop levels). Versions over 969 tokens are left out (the
+`tantalos-data augment --check` on Workshop levels). Versions over 969 tokens are left out (the
 greedy box cover can come out longer in another orientation).
 
 Since 2026-10-26 the default output, data/v5b/levels-workshop-aug-x2.jsonl, is what run.py
@@ -38,7 +38,7 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA = ROOT / "target" / "release" / ("glados-data.exe" if sys.platform == "win32" else "glados-data")
+DATA = ROOT / "target" / "release" / ("tantalos-data.exe" if sys.platform == "win32" else "tantalos-data")
 MAX_TOKENS = 969  # 1024 block minus <bos>, condition slots, <sep> and <eos> (train/data.py)
 # Workshop levels whose text says they need bunny hopping or a glitch: not rated-style examples.
 EXCLUDED = ROOT / "tools" / "workshop" / "excluded-tricks.jsonl"

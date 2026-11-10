@@ -52,7 +52,7 @@ FAMILIES = {
     "goo": ["goo"],
 }
 ITEM_WORDS = {w for ws in FAMILIES.values() for w in ws} - {"goo"} | {"entry", "exit"}
-# Solution mechanics (glados metrics, data.MECHANICS) that change the room's state, and tricks.
+# Solution mechanics (tantalos metrics, data.MECHANICS) that change the room's state, and tricks.
 STATE = {"cube_button", "stand_button", "powered", "redirect", "panel_use", "stairs_use",
          "platform_use", "fizzler_use", "bridge_use", "funnel_use", "plate_use"}
 TRICKS = {"turret_knock", "dash", "latch", "toss", "bounce", "leap", "conversion", "gel_portal"}
@@ -87,7 +87,7 @@ def mechanics(metrics):
 
 
 def outcome(on, off):
-    """One sample's outcome from its `glados-score score` results with editor rules on and off."""
+    """One sample's outcome from its `tantalos-score score` results with editor rules on and off."""
     if on["verdict"] == "unparsed":
         return "unparsed"
     if off["verdict"] in ("invalid", "unsupported"):
@@ -134,13 +134,13 @@ def gap(p, ref):
     return st.mean(abs(p["families"][f] - ref["families"][f]) for f in FAMILIES)
 
 
-def assess(lines, glados, budget=50_000, p2c_dir=None):
+def assess(lines, tantalos, budget=50_000, p2c_dir=None):
     """Score token lines both ways and describe each: one row per line."""
     import sample
     from evaluate import nearest
 
-    on = sample.score(lines, glados, budget)
-    off = sample.score(lines, glados, budget, p2c_dir, editor_rules=False, p2c_all=True)
+    on = sample.score(lines, tantalos, budget)
+    off = sample.score(lines, tantalos, budget, p2c_dir, editor_rules=False, p2c_all=True)
     known = {hash(json.loads(l)["tokens"]) for l in WS_TRAIN.read_text(encoding="utf-8").splitlines() if l.strip()}
     rows = []
     for i, (line, a, b) in enumerate(zip(lines, on, off)):
@@ -224,10 +224,10 @@ def section(s, prompt_tokens, temperature):
     return lines
 
 
-def run(model, vocab, n, glados, budget=50_000, temperature=1.0, top_k=None, batch=32, p2c_dir=None,
+def run(model, vocab, n, tantalos, budget=50_000, temperature=1.0, top_k=None, batch=32, p2c_dir=None,
         constrained=False):
     """Sample n levels with the rated prompt and assess them: (summary, rows, prompt).
-    `constrained`: sample only tokens `glados-score grammar` allows (sample.generate)."""
+    `constrained`: sample only tokens `tantalos-score grammar` allows (sample.generate)."""
     import sample
 
     toks = prompt(vocab)
@@ -235,10 +235,10 @@ def run(model, vocab, n, glados, budget=50_000, temperature=1.0, top_k=None, bat
     how = ", constrained" if constrained else ""
     print(f"rated: sampling {n} x {' '.join(toks)} at temperature {temperature}{how}", flush=True)
     lines = sample.generate(model, vocab, n, toks, (), temperature, top_k, batch, constrained=constrained,
-                            glados=glados)
+                            tantalos=tantalos)
     print(f"rated: sampled in {time.time() - t:.0f}s; scoring", flush=True)
     t = time.time()
-    rows = assess(lines, glados, budget, p2c_dir)
+    rows = assess(lines, tantalos, budget, p2c_dir)
     print(f"rated: scored and compared in {time.time() - t:.0f}s", flush=True)
     return summarize(rows, reference()), rows, toks
 
@@ -254,9 +254,9 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-k", type=int, default=None)
     ap.add_argument("--budget", type=int, default=50_000)
-    ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
     ap.add_argument("--constrained", action="store_true",
-                    help="sample only tokens `glados-score grammar` allows (src/grammar.rs)")
+                    help="sample only tokens `tantalos-score grammar` allows (src/grammar.rs)")
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--out", default=None, help="directory (default <checkpoint dir>/rated)")
     ap.add_argument("--seed", type=int, default=None)
@@ -267,7 +267,7 @@ def main():
     model, vocab, _ = sample.load_checkpoint(a.checkpoint, device)
     out = Path(a.out) if a.out else Path(a.checkpoint).parent / "rated"
     out.mkdir(parents=True, exist_ok=True)
-    s, rows, toks = run(model, vocab, a.n, a.glados, a.budget, a.temperature, a.top_k, a.batch,
+    s, rows, toks = run(model, vocab, a.n, a.tantalos, a.budget, a.temperature, a.top_k, a.batch,
                         constrained=a.constrained)
     s.update(prompt=toks, temperature=a.temperature, top_k=a.top_k, seed=seed, constrained=a.constrained)
     (out / "rated.json").write_text(json.dumps(s, indent=1))

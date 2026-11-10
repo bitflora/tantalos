@@ -146,7 +146,7 @@ strong 8, gap 23.5, Workshop test loss ~1.59, EVAL 32%), and the blind A/B level
 
 ## Task 7: the user's verdicts
 
-When the user says how the `glados-ab-v6-fresh-10h-NN` levels played: follow CLAUDE.md
+When the user says how the `tantalos-ab-v6-fresh-10h-NN` levels played: follow CLAUDE.md
 ("When the user reports how the A/B levels played"): fill `runs/v6-fresh-10h/playtest/results.csv`,
 run `abtest.py score`, report, commit `train/playtests.jsonl`.
 
@@ -234,7 +234,7 @@ run `abtest.py score`, report, commit `train/playtests.jsonl`.
   removed the 4,590 maps whose last error was a Franken cube or paint bomb from
   `out/workshop/report.jsonl`, and ran `build --incremental --budget 500000`: **2,675 converted**,
   1,915 still unsupported (wall buttons, wall gel).
-- Scoring them in one `glados-score score` pass ran out of memory (16 GB, 12 threads; one paint-bomb
+- Scoring them in one `tantalos-score score` pass ran out of memory (16 GB, 12 threads; one paint-bomb
   level asked for 4 GB). The first 1,261 results were kept; the rest were scored one level per
   process, 6 at a time. One level, **3801150618**, still runs out of memory and is left out.
 - New verdicts: 434 solvable, 1,072 uncertain, 564 unsolvable, 582 invalid, 21 unparsed, 1 unsupported.

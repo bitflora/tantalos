@@ -7,7 +7,7 @@ the new model, half from its parent, or from rated Workshop levels when there is
 Verdicts pile up in train/playtests.jsonl, so later they can check the automatic scores
 (train/rated.py) against what a person thought.
 
-    python train/abtest.py pick NAME A B [--n 4] [--game]   # stage 2n levels as glados-ab-NAME-NN
+    python train/abtest.py pick NAME A B [--n 4] [--game]   # stage 2n levels as tantalos-ab-NAME-NN
     python train/abtest.py score NAME                       # after playing: unblind results.csv
     python train/abtest.py list
 
@@ -20,7 +20,7 @@ state changes and at most 1 trick first, then uncertain (too big for the solver,
 rated levels), then the other solvable ones; within that, more item families and wires first,
 and one level per item set. --game checks the picks in Portal 2's editor first (it launches the
 game, and never touches one that is running). --constrained samples the models' levels with
-`glados-score grammar` (run.py passes it since 2026-11-01).
+`tantalos-score grammar` (run.py passes it since 2026-11-01).
 
 Files, in <out> (default out/abtest/NAME; run.py uses runs/RUN/playtest):
 - key.json: which side each file is. Don't open it before playing.
@@ -63,7 +63,7 @@ def playable(r):
     return True
 
 
-def model_side(checkpoint, n, pool, temperature, glados, out, seed, constrained=False):
+def model_side(checkpoint, n, pool, temperature, tantalos, out, seed, constrained=False):
     import torch
     import sample
 
@@ -74,23 +74,23 @@ def model_side(checkpoint, n, pool, temperature, glados, out, seed, constrained=
     how = ", constrained" if constrained else ""
     print(f"{checkpoint}: sampling {pool} x {' '.join(toks)} at temperature {temperature}{how}", flush=True)
     lines = sample.generate(model, vocab, pool, toks, (), temperature, None, 32, constrained=constrained,
-                            glados=glados)
+                            tantalos=tantalos)
     del model
     torch.cuda.empty_cache()
-    rows = rated.assess(lines, glados, p2c_dir=out / "p2c")
+    rows = rated.assess(lines, tantalos, p2c_dir=out / "p2c")
     good = sorted((r for r in rows if playable(r)), key=rank)
     print(f"  {len(good)} of {pool} playable; outcomes {dict(Counter(r['outcome'] for r in rows))}", flush=True)
     return good, {"source": str(checkpoint), "prompt": toks, "temperature": temperature, "pool": pool,
                   "constrained": constrained, "playable": len(good)}
 
 
-def workshop_side(n, glados, out, seed):
+def workshop_side(n, tantalos, out, seed):
     skip = rated.excluded_ids()
     rows = [json.loads(l) for l in WS_TEST.read_text(encoding="utf-8").splitlines() if l.strip()]
     rows = [r for r in rows if r.get("stars", 0) >= 4 and r["workshop_id"] not in skip]
     random.Random(seed).shuffle(rows)
     rows = rows[: n * 6]
-    assessed = rated.assess([r["tokens"] for r in rows], glados, p2c_dir=out / "p2c")
+    assessed = rated.assess([r["tokens"] for r in rows], tantalos, p2c_dir=out / "p2c")
     good = []
     for r, a in zip(rows, assessed):
         # Published levels count as solvable; only a broken conversion is left out.
@@ -128,9 +128,9 @@ def pick(a):
     for label, src in (("A", a.a), ("B", a.b)):
         d = out / f"side-{label}"
         if src == "workshop":
-            rows, info = workshop_side(a.n, a.glados, d, seed)
+            rows, info = workshop_side(a.n, a.tantalos, d, seed)
         else:
-            rows, info = model_side(src, a.n, a.pool, a.temperature, a.glados, d, seed, a.constrained)
+            rows, info = model_side(src, a.n, a.pool, a.temperature, a.tantalos, d, seed, a.constrained)
         chosen = diverse(rows, a.n * 3 if a.game else a.n, d)
         sides[label] = (chosen, info)
     game = "unchecked"
@@ -161,13 +161,13 @@ def pick(a):
     dest.mkdir(parents=True, exist_ok=True)
     now, key, picks = int(time.time()), [], []
     for i, (label, r, f) in enumerate(staged, 1):
-        name = f"glados-ab-{a.name}-{i:02d}"
+        name = f"tantalos-ab-{a.name}-{i:02d}"
         dst = dest / f"{name}.p2c"
         text = playtest.restamp(f.read_bytes().decode("utf-8"), now + i)
         text = playtest.retitle(text, name)
         text = playtest.DESCRIPTION.sub(lambda m: f'{m[1]}"{preview.summary(f)}"', text, count=1)
         playtest.write(dst, text)
-        preview.write(dst, name=name.removeprefix("glados-"))
+        preview.write(dst, name=name.removeprefix("tantalos-"))
         desc = r.get("desc") or {}
         key.append({"file": name, "side": label, "source": sides[label][1]["source"], "copy_of": str(f),
                     "outcome": r["outcome"], "min_len": r.get("min_len"), "state": r.get("state"),
@@ -249,8 +249,8 @@ def main():
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--game", action="store_true", help="check the picks in Portal 2's editor first")
     p.add_argument("--constrained", action="store_true",
-                   help="models sample only tokens `glados-score grammar` allows (src/grammar.rs)")
-    p.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+                   help="models sample only tokens `tantalos-score grammar` allows (src/grammar.rs)")
+    p.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
     p.add_argument("--out", default=None)
     p.add_argument("--dest", default=None, help="stage here instead of the Puzzle Maker folder (tests)")
     p.add_argument("--seed", type=int, default=None)

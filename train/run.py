@@ -12,11 +12,11 @@
     .venv/Scripts/python train/run.py note v4-a "what it showed"
     .venv/Scripts/python train/run.py ingame v4-a     # redo the Portal 2 steps if they were skipped
 
-`start` builds the target/release/glados-*.exe binaries, then returns: the run carries on in the background,
+`start` builds the target/release/tantalos-*.exe binaries, then returns: the run carries on in the background,
 detached, and survives the terminal or session that started it. Every run does every step, in
 order, with nothing to remember:
   1. train (train.py) for --hours
-  2. evaluate best.pt (evaluate.py --constrained: levels written from the tokens `glados-score
+  2. evaluate best.pt (evaluate.py --constrained: levels written from the tokens `tantalos-score
      grammar` allows, clear of the editor's rules; --quick runs decode freely)
   3. check the evaluation's levels in Portal 2's own editor (ingame.py, about 15 minutes). It
      launches the game itself, unless the game is already running (someone playing): then it
@@ -24,7 +24,7 @@ order, with nothing to remember:
   4. train best.pt away from every level Portal 2 has rejected (data/ingame/invalid.jsonl, x5,
      labelled invalid) and every level a play-tester found unsolvable though our solver passed
      it (data/ingame/human-unsolvable.jsonl, x5, labelled unsolvable), and every level of an
-     evaluation whose exit can never be reached (glados-score's "dead": walls part entry and
+     evaluation whose exit can never be reached (tantalos-score's "dead": walls part entry and
      exit, or the exit needs a laser with no emitter or a button with no cube it takes;
      collected into data/ingame/dead.jsonl, x5, labelled unsolvable) for 15 minutes into
      runs/NAME/away, evaluate that and check it in Portal 2 too. It is the final model unless
@@ -32,7 +32,7 @@ order, with nothing to remember:
      stays final).
   5. stage a blind A/B play-test (abtest.py): 4 levels from the final model and 4 from its
      parent (--from), or from rated Workshop levels for a fresh run, checked in Portal 2 too,
-     shuffled into the Puzzle Maker folder as glados-ab-NAME-NN; the verdicts go in
+     shuffled into the Puzzle Maker folder as tantalos-ab-NAME-NN; the verdicts go in
      runs/NAME/playtest/results.csv and `abtest.py score NAME --out runs/NAME/playtest` unblinds them
   6. record the run (and NAME/away) in train/runs.csv
 Pausing a Portal 2 check (steps 3 and 4): `pause NAME` while it checks has ingame.py finish the
@@ -58,7 +58,7 @@ Goblin runs (`start NAME --task goblin`) train the second net, Goblin, which rea
 writes its plan (called the solver net, task "solve", before 2026-10-27; `--task solve` and old
 runs still work). They train on data/goblin (train/goblin_data.py makes it; data/plans until it
 exists). Their steps: train, evaluate best.pt (goblin_eval.py --constrained, about 75 minutes:
-plans for held-out levels written from legal steps only, replayed by `glados-score check`;
+plans for held-out levels written from legal steps only, replayed by `tantalos-score check`;
 `--quick` runs decode freely, about 15 minutes, unless `--constrained-eval` is given), record in train/goblin-runs.csv (`list --task
 goblin` shows them). No Portal 2 steps, no training away, no play-test picks. The main score is
 EVAL solved %: the share of held-out levels whose greedy plan solves. --from a level-writing run
@@ -96,7 +96,7 @@ sys.path.insert(0, str(ROOT / "train"))
 from record import GOBLIN, task_name  # noqa: E402
 
 PY = sys.executable
-GLADOS = ROOT / "target" / "release" / "glados-score.exe"
+TANTALOS = ROOT / "target" / "release" / "tantalos-score.exe"
 ACTIVE = ("starting", "training", "evaluating", "ingame", "away", "picking")
 PAUSED_EXIT = 3  # train.py's exit code when a PAUSE file stopped it (train.py PAUSED_EXIT)
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW: no console pops up, none is needed
@@ -246,7 +246,7 @@ def start(a):
         lr, min_lr, warmup = QUICK_LR
     build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bins"], cwd=ROOT) \
         if not a.dry_run else subprocess.CompletedProcess([], 0)
-    if build.returncode or not GLADOS.exists():
+    if build.returncode or not TANTALOS.exists():
         sys.exit("`cargo build --release --bins` failed (output above): fix that first, no run started")
 
     train = [
@@ -281,7 +281,7 @@ def start(a):
         evaluate = ["train/evaluate.py", str(d / "best.pt"), "--data", *map(str, data)]
         if a.quick:  # broadcast rounds: free decoding keeps the round short
             evaluate += ["--n-cond", "8", "--generator-count", "0", "--neighbours", "64", "--rated-n", "0"]
-        else:  # since 2026-11-01: levels written from legal tokens only (glados-score grammar)
+        else:  # since 2026-11-01: levels written from legal tokens only (tantalos-score grammar)
             evaluate += ["--constrained"]
     if a.dry_run:
         print("train:   ", " ".join(train))
@@ -447,7 +447,7 @@ def constrained_guard(d, s):
 
 
 def collect_dead(d):
-    """Add the levels of d's evaluation that glados-score calls dead (the exit can never be
+    """Add the levels of d's evaluation that tantalos-score calls dead (the exit can never be
     reached, whatever the solver's search would say) to DEAD, labelled unsolvable. Returns how
     many were new."""
     seen = set()
@@ -523,7 +523,7 @@ def picks_outcome(d):
         picks = json.loads((d / "playtest" / "picks.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False, "none picked (see pick.log)"
-    names = ", ".join(p.get("name") or f"glados-{d.name}-{p['file']}".removesuffix(".p2c") for p in picks)
+    names = ", ".join(p.get("name") or f"tantalos-{d.name}-{p['file']}".removesuffix(".p2c") for p in picks)
     checked = all(p.get("game") == "valid" for p in picks)
     blind = (" (blind A/B: this run's model against "
              + ("its parent" if (read_status(d) or {}).get("init") else "rated Workshop levels")
@@ -979,7 +979,7 @@ def resume(a):
                  f"the run's {s['hours']:g}. Nothing resumed")
     left = max((s["hours"] - done) * 3600, 5 * 60)  # some minutes at least: training ends on an eval
     build = subprocess.run(["cargo", "build", "--release", "--quiet", "--bins"], cwd=ROOT)
-    if build.returncode or not GLADOS.exists():
+    if build.returncode or not TANTALOS.exists():
         sys.exit("`cargo build --release --bins` failed (output above): fix that first, nothing resumed")
     (d / "PAUSE").unlink(missing_ok=True)
     write_status(d, state="starting", resumed=now().isoformat(timespec="seconds"), train_left_s=left, error="",

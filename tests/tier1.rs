@@ -1,12 +1,12 @@
 //! Tier 1: glass, grating, fizzlers, laser fields, pedestal buttons, cube and button types,
 //! and the two solver modes.
 
-use glados::builder::Builder;
-use glados::fixtures;
-use glados::geom::{rotate, Dir};
-use glados::level::{BarrierKind, CubeKind, HazardKind, ItemKind, Level};
-use glados::p2c::Puzzle;
-use glados::solver::{judge, Action, CubeLoc, Judgement, Mode, Model, DEFAULT_MAX_STATES};
+use tantalos::builder::Builder;
+use tantalos::fixtures;
+use tantalos::geom::{rotate, Dir};
+use tantalos::level::{BarrierKind, CubeKind, HazardKind, ItemKind, Level};
+use tantalos::p2c::Puzzle;
+use tantalos::solver::{judge, Action, CubeLoc, Judgement, Mode, Model, DEFAULT_MAX_STATES};
 
 const STYLE: &str = "fixtures/real/1500854111.p2c";
 
@@ -83,7 +83,7 @@ fn style_map_barriers_decode() {
 }
 
 /// Same position, same orientation of all three local axes.
-fn same_item(ours: &glados::p2c::Props, theirs: &glados::p2c::Props) {
+fn same_item(ours: &tantalos::p2c::Props, theirs: &tantalos::p2c::Props) {
     assert_eq!(ours.kind(), theirs.kind());
     assert_eq!(ours.voxel_pos(), theirs.voxel_pos(), "{}", theirs.kind());
     let (a, b) = (ours.angles().unwrap(), theirs.angles().unwrap());
@@ -95,11 +95,11 @@ fn same_item(ours: &glados::p2c::Props, theirs: &glados::p2c::Props) {
             theirs.kind()
         );
     }
-    let pos = |p: &glados::p2c::Props| p.get_f64s::<3>("LocalPos").unwrap();
+    let pos = |p: &tantalos::p2c::Props| p.get_f64s::<3>("LocalPos").unwrap();
     assert_eq!(pos(ours), pos(theirs), "{} LocalPos", theirs.kind());
 }
 
-fn extents_of(p: &Puzzle, anchor: i32) -> Vec<glados::p2c::Props> {
+fn extents_of(p: &Puzzle, anchor: i32) -> Vec<tantalos::p2c::Props> {
     p.connections
         .iter()
         .filter(|c| {
@@ -362,7 +362,7 @@ fn held_cube_is_tracked_by_kind() {
 
 /// Problems the editor reports for a level written as tokens.
 fn field_problems(tokens: &str) -> Vec<String> {
-    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    let level = Level::from_puzzle(&tantalos::tokens::decode(tokens).unwrap());
     level.mount_problems()
 }
 
@@ -373,7 +373,7 @@ fn nothing_may_sit_in_a_fields_sweep() {
     // level wouldn't build. Panels shaped like these built fine on their own.
     const ROOM: &str = "size 6 6 4 s1 o3 | / entry 2 0 1 +y exit 3 5 1 -y";
     let tokens = format!("{ROOM} fizzler 2 5 1 -y +z 3 on pedestal 2 5 1 inf");
-    let mut puzzle = glados::tokens::decode(&tokens).unwrap();
+    let mut puzzle = tantalos::tokens::decode(&tokens).unwrap();
     // That pedestal's column stood on the field's side; decoding turns it away (tokens don't
     // say which side it's on), so turn it back.
     let p = Level::from_puzzle(&puzzle).mount_problems();
@@ -452,8 +452,8 @@ fn levels_the_game_refused_in_goblins_replays() {
     // Level-net levels from Goblin's self-play buffer that Portal 2's editor marked invalid
     // (out/school-play/e1-r00, 2026-11-01); each list is the game's INVALID ITEM log.
     let flagged = |tokens: &str| -> Vec<(&'static str, [i32; 3])> {
-        let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
-        glados::editor::editor_flags(&level).into_iter().map(|f| (f.name, f.pos)).collect()
+        let level = Level::from_puzzle(&tantalos::tokens::decode(tokens).unwrap());
+        tantalos::editor::editor_flags(&level).into_iter().map(|f| (f.name, f.pos)).collect()
     };
     // 00181: loose cubes on turrets, both flagged; the cubes beside them are fine.
     let p = flagged(
@@ -505,9 +505,9 @@ fn a_reflection_cube_can_aim_at_an_angle() {
         white -x 0 7 0 6 7 0 white +y 1 7 0 1 7 0 entry 1 0 0 +y exit 6 7 0 -y \
         glass 1 7 0 1 7 0 -x +z dropper 2 5 3 reflection laser 8 3 0 -x -z on \
         catcher 0 7 0 -y -z > exit relay 3 6 0 +z center > exit relay 6 4 0 +z center > exit";
-    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    let level = Level::from_puzzle(&tantalos::tokens::decode(tokens).unwrap());
     let plain = Model::new(&level, Mode::Conservative).unwrap();
-    assert!(!matches!(plain.solve(DEFAULT_MAX_STATES).verdict, glados::solver::Verdict::Solved(_)));
+    assert!(!matches!(plain.solve(DEFAULT_MAX_STATES).verdict, tantalos::solver::Verdict::Solved(_)));
     let judged = judge(&level, DEFAULT_MAX_STATES).unwrap();
     assert!(matches!(judged.judgement, Judgement::Solvable(_)));
     assert!(judged.conservative.beams.angled);
@@ -519,7 +519,7 @@ fn an_emitter_on_a_white_wall_still_fires_into_portals() {
     // would send out the same beam. The emitter's own beam must still count as going into the
     // portal at its far end (it once didn't), up to the catcher that opens the exit.
     let tokens = "size 6 10 6 open 0 0 0 4 3 3 0 4 0 1 6 5 3 4 0 4 6 5 2 5 0 4 6 5 5 2 2 5 3 2 2 4 2 4 6 5 0 1 4 4 8 4 1 9 4 3 9 5 0 3 5 4 9 5 white +x 4 0 0 4 4 5 1 4 0 5 4 5 4 6 0 5 9 0 4 5 2 5 9 5 white -x 0 3 0 0 9 5 3 4 0 5 4 5 0 0 3 5 8 5 white +y 2 3 0 5 5 1 1 9 4 5 9 5 black -y 0 7 0 5 9 5 5 2 2 5 9 5 1 1 4 5 9 4 white +z 0 2 4 5 8 4 white -z 0 0 0 4 4 3 entry 2 0 0 +y exit 2 9 4 -y laserfield 1 9 4 +x -z 1 on laser 0 6 0 +x center on catcher 0 8 4 -y center > exit > field 0 plate 2 1 0 +z 2 4 2 +z plate 2 4 2 +z 2 9 4 +z";
-    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    let level = Level::from_puzzle(&tantalos::tokens::decode(tokens).unwrap());
     let judged = judge(&level, DEFAULT_MAX_STATES).unwrap();
     assert!(matches!(judged.judgement, Judgement::Solvable(_)));
 }
@@ -529,7 +529,7 @@ fn a_reflection_cube_can_sit_on_a_floor_emitter() {
     // Workshop 68601881 "Easy test": the laser fires up out of the floor; a cube set on it turns
     // the beam along a diagonal through the relays.
     let tokens = "size 13 21 25 open 0 9 1 12 12 20 0 0 21 1 19 24 2 0 21 4 0 24 6 0 21 6 2 24 8 0 21 12 0 24 11 1 21 12 19 24 3 2 21 3 19 24 4 2 21 9 2 24 9 3 21 9 4 24 5 4 21 7 19 24 8 6 21 12 19 24 2 13 21 12 19 24 10 20 24 11 20 24 goo 0 9 0 12 12 0 white +x 12 13 21 12 14 21 white +y 9 19 21 10 20 21 entry 6 0 21 +y exit 11 19 21 -y laserfield 0 9 1 +x -z 1 on laserfield 0 10 1 +x -z 1 on laserfield 0 11 1 +x -z 1 on laserfield 0 12 1 +x +z 1 on dropper 1 19 24 reflection pedestal 0 19 21 inf > dropper 0 turret 9 4 21 2 laser 4 14 21 +z center on relay 10 16 21 +z center > exit relay 6 16 21 +z center > exit relay 8 18 21 +z center > exit plate 3 8 21 +z 3 13 21 +z";
-    let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+    let level = Level::from_puzzle(&tantalos::tokens::decode(tokens).unwrap());
     let judged = judge(&level, DEFAULT_MAX_STATES).unwrap();
     assert!(matches!(judged.judgement, Judgement::Solvable(_)));
 }

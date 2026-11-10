@@ -1,6 +1,6 @@
 {
-  "package": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\glados\\assets\\goblin-codex\\goblin-codex.vpk",
-  "mod_directory": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\glados\\out\\goblin-codex\\game",
+  "package": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\tantalos\\assets\\goblin-codex\\goblin-codex.vpk",
+  "mod_directory": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\tantalos\\out\\goblin-codex\\game",
   "files": {
     "models/goblin_codex/goblin_preview.dx80.vtx": 958818,
     "models/goblin_codex/goblin_preview.dx90.vtx": 958818,
@@ -27,5 +27,5 @@
     2.102008819580078
   ],
   "texture_format": "DXT1, full 12-level mip pyramid",
-  "runtime_directory": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\glados\\out\\goblin-codex\\packed-game"
+  "runtime_directory": "C:\\Users\\timja\\.codex\\worktrees\\goblin-model-codex\\tantalos\\out\\goblin-codex\\packed-game"
 }

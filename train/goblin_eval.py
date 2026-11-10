@@ -3,7 +3,7 @@
 
     .venv/Scripts/python train/goblin_eval.py runs/solve-fresh-3h/best.pt
 
-For each level it writes one greedy plan and --k sampled ones, and `glados-score check` replays
+For each level it writes one greedy plan and --k sampled ones, and `tantalos-score check` replays
 them on our solver's model. The levels, from --plans (data/goblin, train/goblin_data.py; the
 older data/plans has only the first two and `published`):
   test-ws    the Workshop test split our solver solves (all of them)
@@ -17,7 +17,7 @@ older data/plans has only the first two and `published`):
              (`test-frontier-liberal`, a weak signal: play them to know)
   published  (data/plans only) Workshop levels our solver can't solve, from data/ws3/test.jsonl
 
---constrained writes every plan with `glados-score env` (src/env.rs) choosing which tokens may
+--constrained writes every plan with `tantalos-score env` (src/env.rs) choosing which tokens may
 come next, so each step fits a move of the conservative model, and a plan can't stop (write
 `exit`) before the goal: it solves the level or runs out of tokens (--max-plan; 256 is enough
 for every held-out solver plan but one). --let-stop lets it stop after any whole step instead,
@@ -46,7 +46,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from data import BOS, EOS, LEN_BUCKETS, MECHANICS, SEP, len_bucket  # noqa: E402
-from sample import DEFAULT_GLADOS, load_checkpoint  # noqa: E402
+from sample import DEFAULT_TANTALOS, load_checkpoint  # noqa: E402
 from seeding import resolve  # noqa: E402
 from record import GOBLIN, task_name  # noqa: E402
 
@@ -92,12 +92,12 @@ def generate_plans(model, vocab, prompts, temperature=1.0, top_k=None, rows=64, 
 
 
 class Env:
-    """`glados-score env` (src/env.rs), running: the plan tokens that may come next on a level."""
+    """`tantalos-score env` (src/env.rs), running: the plan tokens that may come next on a level."""
 
-    def __init__(self, glados=DEFAULT_GLADOS, mode="conservative", let_stop=False):
+    def __init__(self, tantalos=DEFAULT_TANTALOS, mode="conservative", let_stop=False):
         self.mode = mode
         self.let_stop = let_stop  # let plans stop (`exit`) after any whole step, not only at the goal
-        self.proc = subprocess.Popen([str(Path(glados).resolve()), "env"], stdin=subprocess.PIPE,
+        self.proc = subprocess.Popen([str(Path(tantalos).resolve()), "env"], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
 
     def ask(self, request):
@@ -105,7 +105,7 @@ class Env:
         self.proc.stdin.flush()
         line = self.proc.stdout.readline()
         if not line:
-            raise RuntimeError(f"glados-score env stopped (exit code {self.proc.poll()})")
+            raise RuntimeError(f"tantalos-score env stopped (exit code {self.proc.poll()})")
         return json.loads(line)
 
     def open(self, key, tokens):
@@ -195,17 +195,17 @@ class LegalSteps:
         return seq
 
 
-def check(items, glados=DEFAULT_GLADOS, mode="conservative"):
-    """One `glados-score check` verdict per plan, in order. An item is `{tokens, plans: [...]}` (or
+def check(items, tantalos=DEFAULT_TANTALOS, mode="conservative"):
+    """One `tantalos-score check` verdict per plan, in order. An item is `{tokens, plans: [...]}` (or
     `{tokens, plan}` for one), optionally with `min_len`. An item's plans share one input line,
-    so `glados-score check` builds the level's model once for all of them. Returns the per-plan result
+    so `tantalos-score check` builds the level's model once for all of them. Returns the per-plan result
     dicts, flattened in item order."""
     lines = []
     for it in items:
         line = {k: it[k] for k in ("tokens", "min_len") if it.get(k) is not None}
         line["plans"] = it["plans"] if "plans" in it else [it["plan"]]
         lines.append(line)
-    args = [str(Path(glados).resolve()), "check", "--mode", mode]
+    args = [str(Path(tantalos).resolve()), "check", "--mode", mode]
     text = "".join(json.dumps(line) + "\n" for line in lines)
     out = subprocess.run(args, input=text, capture_output=True, text=True, encoding="utf-8", check=True)
     results = []
@@ -213,12 +213,12 @@ def check(items, glados=DEFAULT_GLADOS, mode="conservative"):
         results.extend(json.loads(line)["results"])
     want = sum(len(it["plans"]) if "plans" in it else 1 for it in items)
     if len(results) != want:
-        raise ValueError(f"glados-score check answered {len(results)} of {want} plans")
+        raise ValueError(f"tantalos-score check answered {len(results)} of {want} plans")
     return results
 
 
 def summarize(results):
-    """Shares of verdicts over `results` (glados-score check output)."""
+    """Shares of verdicts over `results` (tantalos-score check output)."""
     n = max(len(results), 1)
     verdicts = Counter(r["verdict"] for r in results)
     return {
@@ -230,7 +230,7 @@ def summarize(results):
     }
 
 
-def solve_levels(model, vocab, records, k, temperature, glados, modes, rows, env=None):
+def solve_levels(model, vocab, records, k, temperature, tantalos, modes, rows, env=None):
     """Greedy and `k` sampled plans for each record, checked in each mode. Returns one dict
     per record: the record's fields, and per mode `greedy` (verdict) and `samples` (verdicts).
     With `env` (an Env), plans are written from legal steps only."""
@@ -249,7 +249,7 @@ def solve_levels(model, vocab, records, k, temperature, glados, modes, rows, env
               "plans": [o["greedy_plan"]] + o["sample_plans"]}
              for o in out if o["greedy_plan"] is not None]
     for mode in modes:
-        results = iter(check(items, glados, mode) if items else [])
+        results = iter(check(items, tantalos, mode) if items else [])
         for o, p in zip(out, prompts):
             if isinstance(p, str):
                 o[mode] = {"greedy": {"verdict": p}, "samples": []}
@@ -326,7 +326,7 @@ def report(ck_path, sets, k, seconds, constrained=False):
     lines = [f"# Goblin evaluation: {ck_path}", ""]
     if constrained:
         lines += [f"Constrained decoding ({constrained}): every plan was written from the steps "
-                  "`glados-score env` allows (conservative model), so none is illegal there.", ""]
+                  "`tantalos-score env` allows (conservative model), so none is illegal there.", ""]
     name = HEADLINE if HEADLINE in sets else OLD_HEADLINE
     head = sets.get(name)
     if head:
@@ -409,12 +409,12 @@ def main():
     ap.add_argument("--rows", type=int, default=64, help="plans generated at once")
     ap.add_argument("--out", default=None, help="default: <checkpoint dir>/eval")
     ap.add_argument("--reference-solutions", help="reuse the exact levels in a previous solutions.jsonl")
-    ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(DEFAULT_TANTALOS))
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--cpu", action="store_true")
     ap.add_argument("--constrained", action="store_true",
-                    help="write only legal steps (glados-score env); default --out: <checkpoint dir>/eval-constrained")
+                    help="write only legal steps (tantalos-score env); default --out: <checkpoint dir>/eval-constrained")
     ap.add_argument("--let-stop", action="store_true", help="with --constrained: plans may stop before the goal")
     ap.add_argument("--max-plan", type=int, default=None,
                     help=f"most tokens per plan (default {MAX_PLAN}, constrained {MAX_CONSTRAINED})")
@@ -460,7 +460,7 @@ def main():
         todo = matched
 
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / ("eval-constrained" if args.constrained else "eval")
-    env = Env(args.glados, let_stop=args.let_stop) if args.constrained else None
+    env = Env(args.tantalos, let_stop=args.let_stop) if args.constrained else None
     if args.max_plan:
         MAX_PLAN = MAX_CONSTRAINED = args.max_plan
     args.max_plan = MAX_CONSTRAINED if args.constrained else MAX_PLAN
@@ -468,7 +468,7 @@ def main():
     sets, solutions = {}, []
     for name, records, modes in todo:
         t = time.time()
-        levels = solve_levels(model, vocab, records, args.k, args.temperature, args.glados, modes, args.rows, env)
+        levels = solve_levels(model, vocab, records, args.k, args.temperature, args.tantalos, modes, args.rows, env)
         for mode in modes:
             key = name if mode == "conservative" else f"{name}-{mode}"
             sets[key] = set_summary(levels, mode, args.k)

@@ -5,7 +5,7 @@ was called the solver net (task `solve`, runs `solve-...`) until 2026-10-27; "th
 still means the Rust BFS solver. The goal: a Goblin that understands Portal's mechanisms, then
 learns AlphaGo-style from levels the level net writes, past what the Rust search can solve.
 
-**The framing.** `glados-score check` is Goblin's rules of Go. Goblin can't beat the Rust *model*
+**The framing.** `tantalos-score check` is Goblin's rules of Go. Goblin can't beat the Rust *model*
 of Portal (a plan only counts if the model allows it), but it can beat the Rust *search*: BFS
 runs out of budget on big Workshop rooms, a learned policy plus a 0.3 ms check can go deeper.
 So self-play's frontier is the levels the solver calls `uncertain`, and the ones only the
@@ -41,7 +41,7 @@ later; overnight CPU and GPU data jobs are fine when nothing is training.
   all independently rechecked, no held-out identities. Audit: `runs/school/try/buffer-audit-2026-10-29.json`.
   The original round outputs remain historical; the next sampling round is still pending.
 
-- **Constrained decoding, E2 built early** (2026-10-29): `glados-score env` (src/env.rs), a JSONL
+- **Constrained decoding, E2 built early** (2026-10-29): `tantalos-score env` (src/env.rs), a JSONL
   server listing the plan tokens that may come next (each step a move of the conservative or the
   angled-laser model; only `exit` at the goal), and `goblin_eval.py --constrained`. All 1,087
   held-out solver plans pass it; 1,048 random allowed plans never break a model's rules (11 show
@@ -71,7 +71,7 @@ later; overnight CPU and GPU data jobs are fine when nothing is training.
   `sweep`; `plan::encode_actions` writes a plan from the solver's actions when the route can't;
   `check` retries with angled laser spots. Now 13,005 of 13,005 sample plans check as solved.
   Loops appear in 1,508 of the sample's plans.
-- **Plans move with augmented levels** (96a1136): `augment::apply_plan`, `glados-data augment
+- **Plans move with augmented levels** (96a1136): `augment::apply_plan`, `tantalos-data augment
   --plans`. Kept: 100% of generated, 99.7% of mutant, 99.65% of Workshop plans; the rest are
   solver orientation quirks. One found and fixed: a non-reflection cube's facing at a laser spot
   had to match the spot the solver happened to pick, which depends on orientation.
@@ -125,7 +125,7 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
      `--quick` run on the base mix plus buffer (buffer 30-50% of rows), guarded; every 5 rounds
      one long consolidation run. Record per round: pool solved, beyond-BFS solves, frontier
      size, every test set, the probe, plan lengths, the game results, exploits.
-   - **E2 constrained decoding** (built 2026-10-29, see Done; use it in E1 from round 1): `glados-score env` (JSONL server: open a
+   - **E2 constrained decoding** (built 2026-10-29, see Done; use it in E1 from round 1): `tantalos-score env` (JSONL server: open a
      level, apply steps, list the legal next steps as plan tokens), sampling only legal steps.
    - **E3 liberal plans in Portal 2** (from round 1, when the game can run): unattended
      play.py batches with `route --plan --mode liberal`; clean plays become trusted; a failed
@@ -153,7 +153,7 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
      not a label). The gap between the two marks likely exploits and picks which plans get game
      time. Checkpoints without the head load with it freshly initialised.
    - **b. Step-level search** (policy-only baseline first; value guidance later). Tree nodes
-     are whole steps (`fire C X Y Z D` is one move, not five tokens). Candidates are the legal steps `glados-score env` lists (E2), plus
+     are whole steps (`fire C X Y Z D` is one move, not five tokens). Candidates are the legal steps `tantalos-score env` lists (E2), plus
      the policy's own top samples in liberal mode so a step the model forbids can still be
      tried; prior = summed token log-probabilities of the step; the baseline uses policy scores,
      with leaves scored by the value head only in the later comparison;
@@ -164,13 +164,13 @@ Step by step, with commands and checks: docs/goblin-next-steps-2026-10-27.md.
      Today a cell's coordinates are just number tokens with 1D positions; add learned x, y and
      z embeddings to each coordinate token (and to the plan's cell arguments), so the net knows
      which cells are neighbours as AlphaGo's convolutions do. Derived at load time by parsing
-     the existing token text (the grammar of `glados-p2c tokens`), so data/goblin is not
+     the existing token text (the grammar of `tantalos-p2c tokens`), so data/goblin is not
      rebuilt. A 3D-conv or patch encoder in front of the decoder only if the probe still shows
      spatial mistakes (wrong walls, off-by-one cells) after this.
    - **d. State tokens** (only if the value head can't learn from history alone). After each
      step, a few coarse tokens for the state the env reaches: player cell, both portals, held
      item, powered buttons/lasers. They come from replaying the existing plans through
-     `glados-score env` in `goblin_data.py --assemble` (no re-planning). Kept coarse because
+     `tantalos-score env` in `goblin_data.py --assemble` (no re-planning). Kept coarse because
      they are the model's view: where the model is wrong, so are they; the game outcome stays
      the label.
    - **e. Learned dynamics** (E6). The net predicts the next state itself and is trained on

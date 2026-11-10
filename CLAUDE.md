@@ -1,19 +1,19 @@
-# glados
+# tantalos
 
 Generates Portal 2 puzzle-maker levels: a Rust generator/solver (`src/`, binaries
-`target/release/glados-*.exe`, see below) makes training data; a small GPT (`train/`) learns to write levels.
+`target/release/tantalos-*.exe`, see below) makes training data; a small GPT (`train/`) learns to write levels.
 
 ## Training runs
 
 Use `train/run.py` for every training run. Don't call train.py, evaluate.py, ingame.py, abtest.py pick,
 pick.py, retrain.sh or loop.sh yourself, and don't change their settings, unless the user asks
-you to. `run.py start` already does every step of a run, in order: build the `glados-*.exe` binaries, train,
+you to. `run.py start` already does every step of a run, in order: build the `tantalos-*.exe` binaries, train,
 evaluate, check the levels in Portal 2's own editor, train 15 minutes away from every level
 the game has rejected or a play-tester found unsolvable (`data/ingame/human-unsolvable.jsonl`), and every evaluated
-level whose exit can never be reached (`data/ingame/dead.jsonl`, glados-score's `"dead"`) (into `runs/NAME/away`; evaluated and game-checked too, and the final
+level whose exit can never be reached (`data/ingame/dead.jsonl`, tantalos-score's `"dead"`) (into `runs/NAME/away`; evaluated and game-checked too, and the final
 model unless it scores over 3 points lower), stage a blind A/B play-test (`train/abtest.py`: 4
 game-checked levels from the final model and 4 from its parent, or from rated Workshop levels
-for a fresh run, shuffled into the Puzzle Maker folder as `glados-ab-NAME-NN`), record in
+for a fresh run, shuffled into the Puzzle Maker folder as `tantalos-ab-NAME-NN`), record in
 `train/runs.csv`. You don't run any of those steps yourself. `--from NAME` continues that
 run's final model.
 
@@ -98,16 +98,16 @@ for good and records it.
 - Name runs short and dated by topic, e.g. `v5-fresh-2h`, `v5-cont-1h`. The name can't exist yet.
 - Only one run at a time (one GPU). `start` refuses if one is running; say so to the user.
 - While a run is going, don't rebuild `target/release` (`cargo build --release`) or start
-  other heavy jobs: training calls `glados-score.exe` and shares the machine.
+  other heavy jobs: training calls `tantalos-score.exe` and shares the machine.
 
 Binaries (`src/bin/`, each prints its usage when run without arguments):
-`glados-score` (`score`, `check`, `route`: what training, evaluation and play call; `grammar`: the legal
+`tantalos-score` (`score`, `check`, `route`: what training, evaluation and play call; `grammar`: the legal
 next level tokens, items kept clear of the editor's rules, for `--constrained` in `sample.py`,
 `rated.py`, `evaluate.py` and `abtest.py pick`; `env`: the
 legal next plan tokens, for `goblin_eval.py --constrained`),
-`glados-data` (`dataset`, `mutate`), `glados-p2c` (`info`, `solve`, `tokens`, `vocab`, `editor`,
-`roundtrip`, `fixtures`), `glados-view`, `glados-workbench`, `glados-evolve`, and `reverse`.
-There is no `glados.exe` any more.
+`tantalos-data` (`dataset`, `mutate`), `tantalos-p2c` (`info`, `solve`, `tokens`, `vocab`, `editor`,
+`roundtrip`, `fixtures`), `tantalos-view`, `tantalos-workbench`, `tantalos-evolve`, and `reverse`.
+There is no `tantalos.exe` any more.
 
 Reading results. The goal (2026-10-25) is varied levels that use the mechanisms of highly rated
 Workshop levels, so the headline is the **RATED STYLE** line (`yield` in `list`, `rated_*` in
@@ -118,7 +118,7 @@ uses 2+ state-changing mechanics and at most 1 trick, per 1,000. **Profile gap**
 difference in points between the samples' item-family mix and 5-star levels' (lower is better).
 Baseline, v5-cont-10h-d (2026-10-25, runs/v5-cont-10h-d/rated/): yield 207, strong 8, gap 23.5.
 Since 2026-11-01 level runs sample their evaluation and play-test levels with constrained
-decoding (`glados-score grammar`: levels that parse, items clear of the editor's rules), shown
+decoding (`tantalos-score grammar`: levels that parse, items clear of the editor's rules), shown
 as `decoding` in runs.csv: their EVAL and RATED STYLE compare only with constrained runs. The
 constrained baseline is v6-fresh-12h/away (seed 7): yield 422, strong 25, gap 7.4 (it was 182,
 20, 11.0 constrained without the editor's rules, 2026-11-01).
@@ -147,7 +147,7 @@ to change something between them (data, settings) or to look at a model midway.
 
 ## Workshop workbench (triage of downloaded levels)
 
-`glados-workbench` is the browser app for the downloaded Workshop levels (`out/workshop/levels.jsonl`
+`tantalos-workbench` is the browser app for the downloaded Workshop levels (`out/workshop/levels.jsonl`
 plus `data/ws5/{train,test}.jsonl`). It shows every field, the solver's verdict and rating, and
 draws the chamber. The user's triage is server-side in `train/workshop-annotations.jsonl`, not in
 the browser. Read or write it with:
@@ -167,14 +167,14 @@ of truth. Do not rewrite the level files for annotations.
 
 ### Generated levels in the workbench
 
-`target/release/glados-workbench --generated` opens the same app on the level net's own levels:
+`target/release/tantalos-workbench --generated` opens the same app on the level net's own levels:
 the eval samples of the newest level run (`runs/RUN/eval/{samples,rated-samples}.jsonl` and
 `away/eval/`, joined with the Portal 2 editor check), or `--run NAME`, plus any `--levels FILE`
 (JSONL with `tokens`). A level's id is a hash of its tokens. The Stage button writes
-`glados-gen-NNNNN.p2c` (registry `train/generated-staged.jsonl`). Annotations are in
+`tantalos-gen-NNNNN.p2c` (registry `train/generated-staged.jsonl`). Annotations are in
 `train/generated-annotations.jsonl` (keyed `id`, with the level's tokens and origin) and carry the
 user's play-test verdict: solvable, unsolvable or broken. **Unsolvable and broken also add the
-level to `data/ingame/human-unsolvable.jsonl`** (source `glados-workbench ...`), so the next run
+level to `data/ingame/human-unsolvable.jsonl`** (source `tantalos-workbench ...`), so the next run
 trains away from it; clearing the verdict removes that row. When the user reports how a
 generated level played, record it the same way:
 
@@ -224,7 +224,7 @@ new task, fresh learning rates); `--from` a Goblin run continues it.
   `.venv/Scripts/python train/run.py list --task goblin`. `note` finds the right file itself.
 - The main score is **EVAL solved %**: on data/goblin, the share of test-ws and test-v6
   levels together (held-out Workshop levels our solver solves, and levels the level net wrote)
-  whose greedy plan `glados-score check` accepts (`decoding` in goblin-runs.csv: runs before
+  whose greedy plan `tantalos-score check` accepts (`decoding` in goblin-runs.csv: runs before
   2026-10-29 decoded freely and score far lower, 20.2% against 57.3% constrained for
   goblin-v6init-12h-b); on the old data/plans (solve-fresh-3h), of
   1,024 test-gen levels. Higher is better; differences under about 5 points are noise. Also
@@ -237,7 +237,7 @@ new task, fresh learning rates); `--from` a Goblin run continues it.
 ## Staging "unsolv" Workshop levels for play-testing
 
 When the user asks for N more "unsolvable" Workshop levels, run one command (no Portal 2 needed,
-don't start or touch the game; needs `target/release/glados-score.exe` and `glados-p2c.exe`):
+don't start or touch the game; needs `target/release/tantalos-score.exe` and `tantalos-p2c.exe`):
 
 ```bash
 .venv/Scripts/python train/stage_unsolv.py --n 5
@@ -245,9 +245,9 @@ don't start or touch the game; needs `target/release/glados-score.exe` and `glad
 
 It picks the smallest levels of `data/ws5/train.jsonl` our solver calls unsolvable (not yet in
 `train/unsolv-staged.jsonl`, no `@pre_paint_sprayer` gel, one per item set), re-scores them with the
-release build (50k/250k, editor rules off) and `glados-p2c editor`, writes `out/unsolv-DATE/`
+release build (50k/250k, editor rules off) and `tantalos-p2c editor`, writes `out/unsolv-DATE/`
 (p2c, tokens, scores, MANIFEST.md), copies them into the Puzzle Maker folder as
-`glados-ws5b-unsolv-NNNNN` (continuing the highest number; Title `unsolv <title>`) and appends them
+`tantalos-ws5b-unsolv-NNNNN` (continuing the highest number; Title `unsolv <title>`) and appends them
 to the registry. `--dry-run` shows the picks only. Commit `train/unsolv-staged.jsonl` afterwards.
 Then tell the user the file names, titles, Workshop ratings and item sets. Add `--n` only if the
 user names a count, and `--order rating` (most stars, then most ratings, first; from

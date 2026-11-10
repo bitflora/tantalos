@@ -1,4 +1,4 @@
-"""Score `glados-p2c editor` predictions against the game's INVALID ITEM lists, item by item.
+"""Score `tantalos-p2c editor` predictions against the game's INVALID ITEM lists, item by item.
 
     python tools/ingame/rules.py out/ingame/sample/p2c out/ingame/sample/ingame.jsonl
 
@@ -17,7 +17,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("p2c_dir")
     ap.add_argument("game")
-    ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados-p2c.exe"))
+    ap.add_argument("--tantalos", default=str(ROOT / "target" / "release" / "tantalos-p2c.exe"))
     ap.add_argument("--examples", type=int, default=6)
     a = ap.parse_args()
     game = {}
@@ -25,7 +25,7 @@ def main():
         j = json.loads(l)
         if j["verdict"] in ("valid", "invalid"):
             game[Path(j["file"]).stem] = {(i["name"], tuple(i["pos"])) for i in j["invalid_items"]}
-    out = subprocess.run([a.glados, "editor", a.p2c_dir], capture_output=True, text=True, check=True)
+    out = subprocess.run([a.tantalos, "editor", a.p2c_dir], capture_output=True, text=True, check=True)
     pred = {}
     for l in out.stdout.splitlines():
         j = json.loads(l)

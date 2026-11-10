@@ -1,7 +1,7 @@
 """Check scored levels in Portal 2's own editor, after an evaluation.
 
     python train/ingame.py runs/v2/eval                    # samples.jsonl from evaluate.py
-    python train/ingame.py --samples out/x/scores.jsonl    # any `glados-score score` output
+    python train/ingame.py --samples out/x/scores.jsonl    # any `tantalos-score score` output
 
 Takes every parsed level our checker passes (solvable, uncertain, unsolvable) and a share of
 the ones it calls invalid (so rules that are too strict show up too), writes them as .p2c,
@@ -93,7 +93,7 @@ def main():
     ap.add_argument("--reject-share", type=float, default=0.2,
                     help="share of the levels our checker calls invalid to check too")
     ap.add_argument("--limit", type=int, default=None, help="at most this many levels")
-    ap.add_argument("--glados", default=str(ROOT / "target" / "release" / "glados-score.exe"))
+    ap.add_argument("--tantalos", default=str(ROOT / "target" / "release" / "tantalos-score.exe"))
     ap.add_argument("--store", default=str(ROOT / "data" / "ingame"))
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
@@ -146,7 +146,7 @@ def main():
         if p2c.exists():
             for f in p2c.glob("*.p2c"):
                 f.unlink()
-        subprocess.run([str(Path(a.glados).resolve()), "score", "--budget", "1", "--p2c-all", str(p2c)],
+        subprocess.run([str(Path(a.tantalos).resolve()), "score", "--budget", "1", "--p2c-all", str(p2c)],
                        input="\n".join(r["tokens"] for r in picked) + "\n",
                        capture_output=True, text=True, check=True)
         results_path.unlink(missing_ok=True)

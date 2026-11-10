@@ -5,7 +5,7 @@
 #
 #   bash train/night.sh [GEN_END=22:45] [TRAIN_END=07:40]
 #
-# Expects `glados-data dataset ... --out data/night/levels.jsonl` already running, and
+# Expects `tantalos-data dataset ... --out data/night/levels.jsonl` already running, and
 # runs/first finishing (or finished).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,7 +28,7 @@ log "runs/first done"
 log "generating until $GEN_END"
 gen_end=$(date -d "$GEN_END" +%s)
 while [ "$(date +%s)" -lt "$gen_end" ]; do sleep 20; done
-taskkill //F //IM glados-data.exe > /dev/null 2>&1 || true
+taskkill //F //IM tantalos-data.exe > /dev/null 2>&1 || true
 sleep 2
 # Keep whole lines only; the generator was stopped mid-write.
 n=$(wc -l < data/night/levels.jsonl)

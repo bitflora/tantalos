@@ -1,13 +1,13 @@
 //! Routes: the solver's plans made concrete for playing in the game.
 
-use glados::fixtures;
-use glados::geom::{step, Cell, Dir};
-use glados::dynamics::Devices;
-use glados::level::Level;
-use glados::regions::{Geo, Move};
-use glados::portals::{shots_from, Sight};
-use glados::route::{route, Act, Route};
-use glados::solver::{Mode, Model, Verdict, DEFAULT_MAX_STATES};
+use tantalos::fixtures;
+use tantalos::geom::{step, Cell, Dir};
+use tantalos::dynamics::Devices;
+use tantalos::level::Level;
+use tantalos::regions::{Geo, Move};
+use tantalos::portals::{shots_from, Sight};
+use tantalos::route::{route, Act, Route};
+use tantalos::solver::{Mode, Model, Verdict, DEFAULT_MAX_STATES};
 
 /// One step on level ground, or off a ledge and down to where a fall can end (devices in any
 /// state).

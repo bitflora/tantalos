@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>glados workbench</title>
+<title>tantalos workbench</title>
 <style>
   :root {
     --bg:#15171c; --panel:#1d2027; --panel2:#252a33; --panel3:#2d333e; --line:#343b48;
@@ -187,7 +187,7 @@
 <div id="app">
   <aside id="sidebar">
     <header>
-      <h1>glados workbench <span id="count">loading…</span></h1>
+      <h1>tantalos workbench <span id="count">loading…</span></h1>
       <input id="search" type="search" placeholder="Search title, id, tag, notes…" autocomplete="off">
       <div class="filters">
         <select id="f-verdict" title="Solver classification">
@@ -443,7 +443,7 @@ async function loadAll() {
   else if (state.filtered.length) select(state.filtered[0].id, { scroll:false });
 }
 
-// Switch the page between Workshop levels and the level net's own (glados-workbench --generated).
+// Switch the page between Workshop levels and the level net's own (tantalos-workbench --generated).
 let configApplied = false;
 function applyConfig(config) {
   state.config = config || { mode: "workshop" };
@@ -453,8 +453,8 @@ function applyConfig(config) {
   document.querySelectorAll("#sort option").forEach(o => { o.hidden = o.disabled = gen ? o.classList.contains("ws-only") : o.classList.contains("gen-only"); });
   if (gen) {
     const run = state.config.run;
-    $("#sidebar h1").firstChild.textContent = "glados workbench · generated ";
-    document.title = "glados workbench · " + (run || "generated levels");
+    $("#sidebar h1").firstChild.textContent = "tantalos workbench · generated ";
+    document.title = "tantalos workbench · " + (run || "generated levels");
     $("#search").placeholder = "Search run, setting, verdict, notes…";
     $("#welcome-run").textContent = run ? `the eval samples of run ${run}` : "the --levels files";
     $("#welcome-store").textContent = state.config.annotations || "";
@@ -1093,7 +1093,7 @@ function copyText(text) {
     () => setSaved("copy failed", "err"));
 }
 
-// ---- 2.5D drawing (the same projection as `glados view`) -------------------
+// ---- 2.5D drawing (the same projection as `tantalos view`) -------------------
 const C = {
   // Surfaces: portalable (white) panels light and warm, black panels dark and blue-grey, lit
   // from above with the corners shaded; the near walls cut down to a low lip unless shown

@@ -1,16 +1,16 @@
-//! `glados-evolve`: evolutionary search for interesting levels (`src/evolve.rs`).
+//! `tantalos-evolve`: evolutionary search for interesting levels (`src/evolve.rs`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use glados::cli::{self, metric_lines, Result};
-use glados::evolve::{self, Candidate, Config};
-use glados::level::Level;
-use glados::render;
-use glados::solver::{Mode, Model};
+use tantalos::cli::{self, metric_lines, Result};
+use tantalos::evolve::{self, Candidate, Config};
+use tantalos::level::Level;
+use tantalos::render;
+use tantalos::solver::{Mode, Model};
 
 const USAGE: &str = "usage:
-  glados-evolve [--seed N] [--pop N] [--gens N] [--budget N] [--min-area N] [--keep N] [--out DIR]
+  tantalos-evolve [--seed N] [--pop N] [--gens N] [--budget N] [--min-area N] [--keep N] [--out DIR]
                                 search for interesting levels; writes the best + report.md
                                 (default out/evolve-<seed>)";
 
@@ -59,7 +59,7 @@ fn run(args: &[String]) -> Result<()> {
     }
     std::fs::create_dir_all(&out)?;
     let mut report = format!(
-        "# glados evolve, seed {}\n\npopulation {}, {} generations, budget {}\n",
+        "# tantalos evolve, seed {}\n\npopulation {}, {} generations, budget {}\n",
         cfg.seed, cfg.population, cfg.generations, cfg.budget
     );
     for (i, c) in pop.iter().take(keep).enumerate() {

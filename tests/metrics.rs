@@ -1,10 +1,10 @@
 //! Metrics on the synthetic chambers, where the right answers are known by design.
 
-use glados::fixtures;
-use glados::level::Level;
-use glados::metrics::{assess, Assessment, Metrics};
-use glados::p2c::Puzzle;
-use glados::solver::{Mode, Model, DEFAULT_MAX_STATES};
+use tantalos::fixtures;
+use tantalos::level::Level;
+use tantalos::metrics::{assess, Assessment, Metrics};
+use tantalos::p2c::Puzzle;
+use tantalos::solver::{Mode, Model, DEFAULT_MAX_STATES};
 
 fn measure(p: &Puzzle) -> Metrics {
     let mut model = Model::new(&Level::from_puzzle(p), Mode::Conservative).unwrap();

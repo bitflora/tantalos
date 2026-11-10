@@ -48,7 +48,7 @@ data builds, sampling rounds or game sessions.
 ## Rules for whoever does these tasks
 
 - Read `CLAUDE.md` first and follow it. Use `.venv/Scripts/python`. Run commands from the repo
-  root, `C:\Users\timja\code\glados`.
+  root, `C:\Users\timja\code\tantalos`.
 - Do the tasks **in order**. Each says what "done" looks like: check it before going on.
 - **Ask the user before each task marked (ASK)**, and wait for a yes in the conversation. Those
   tasks hold the CPU or GPU for hours.
@@ -71,7 +71,7 @@ data builds, sampling rounds or game sessions.
 Both can be stopped and carried on; to pause, tell the user what you are doing, then:
 
 - **Task 1 / Task 2's builds** (`goblin_data.py`): stop the process (Ctrl-C, or end the Python
-  process; its `glados-score` child exits when its input closes). Run the same command again to
+  process; its `tantalos-score` child exits when its input closes). Run the same command again to
   resume: finished parts are kept (`parts/NAME.jsonl`) and a part under way carries on from its
   `.partial` file, losing at most the last 2,048 levels. Don't change options between the two runs.
 - **Task 2's harvest** (`harvest.py`): create the empty file `OUT.stop` (e.g.
@@ -132,7 +132,7 @@ No heavy job, a few minutes.
 1. Every training plan must check. Run this, which checks 2,000 random train rows:
 
    ```bash
-   .venv/Scripts/python -c "import json,random,subprocess,pathlib;g=str(pathlib.Path('target/release/glados-score.exe').resolve());rows=[json.loads(l) for l in open('data/goblin/train.jsonl',encoding='utf-8')];s=random.Random(1).sample(rows,2000);inp=''.join(json.dumps({'tokens':r['tokens'],'plans':[r['plan']]+r.get('alt_plans',[])})+'\n' for r in s);o=subprocess.run([g,'check'],input=inp,capture_output=True,text=True).stdout;v=[x['verdict'] for l in o.splitlines() for x in json.loads(l)['results']];print(len(v),'plans,',v.count('solved'),'solved')"
+   .venv/Scripts/python -c "import json,random,subprocess,pathlib;g=str(pathlib.Path('target/release/tantalos-score.exe').resolve());rows=[json.loads(l) for l in open('data/goblin/train.jsonl',encoding='utf-8')];s=random.Random(1).sample(rows,2000);inp=''.join(json.dumps({'tokens':r['tokens'],'plans':[r['plan']]+r.get('alt_plans',[])})+'\n' for r in s);o=subprocess.run([g,'check'],input=inp,capture_output=True,text=True).stdout;v=[x['verdict'] for l in o.splitlines() for x in json.loads(l)['results']];print(len(v),'plans,',v.count('solved'),'solved')"
    ```
 
    Done when at least 99.5% are solved. Otherwise stop and report.
@@ -153,7 +153,7 @@ prior in the search is the sum of its tokens' log-probabilities), and its weight
 checkpoint without the value head loads with the head freshly initialised. The value head can't
 be trained yet, since every plan in data/goblin is a solved one (it would only learn "solvable");
 its labels come from self-play rounds (Task 5 on), which need a policy that already solves a fair
-share. The search needs the legal-step server `glados-score env` (built 2026-10-29, src/env.rs). The one change
+share. The search needs the legal-step server `tantalos-score env` (built 2026-10-29, src/env.rs). The one change
 that could go in before this run, 3D position embeddings, is Task 6 instead, as an A/B run
 against this one, so we learn whether it helps.
 
@@ -222,7 +222,7 @@ Then check, by hand, on a fresh small round (the old `try/r00` is already comple
 `.venv/Scripts/python train/school.py round verify --model runs/goblin-v6init-12h-b/best.pt --round 0 --levels 256 --k 8`
 
 Done when: the small round runs without errors; every buffer plan checks as solved when run
-through `glados-score check` again; `summary.json` numbers add up (solved ≤ drawn); a second
+through `tantalos-score check` again; `summary.json` numbers add up (solved ≤ drawn); a second
 `round verify --model runs/goblin-v6init-12h-b/best.pt --round 1 --levels 256 --k 8` draws a different half of new levels and updates `levels.jsonl`. Commit
 `train/school.py`. Report the summary table to the user and stop.
 
@@ -235,7 +235,7 @@ that for free.
 
 1. In `train/model.py` and the data loader: learned x, y and z embeddings added to each
    coordinate token of the level and of the plan's cell arguments, derived at load time by
-   parsing the token text (the grammar of `glados-p2c tokens` and src/plan.rs). Zero-initialised,
+   parsing the token text (the grammar of `tantalos-p2c tokens` and src/plan.rs). Zero-initialised,
    so a checkpoint without them loads and behaves exactly as before. Behind a flag, off by
    default. data/goblin is not rebuilt.
 2. Tests: the parser marks the right tokens on a few levels and plans (Workshop and generated,

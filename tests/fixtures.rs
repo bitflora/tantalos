@@ -1,9 +1,9 @@
 //! Synthetic chambers: committed files match the generator, and regions come out as designed.
 
-use glados::fixtures;
-use glados::level::{ItemKind, Level};
-use glados::p2c::Puzzle;
-use glados::regions::{Cond, Edge, Move, RegionGraph};
+use tantalos::fixtures;
+use tantalos::level::{ItemKind, Level};
+use tantalos::p2c::Puzzle;
+use tantalos::regions::{Cond, Edge, Move, RegionGraph};
 
 fn analyse(p: &Puzzle) -> (Level, RegionGraph) {
     let level = Level::from_puzzle(p);
@@ -30,7 +30,7 @@ fn committed_files_are_current_and_reparse() {
         let generated = puzzle.to_p2c();
         assert!(
             on_disk == generated,
-            "{path} is stale; run `cargo run --bin glados-p2c -- fixtures`"
+            "{path} is stale; run `cargo run --bin tantalos-p2c -- fixtures`"
         );
         assert_eq!(Puzzle::parse(&generated).unwrap(), puzzle, "{name}");
         assert_eq!(

@@ -2,14 +2,14 @@
 
 Portal 2's Workshop holds tens of thousands of Puzzle Maker chambers, but they're published
 compiled (`.bsp`); the `.p2c` stays on the author's machine. These tools recover the puzzle from
-the compiled map, as glados tokens, and label it with the solver like any generated level.
+the compiled map, as tantalos tokens, and label it with the solver like any generated level.
 
 ```bash
 python tools/workshop/fetch.py list --pages 100   # out/workshop/items.jsonl (30 puzzles a page)
 python tools/workshop/fetch.py download           # out/workshop/bsp/<id>.bsp.zst (zstd), fetched.jsonl
 python tools/workshop/fetch.py download --retry-errors
 python tools/workshop/fetch.py build              # out/workshop/levels.jsonl, report.jsonl
-python tools/workshop/check.py                    # converter vs. known puzzles (needs release glados)
+python tools/workshop/check.py                    # converter vs. known puzzles (needs release tantalos)
 ```
 
 `build` converts every slim map first and scores them at the end. To overlap that CPU work
@@ -23,7 +23,7 @@ mid-download resumes where it left off, because `report.jsonl` is the set of map
 python tools/workshop/fetch.py pipeline --workers 8 --retry-errors
 ```
 
-`levels.jsonl` has the fields `glados-data dataset` writes (`tokens`, `verdict`, `min_len`, `metrics`),
+`levels.jsonl` has the fields `tantalos-data dataset` writes (`tokens`, `verdict`, `min_len`, `metrics`),
 plus `workshop_id`, `title`, `subscribers` (lifetime unique), `favorited` and, once `ratings` has
 run, the Workshop page's star rating: `stars` (1-5; 0 = "not enough ratings yet") and `votes` (its
 "N ratings"). Training reads the
@@ -46,7 +46,7 @@ sooner, and a 429 makes the request wait a minute. Last, it sets `stars`/`votes`
 
 ## Triaging the downloaded levels
 
-`glados-workbench` (repo root, needs the release `glados-score.exe` for staging) serves a local browser app
+`tantalos-workbench` (repo root, needs the release `tantalos-score.exe` for staging) serves a local browser app
 for `out/workshop/levels.jsonl` joined with `data/ws5/{train,test}.jsonl`, the ratings and item
 metadata. It shows the Workshop stars/votes, subscribers, tags, the solver and dataset verdicts,
 all metrics, conversion problems, the level tokens and a 2.5D drawing of the chamber. You can mark
@@ -70,7 +70,7 @@ from training.
 
 ```bash
 python tools/workshop/augment.py               # data/ws5/train.jsonl -> data/v5b/workshop-aug-x2.jsonl
-target/release/glados-data.exe augment --check FILE   # also label each version against its level
+target/release/tantalos-data.exe augment --check FILE   # also label each version against its level
 ```
 
 `data/v5b/workshop-x20.jsonl` repeats each ws5 train level 20 times and models memorize
@@ -144,7 +144,7 @@ one level at the edge of the 50k budget.
     its door's outward face; pistons from their func_movelinear and level counters; rails from
     the track's movedir/movedistance; loose cubes from `cube<N>` instances' CubeType. The voxel
     behind each such item is forced solid (it is in the editor; compiled, it's a hollow).
-- **Labelling**: `glados-score score --editor-rules off`. A published map already passed the real
+- **Labelling**: `tantalos-score score --editor-rules off`. A published map already passed the real
   editor, and our model of its rules flags some of them (a fizzler centred in a doorway, fields
   crossing), so those flags are skipped.
 

@@ -13,7 +13,7 @@ being wrong, and an "uncertain" is the model being wrong or the search being too
 ## Method
 
 Seeded samples (seed 42) of 100 unsolvable and 100 uncertain levels, scored with
-`glados-score score --editor-rules off` (as `tools/workshop/fetch.py` does), at budget 50k unless
+`tantalos-score score --editor-rules off` (as `tools/workshop/fetch.py` does), at budget 50k unless
 noted. Each level was also scored with one thing *relaxed* in its tokens (`relax.py`,
 `relax2.py`):
 
@@ -155,7 +155,7 @@ Limits:
 - Angled aims are sampled, not every angle.
 - Beams stay horizontal.
 - A plan that uses an angled spot still encodes the cube's facing as its nearest axis
-  (`Spot::dir`; the real yaw is in `Spot::aim`). Plan tokens, `glados-score check` and the play
+  (`Spot::dir`; the real yaw is in `Spot::aim`). Plan tokens, `tantalos-score check` and the play
   harness can't replay those plans yet. That only matters for Goblin's plan data
   (`train/goblin_data.py`), and only for levels solved through the angled pass.
 
@@ -266,7 +266,7 @@ unchanged.
 
 ## Play-tested small levels (2026-10-23)
 
-The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
+The five levels of item 4 below were staged as `tantalos-ws3-unsolv-00011..15`
 (`out/ws3-unsolv-more/`). What the play-tester found:
 
 - **3818309212 "???"**: easy. The first pedestal toggles the angled panel that blocks the hall;
@@ -274,7 +274,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   right). Drop down the shaft onto the stairs, which are always up and face a wall, and step
   off their top step **sideways** onto the exit ledge. The solver only let stairs lead
   straight ahead. **Fixed:** `Stairs::exits` (src/level.rs) adds the cells beside the top step,
-  one voxel up, when standable and not walled off; the solver and `glados-score route` use it. On
+  one voxel up, when standable and not walled off; the solver and `tantalos-score route` use it. On
   800 unsolved Workshop levels with stairs, 7 become solvable (none get worse); on 1,000
   generated stairs levels from data/v5b, 1 becomes solvable and 4 get a shorter plan. The
   play harness hasn't walked a sideways exit yet.
@@ -296,7 +296,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     cell beside the button's (or across a corner) in another region, across fizzlers that are
     on but off while the button is held. Conservative rules want every cell of that region in
     reach; liberal ones any.
-  - Dash timing (`DashTimes`, shared by the solver and `glados-score route`): steps across a corner
+  - Dash timing (`DashTimes`, shared by the solver and `tantalos-score route`): steps across a corner
     cost 1.4 voxels, a cell counts as reached on entering it (half a voxel before its middle),
     and a held cube half a voxel sooner still. Escaping through the exit still needs the exit
     cell's middle in time.
@@ -307,10 +307,10 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     plans; 1,000 v5b levels with a timed pedestal, 3 → solvable, 3 unsolvable → uncertain and
     39 shorter plans. No verdict got worse. Mechanics: a fetch counts as "timed dash"; a reach
     has no bit of its own (a new one would add a training-condition group).
-  - `train/play.py` has `act_fetch` and `act_reach`, not yet tried in game. `glados-score route`
+  - `train/play.py` has `act_fetch` and `act_reach`, not yet tried in game. `tantalos-score route`
     can now put a cube down in the player's own cell when its region has no other.
 - 00011..00013 (One Jump, FLAAD TEST, You can't simply jump around it): not recorded here.
-- **3094057883 "Simple Test 01"** (staged as `glados-ws5b-unsolv-00002`, 2026-10-24; the user's
+- **3094057883 "Simple Test 01"** (staged as `tantalos-ws5b-unsolv-00002`, 2026-10-24; the user's
   favorite, `favorites/ws5-simple-test-01.p2c`): momentum. Exit portal high on a wall, entrance
   in the floor under it; walk in, and just as you come out, move the exit to the tilted panel:
   the fall back through the floor portal flings you onto the fence platform. Press the
@@ -321,7 +321,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   - `Action::Loop`: with a floor portal under the way out of the other portal (straight down,
     or a cell further out, `loop_falls`), walk in and fall back through at the speed of that
     fall, flying out of the other portal or (`refire`) of a face the player shoots on the way
-    down from where they walked in. Not grounded by `glados-score route` yet (no plan word, no play
+    down from where they walked in. Not grounded by `tantalos-score route` yet (no plan word, no play
     harness leg), so such plans are left out of Goblin's data.
   - The dropper's cube falls into goo in an alcove; the player catches it from the floor
     beside its fall. A dropper's cube that would fall into goo now lies in such a floor's
@@ -329,7 +329,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   - Liberal rules solve it in 11 actions (the play-tester's route, with the cube carried
     through the first loop); conservative rules don't trust the 4-voxel fling out of the tilted
     panel (its trials land in different places), so it is uncertain.
-- **2026-10-24 batch** (`glados-ws5-unsolv-00004`, `glados-ws5b-unsolv-00004..05`). Two the
+- **2026-10-24 batch** (`tantalos-ws5-unsolv-00004`, `tantalos-ws5b-unsolv-00004..05`). Two the
   editor rejects, so they are converter problems, not solver gaps. `train/portal2.py check`
   names the items:
   - **3093140791 "Easy chamber"** (ws5b-00004), invalid: `barrierhazard (13,9,2)` twice. The
@@ -390,7 +390,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
       editor now, and the solver calls both unsolvable.
     - Not done: `out/workshop/levels.jsonl` and data/ws5 still hold the old conversions of
       the 377 levels (fields stacked; 74 now unsupported).
-- **3543260079 "My First Test Chamber"** (`glados-ws5b-unsolv-00003`, 2026-10-24): a turret in
+- **3543260079 "My First Test Chamber"** (`tantalos-ws5b-unsolv-00003`, 2026-10-24): a turret in
   an alcove behind a laser field (with a button) sees the entrance; a piston, up until its
   button is pressed, stands below a ledge with the second cube. Play-tester: portal behind the
   laser field and knock the turret over; put a cube on the alcove's button (the piston goes
@@ -402,11 +402,11 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     (`start_exits`), and nowhere else it can shoot.
   - `Action::PortalReach`: within reach of a portal (its face's cell or one beside it), take
     a cube off the floor button the other portal comes out onto, staying put (and riding the
-    platform the button released). Not grounded by `glados-score route` yet.
+    platform the button released). Not grounded by `tantalos-score route` yet.
   - Conservative rules solve it in 18 actions, the play-tester's second route (they never
     need to knock the turret over); liberal ones also by a portal loop.
 
-- **2026-10-24 batch 2** (`glados-ws5b-unsolv-00006`, `-00009`, `-00010`), all solved by the
+- **2026-10-24 batch 2** (`tantalos-ws5b-unsolv-00006`, `-00009`, `-00010`), all solved by the
   play-tester and **fixed (2026-10-24)**; each is in `tests/playtested.rs`.
   - **1498933548 "Laser Management"** (00010; `favorites/ws5-laser-management.p2c`): the prism
     turns the laser onto a white wall near the start. Stand on the button and portal the beam
@@ -423,7 +423,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     rise. **Fixed:** `dynamics::funnel_path` (grating passes; a ride along a beam stops at a
     grating), and `climb_moves`: from a cell of the beam out of a portal, up the column
     through cells some other portal's beam crosses, stepping out sideways anywhere. Conservative-
-    solvable; `glados-score route` can't ground the lift yet.
+    solvable; `tantalos-score route` can't ground the lift yet.
   - **68651531 "Mari0 - Test chamber 04 (Update 1)"** (00006): gel dropped through the floor
     portal under the dispenser and ceiling portals paints the floor; bounces off it, fed
     back in through ceiling portals, carry the player up to the exit ledge (running jump
@@ -436,7 +436,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     with lasers, 5 + 2 → solvable; 1,200 with bounce gel, 1 → solvable, 8 unsolvable →
     uncertain; 1,500 random, 10 unsolvable → solvable. No verdict got worse.
 
-- **3718840820 "Flying a Timing"** (`glados-ws5-unsolv-00001`, 2026-10-24). Play-tester: portal
+- **3718840820 "Flying a Timing"** (`tantalos-ws5-unsolv-00001`, 2026-10-24). Play-tester: portal
   the laser (floor emitter) from a ceiling portal to a floor portal under the catcher, which
   turns off the laser field; take the cube behind it to the button that raises the stairs;
   walk up them onto the first of four faith plates (the third on a wall), which throw you
@@ -445,7 +445,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   back before the timer runs out; the cube on the exit's button. Three gaps, **fixed
   (2026-10-24), liberal rules only** (`tests/playtested.rs`):
   - Stairs whose top step is a faith plate went nowhere (the plate's cell isn't standable).
-    Now a `Move::Plate` to where the plate chain lands; `glados-score route` writes it as `plate`
+    Now a `Move::Plate` to where the plate chain lands; `tantalos-score route` writes it as `plate`
     (up the stairs onto the plate). Conservative-solvable and routed with the exit unwired.
   - **Rail platforms stood a voxel too low.** The platform is the top face of its item's
     voxel, so whoever rides it stands in the cell above (`Rail::stops`): in all 9,264 rails
@@ -468,7 +468,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     platform a voxel lower than the game puts it. **data/v5b's rail levels (~120k) are not
     re-scored.**
 
-- **3372907955 "SUPER SIMPLE #2"** (`glados-ws5b-unsolv-00012`, 2026-10-24). A corridor with
+- **3372907955 "SUPER SIMPLE #2"** (`tantalos-ws5b-unsolv-00012`, 2026-10-24). A corridor with
   two 3 s pedestals side by side, both wired to the exit. Play-tester: press both quickly one
   after the other, then walk out before the timers run out. Gap: a timed dash held only its
   own pedestal on, so the exit (AND of both) never opened; a timed pedestal pressed during
@@ -481,7 +481,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     levels with two or more timed pedestals: 2 unsolvable and 1 uncertain → solvable, 3
     unsolvable → uncertain (liberal-solvable), none worse; scoring took ~7% longer.
 
-- **3817082781 "sp_timed_lazer_change"** (`glados-ws5b-unsolv-00014`, 2026-10-24). The laser
+- **3817082781 "sp_timed_lazer_change"** (`tantalos-ws5b-unsolv-00014`, 2026-10-24). The laser
   crosses the funnel's column in mid-air; nothing else takes portals. Play-tester: put the
   reflection cube into the funnel facing the catcher and go to the exit while it rises; it
   turns the beam onto the catcher for a moment, and you must leave in that window. Gap: cubes
@@ -494,7 +494,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
   its `door_clear` trigger (64 units each side of the door), so being there in time is enough.
   The cube needs 1.0 s here, the walk 0.94 s at liberal speed, 1.28 s at conservative speed, so
   the level is uncertain. Not routed (no plan word).
-- **3495602854 "Mini Puzzle"** (`glados-ws5b-unsolv-00015`): play-tester: aim the prism so
+- **3495602854 "Mini Puzzle"** (`tantalos-ws5b-unsolv-00015`): play-tester: aim the prism so
   the beam passes the relay and hits the catcher, then press the 3 s pedestal and run out. The
   laser part already solved (an angled spot at the emitter); the dash doesn't: the pedestal is
   at the far wall (its prop at x=16 in a cell 0..128), and the exit cell's middle is 5.4 voxels
@@ -510,17 +510,17 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
     shorter plans; 1,216 of the 1,848 Workshop levels with a funnel, a reflection cube and a
     laser (stopped early), none changed. Nothing got worse. `tests/tier1.rs`
     `timed_field(4)` is now conservative-solvable (it was uncertain).
-- **252742140 "Parkour, Parkour PARKOUR PARKOUR"** (`glados-ws5b-unsolv-00021`, 2026-10-24).
+- **252742140 "Parkour, Parkour PARKOUR PARKOUR"** (`tantalos-ws5b-unsolv-00021`, 2026-10-24).
   Strips of floor between one-voxel channels of goo; play-tester: just jump across. Gap: the
   solver had no plain jump, only leaps off propulsion gel. **Fixed:** `Move::Jump`
   (`Geo::jumps`, src/regions.rs): a running jump across one voxel that can't be stood in, onto
   a floor at the same height, both rule sets. About 127 units of flight at walking speed
   (scaled from the measured gel leap, 290 units at 400 u/s) against 96 needed. Plans write it
-  as `walk` (no new plan word); `glados-score route` gives it a `jump` leg and train/play.py
+  as `walk` (no new plan word); `tantalos-score route` gives it a `jump` leg and train/play.py
   `act_jump` jumps at the edge (untested in game). One-voxel pits in generated levels are now
   jumpable too, so v5b labels go stale where those were the obstacle (fixture
   `piston_bridge` widened to two).
-- **3666439290 "First chamber"** (`glados-ws5b-unsolv-00018`, 2026-10-24). A laser field cuts
+- **3666439290 "First chamber"** (`tantalos-ws5b-unsolv-00018`, 2026-10-24). A laser field cuts
   the player off; the only white face is high on their side's wall, and a conversion gel
   stream pours on the far side. Play-tester: spread the gel around until you can portal past
   the field. Gap: gel out of a wall portal painted nothing (liberal: only a turret's floor).
@@ -540,7 +540,7 @@ The five levels of item 4 below were staged as `glados-ws3-unsolv-00011..15`
 
 ## Orientation: the same level turned or mirrored (2026-10-25)
 
-`glados-data augment --check` labels each of a level's 8 mirrored/turned versions
+`tantalos-data augment --check` labels each of a level's 8 mirrored/turned versions
 (`src/augment.rs`, which checks that each is the level moved cell for cell). On 600 ws5 train
 levels 99.1% of versions got the original's verdict, plan length and editor flags; the rest
 showed the solver depending on which way round a level was built:

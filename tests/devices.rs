@@ -2,15 +2,15 @@
 //! cubes: each mechanic's fixture is solved the way it is meant to be, and taking the device
 //! away (or switching it off) makes the level unsolvable.
 
-use glados::builder::Builder;
-use glados::editor::editor_problems;
-use glados::fixtures;
-use glados::geom::Dir;
-use glados::level::{ItemKind, Level, LaserKind};
-use glados::p2c::Puzzle;
-use glados::regions::Move;
-use glados::solver::{judge, Action, CubeLoc, Judgement, Mode, Model, Verdict};
-use glados::tokens::{decode, encode};
+use tantalos::builder::Builder;
+use tantalos::editor::editor_problems;
+use tantalos::fixtures;
+use tantalos::geom::Dir;
+use tantalos::level::{ItemKind, Level, LaserKind};
+use tantalos::p2c::Puzzle;
+use tantalos::regions::Move;
+use tantalos::solver::{judge, Action, CubeLoc, Judgement, Mode, Model, Verdict};
+use tantalos::tokens::{decode, encode};
 
 const BUDGET: usize = 200_000;
 
@@ -197,7 +197,7 @@ fn loose_cube_is_gone_once_fizzled() {
     b.loose_cube([1, 3, 1], 0);
     let p = b.build();
     let level = Level::from_puzzle(&p);
-    assert!(level.loose_cube(level.first(&glados::level::ItemKind::Cube).unwrap().index));
+    assert!(level.loose_cube(level.first(&tantalos::level::ItemKind::Cube).unwrap().index));
     let m = Model::new(&level, Mode::Conservative).unwrap();
     assert_eq!(m.start.cubes[0].home, CubeLoc::Gone);
     unsolvable(&p);
@@ -259,7 +259,7 @@ fn decoder_checks_device_geometry() {
 
 #[test]
 fn deployed_panel_gate_stops_shots() {
-    use glados::portals::{shots, Sight};
+    use tantalos::portals::{shots, Sight};
     let level = Level::from_puzzle(&fixtures::panel_gate());
     // Standing on its -x hinge edge, the panel at (3, 1, 1) stands across the face to (2, 1, 1).
     assert_eq!(level.face([2, 1, 1], Dir::PosX).panel, Some(0));

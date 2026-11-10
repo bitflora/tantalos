@@ -1,14 +1,14 @@
 //! Plans as tokens: the solver's own plans check as solved, damaged ones fail where they
 //! break.
 
-use glados::fixtures;
-use glados::generator::Genome;
-use glados::level::Level;
-use glados::p2c::Puzzle;
-use glados::plan::{check, decode, encode, encode_actions, step_text, vocab, Step};
-use glados::rng::Rng;
-use glados::route::{route, route_plan, route_prefix};
-use glados::solver::{Action, Mode, Model, Verdict};
+use tantalos::fixtures;
+use tantalos::generator::Genome;
+use tantalos::level::Level;
+use tantalos::p2c::Puzzle;
+use tantalos::plan::{check, decode, encode, encode_actions, step_text, vocab, Step};
+use tantalos::rng::Rng;
+use tantalos::route::{route, route_plan, route_prefix};
+use tantalos::solver::{Action, Mode, Model, Verdict};
 
 const BUDGET: usize = 50_000;
 
@@ -110,7 +110,7 @@ const UNGROUNDED: [(&str, &str); 2] = [
 #[test]
 fn plans_encode_from_actions() {
     for (i, (text, verb)) in UNGROUNDED.iter().enumerate() {
-        let p = glados::tokens::decode(text).unwrap_or_else(|e| panic!("level {i}: {e}"));
+        let p = tantalos::tokens::decode(text).unwrap_or_else(|e| panic!("level {i}: {e}"));
         let level = Level::from_puzzle(&p);
         let model = Model::new(&level, Mode::Conservative).unwrap();
         let (outcome, found) = model.shortest_plans(500_000, 8, 1);
@@ -218,13 +218,13 @@ fn decoder_rejects_garbage() {
     assert_eq!(
         decode("loop blue 1 2 3 +x 4 5 6 loop orange 7 8 9 exit").unwrap(),
         vec![
-            Step::Loop(glados::solver::Color::Blue, Some(([1, 2, 3], glados::geom::Dir::PosX)), [4, 5, 6]),
-            Step::Loop(glados::solver::Color::Orange, None, [7, 8, 9]),
+            Step::Loop(tantalos::solver::Color::Blue, Some(([1, 2, 3], tantalos::geom::Dir::PosX)), [4, 5, 6]),
+            Step::Loop(tantalos::solver::Color::Orange, None, [7, 8, 9]),
         ]
     );
 }
 
-/// `glados-score route --plan`: a plan that solves the level routes like the solver's own; one sent
+/// `tantalos-score route --plan`: a plan that solves the level routes like the solver's own; one sent
 /// somewhere it can't go routes the steps before that, then a try at it.
 #[test]
 fn given_plans_route() {
@@ -276,7 +276,7 @@ const LOOPS: [&str; 2] = [
 #[test]
 fn loops_route() {
     for (i, text) in LOOPS.iter().enumerate() {
-        let p = glados::tokens::decode(text).unwrap_or_else(|e| panic!("level {i}: {e}"));
+        let p = tantalos::tokens::decode(text).unwrap_or_else(|e| panic!("level {i}: {e}"));
         let level = Level::from_puzzle(&p);
         let model = Model::new(&level, Mode::Conservative).unwrap();
         let (_, found) = model.shortest_plans(500_000, 8, 1);

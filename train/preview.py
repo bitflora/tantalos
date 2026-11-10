@@ -7,8 +7,8 @@ you can see in; light = portalable (white) surface, dark = black surface, lit fr
 corners shaded; teal = goo; fields, glass and gel as tinted planes on their faces; buttons and
 faith plates as discs on the floor, other items as balls over their shadows, laser beams in red,
 entry and exit as squares), the level name, size and item counts on the right. The exact faces of fields,
-glass and gel and the beams come from `glados-p2c geometry` (without the release binary, barriers are lines). The projection is the one
-`glados-view` (src/viewer.html) draws with, turned to the corner the editor's own preview looks
+glass and gel and the beams come from `tantalos-p2c geometry` (without the release binary, barriers are lines). The projection is the one
+`tantalos-view` (src/viewer.html) draws with, turned to the corner the editor's own preview looks
 from, so a level is oriented the way the game shows it. playtest.py calls it for every level it
 copies in.
 
@@ -35,7 +35,7 @@ SHADOW = (0, 0, 0, 80)
 PLANES = {"fizzler": (120, 170, 255, 70), "laserfield": (255, 110, 220, 70),
           "glass": (150, 215, 230, 60), "grating": (182, 196, 206, 90)}
 FLAT = {"ITEM_BUTTON_FLOOR", "ITEM_CATAPULT"}  # items that lie on the floor, drawn as discs
-P2C_EXE = Path(__file__).resolve().parents[1] / "target/release/glados-p2c.exe"
+P2C_EXE = Path(__file__).resolve().parents[1] / "target/release/tantalos-p2c.exe"
 TURNS = 3  # quarter-turns of the level about z, to the corner the editor's own preview looks from
 
 TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|([{}])')
@@ -157,7 +157,7 @@ def font(px, bold=False):
 
 
 def geometry(p2c):
-    """The level's geometry from `glados-p2c geometry` (src/view.rs: the exact faces of fields,
+    """The level's geometry from `tantalos-p2c geometry` (src/view.rs: the exact faces of fields,
     glass and gel, and each item's facing), or None when the binary isn't built."""
     if not P2C_EXE.exists():
         return None
@@ -207,7 +207,7 @@ def render(p2c, name=None):
             return y, -x
         return x, y
 
-    # Oblique 2.5D, Z up: the projection glados-view draws with, the level turned TURNS quarter
+    # Oblique 2.5D, Z up: the projection tantalos-view draws with, the level turned TURNS quarter
     # turns first. `rx + ry` is depth, so cells with a larger one are nearer (drawn last).
     def project(x, y, z):
         rx, ry = rotxy(x, y)

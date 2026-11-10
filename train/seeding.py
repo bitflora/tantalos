@@ -2,7 +2,7 @@
 
 A number repeats a batch exactly. Leaving it out asks for a fresh, unpredictable one: a fixed
 default made warm-started checkpoints draw from the same random stream, so consecutive runs
-sampled near-neighbours (the same "glados sample 19" slot again and again). Whichever seed is
+sampled near-neighbours (the same "tantalos sample 19" slot again and again). Whichever seed is
 used is printed, so a batch worth keeping can be reproduced with --seed.
 """
 

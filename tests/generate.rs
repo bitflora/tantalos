@@ -1,10 +1,10 @@
 //! Random genomes, mutation and the evolutionary search.
 
-use glados::evolve::{evolve, Config};
-use glados::generator::Genome;
-use glados::level::Level;
-use glados::p2c::Puzzle;
-use glados::rng::Rng;
+use tantalos::evolve::{evolve, Config};
+use tantalos::generator::Genome;
+use tantalos::level::Level;
+use tantalos::p2c::Puzzle;
+use tantalos::rng::Rng;
 
 #[test]
 fn rng_range_is_inclusive_and_seeded() {
@@ -97,7 +97,7 @@ fn evolve_keeps_its_best() {
 
 #[test]
 fn genomes_produce_tier1_items() {
-    use glados::level::ItemKind;
+    use tantalos::level::ItemKind;
     let mut rng = Rng::new(21);
     let (mut barriers, mut hazards, mut pedestals) = (0, 0, 0);
     for _ in 0..300 {
@@ -180,7 +180,7 @@ fn genomes_mount_rails_on_walls() {
         let level = Level::from_puzzle(&p);
         // build() drops levels the editor would refuse, so rails off a wall cost the whole
         // level; enough must still get placed.
-        let flags = glados::editor::editor_flags(&level);
+        let flags = tantalos::editor::editor_flags(&level);
         assert!(flags.iter().all(|f| f.name != "raillift"), "{flags:?}");
         levels += 1;
         rails += level.rails.len();

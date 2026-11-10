@@ -1,7 +1,7 @@
-"""train/sample.py's Grammar: several `glados-score grammar` servers answer as one does.
+"""train/sample.py's Grammar: several `tantalos-score grammar` servers answer as one does.
 
-Needs a glados-score with the editor's rules in its grammar (2026-11-01); skipped without one.
-Point GLADOS_SCORE at another build to test that one.
+Needs a tantalos-score with the editor's rules in its grammar (2026-11-01); skipped without one.
+Point TANTALOS_SCORE at another build to test that one.
 
     .venv/Scripts/python -m unittest tests/test_sample_grammar.py -v
 """
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "train"))
 import sample  # noqa: E402
 
-GLADOS = Path(os.environ.get("GLADOS_SCORE", sample.DEFAULT_GLADOS))
+TANTALOS = Path(os.environ.get("TANTALOS_SCORE", sample.DEFAULT_TANTALOS))
 LEVELS = [
     "size 8 8 4 open 1 1 1 6 6 2 entry 1 2 1 +x exit 6 6 1 -x plate 1 2 1 +z 3 3 1 +z",
     "size 7 7 4 open 1 1 1 5 5 2 entry 3 1 1 +y exit 4 5 1 -y button 2 2 1 weighted > exit",
@@ -23,19 +23,19 @@ LEVELS = [
 ]
 
 
-def editor_rules(glados):
+def editor_rules(tantalos):
     """Whether this build's grammar knows the editor's rules (it takes --editor-rules)."""
-    if not glados.exists():
+    if not tantalos.exists():
         return False
-    p = subprocess.run([str(glados), "grammar", "--editor-rules", "off"], input="", capture_output=True, text=True)
+    p = subprocess.run([str(tantalos), "grammar", "--editor-rules", "off"], input="", capture_output=True, text=True)
     return p.returncode == 0
 
 
-@unittest.skipUnless(editor_rules(GLADOS), f"no glados-score with editor rules at {GLADOS}")
+@unittest.skipUnless(editor_rules(TANTALOS), f"no tantalos-score with editor rules at {TANTALOS}")
 class SplitServers(unittest.TestCase):
     def test_same_answers_in_order(self):
         prefixes = [" ".join(level.split()[:k]) for level in LEVELS for k in range(len(level.split()) + 1)]
-        one, three = sample.Grammar(GLADOS, procs=1), sample.Grammar(GLADOS, procs=3)
+        one, three = sample.Grammar(TANTALOS, procs=1), sample.Grammar(TANTALOS, procs=3)
         try:
             self.assertEqual(one.next(prefixes), three.next(prefixes))
             # Asked again (warm caches, the levels pinned to the same servers): the same.
@@ -45,7 +45,7 @@ class SplitServers(unittest.TestCase):
             three.stop()
 
     def test_editor_rules_in_the_answers(self):
-        g = sample.Grammar(GLADOS, procs=2)
+        g = sample.Grammar(TANTALOS, procs=2)
         try:
             # A faith plate may not share the entry door's cell (src/grammar.rs tests).
             [a] = g.next(["size 8 8 4 open 1 1 1 6 6 2 entry 1 2 1 +x exit 6 6 1 -x plate 1 2"])

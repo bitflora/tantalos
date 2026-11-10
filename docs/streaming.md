@@ -1,11 +1,11 @@
-# Streaming GLaDOS on Twitch
+# Streaming Tantalos on Twitch
 
 `train/broadcast.py` runs the show. Each round goes like this:
 
 1. The level net writes about 2,000 levels at the round's difficulty tier, and the ones that are solvable, need portals and are new are kept.
 2. Goblin (the net that writes plans; the solver net before 2026-10-27) writes a solution for each kept level.
 3. Portal 2's editor checks the kept levels.
-4. About 30 of them are played in the game, about two hours' worth. A level the net solved is played with the net's plan. For one it didn't solve, the stream shows the net's plan as far as it goes and its failed step, then GLaDOS's reference solution.
+4. About 30 of them are played in the game, about two hours' worth. A level the net solved is played with the net's plan. For one it didn't solve, the stream shows the net's plan as far as it goes and its failed step, then Tantalos's reference solution.
 5. Both nets train on the round's levels, about 75 minutes, and the training is shown on stream.
 6. The next round moves to harder levels once Goblin solves at least half of the current tier.
 

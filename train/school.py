@@ -5,7 +5,7 @@
         --levels 256 --k 8
 
 A round draws levels from Goblin's frontier (the levels the Rust solver runs out of budget on),
-asks the net to solve them, and keeps the plans `glados-score check` accepts in a replay buffer
+asks the net to solve them, and keeps the plans `tantalos-score check` accepts in a replay buffer
 for the next training run (docs/goblin-next-steps-2026-10-27.md, Task 5; the plan behind it is
 docs/goblin-plan-2026-10-27.md "Next" 3, E1). It writes runs/school/NAME/rRR/ (RR = two digits):
 
@@ -25,7 +25,7 @@ Steps, in order (each one's time goes into summary.json):
    never a test or probe identity. Half the draw is levels tried before but not solved on every
    try (a level never solved comes up only every 2^tries rounds); half is new.
 2. Attempt: one greedy plan and --k samples per level, checked conservatively. Plans are written
-   from legal steps only (`glados-score env`, as `goblin_eval.py --constrained`; --free turns it
+   from legal steps only (`tantalos-score env`, as `goblin_eval.py --constrained`; --free turns it
    off), so a plan fails only by running out of tokens before the exit.
 3. Prefix resampling, twice: from the longest checked prefix of the best failing plan, cut to
    128 words (64 in the second pass; PREFIX_WORDS), 16 continuations, the whole plan within
@@ -198,13 +198,13 @@ def level_prompts(model, vocab, levels):
     return [goblin_eval.plan_prompt(vocab, lv["tokens"], model.cfg.block_size) for lv in levels]
 
 
-def check_items(items, glados, mode):
+def check_items(items, tantalos, mode):
     """One verdict list per item, in order; retain batching and build each level once."""
     out = []
     step = 128
     for start in range(0, len(items), step):
         part = items[start : start + step]
-        results = goblin_eval.check(part, glados, mode)
+        results = goblin_eval.check(part, tantalos, mode)
         at = 0
         for item in part:
             n = len(item["plans"])
@@ -233,7 +233,7 @@ def attempt(model, vocab, levels, args, save):
                 lv["plans"], lv["kind"], lv["results"] = [], [], []
         checked = [lv for lv in part if lv["plans"]]
         items = [{"tokens": lv["tokens"], "plans": lv["plans"]} for lv in checked]
-        for lv, verdicts in zip(checked, check_items(items, args.glados, "conservative")):
+        for lv, verdicts in zip(checked, check_items(items, args.tantalos, "conservative")):
             lv["results"] = verdicts
         save()
         print(f"  attempt: {start + len(part)} of {len(levels)} levels", flush=True)
@@ -294,7 +294,7 @@ def prefix_pass(model, vocab, levels, args, i, save, n=PREFIX_TRIES):
             lv["plans"] += [f"{prefix} {o}".strip() for o in outs[j * n : (j + 1) * n]]
             lv["kind"] += ["prefix"] * n
         items = [{"tokens": lv["tokens"], "plans": lv["plans"][-n:]} for lv in part]
-        results = check_items(items, args.glados, "conservative")
+        results = check_items(items, args.tantalos, "conservative")
         for lv, verdicts in zip(part, results):
             lv["results"] += verdicts
             lv["passes"] = i + 1
@@ -311,7 +311,7 @@ def liberal_pass(levels, args, save):
     for start in range(0, len(todo), args.chunk):
         part = todo[start : start + args.chunk]
         results = check_items([{"tokens": lv["tokens"], "plans": lv["plans"]} for lv in part],
-                              args.glados, "liberal")
+                              args.tantalos, "liberal")
         for lv, verdicts in zip(part, results):
             lv["liberal"] = [p for p, r in zip(lv["plans"], verdicts) if solved(r)]
         save()
@@ -319,7 +319,7 @@ def liberal_pass(levels, args, save):
             for lv in levels if lv.get("liberal")]
 
 
-def polish(tokens, plans, glados, budget=POLISH_SECONDS):
+def polish(tokens, plans, tantalos, budget=POLISH_SECONDS):
     """`plans` with every step dropped that isn't needed: for each plan, remove one step at a
     time and keep the shorter one while `check` still solves it. Stops after `budget` seconds
     with the plans as short as they got (each still solves): one 27x26x25 level with ~50-step
@@ -338,7 +338,7 @@ def polish(tokens, plans, glados, budget=POLISH_SECONDS):
                     c.append(plan)
             cands[i] = c
         items = [{"tokens": tokens, "plans": cands[i]} for i in active]
-        results = check_items(items, glados, "conservative")
+        results = check_items(items, tantalos, "conservative")
         following = []
         for i, verdicts in zip(active, results):
             hit = next((c for c, r in zip(cands[i], verdicts) if solved(r)), None)
@@ -381,7 +381,7 @@ def buffer_row(lv, plans, rnd):
             "found_by": "goblin", "round": rnd, "trusted": "check"}
 
 
-def validate_buffer(rows, held, glados):
+def validate_buffer(rows, held, tantalos):
     """Check every retained plan, including old rows, before publishing training data."""
     rows = list(rows)
     if any(r["identity"] in held for r in rows):
@@ -389,7 +389,7 @@ def validate_buffer(rows, held, glados):
     for row in rows:
         if not row.get("plans") or row.get("plan") not in row["plans"]:
             raise ValueError(f"buffer row {row['identity']} has no retained primary plan")
-    results = check_items(rows, glados, "conservative")
+    results = check_items(rows, tantalos, "conservative")
     if len(results) != len(rows):
         raise ValueError("checker returned an incomplete buffer result")
     for row, verdicts in zip(rows, results):
@@ -469,7 +469,7 @@ def round_(a):
               f"of {len(pool):,} candidates", flush=True)
     step_t[0] = time.time()
     model, vocab, _ = sample.load_checkpoint(a.model, device)
-    a.env = None if a.free else goblin_eval.Env(a.glados)
+    a.env = None if a.free else goblin_eval.Env(a.tantalos)
 
     # 2. Attempt.
     attempt(model, vocab, levels, a, save)
@@ -497,7 +497,7 @@ def round_(a):
         if "solved_plans" in lv:
             continue
         done = [p for p, r in zip(lv["plans"], lv["results"]) if solved(r)]
-        lv["solved_plans"] = keep_plans(polish(lv["tokens"], done, a.glados)) if done else []
+        lv["solved_plans"] = keep_plans(polish(lv["tokens"], done, a.tantalos)) if done else []
         if j % 16 == 15:
             save()
     timed("polish")
@@ -519,7 +519,7 @@ def round_(a):
         elif row["min_len"] < old.get("min_len", 10**9):
             buffer[lv["identity"]] = row
             shorter.append(lv["identity"])
-    validate_buffer(buffer.values(), test_identities(), a.glados)
+    validate_buffer(buffer.values(), test_identities(), a.tantalos)
     write_jsonl(buffer_path, buffer.values())
     timed("buffer")
 
@@ -588,7 +588,7 @@ def export(a):
     """Publish independently checked, identity-preserving training examples."""
     rows = read_jsonl(OUT / a.name / "buffer.jsonl")
     held = test_identities()
-    validate_buffer(rows, held, a.glados)
+    validate_buffer(rows, held, a.tantalos)
     examples = []
     for row in rows:
         for plan in row["plans"]:
@@ -597,7 +597,7 @@ def export(a):
     examples = goblin_data.augment(examples, lambda r: ["r0", "r90", "r180", "r270"], "school")
     if not examples:
         raise ValueError("no school examples survived augmentation")
-    results = check_items(examples, a.glados, "conservative")
+    results = check_items(examples, a.tantalos, "conservative")
     if len(results) != len(examples) or any(len(v) != 1 for v in results):
         raise ValueError("checker returned incomplete augmented results")
     rejected = [{**r, "check": v[0]} for r, v in zip(examples, results) if not solved(v[0])]
@@ -620,8 +620,8 @@ def main():
     r.add_argument("--levels", type=int, default=4096, help="levels to draw")
     r.add_argument("--k", type=int, default=32, help="sampled plans per level")
     r.add_argument("--chunk", type=int, default=128, help="levels sampled and checked at a time")
-    r.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
-    r.add_argument("--free", action="store_true", help="let the net write any token (no glados-score env)")
+    r.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
+    r.add_argument("--free", action="store_true", help="let the net write any token (no tantalos-score env)")
     r.add_argument("--no-prefix", action="store_true", help="skip prefix resampling (step 3)")
     r.add_argument("--seed", type=int, default=None,
                    help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
@@ -629,7 +629,7 @@ def main():
     e = sub.add_parser("export", help="export checked buffer plans with four rotations")
     e.add_argument("name")
     e.add_argument("--out", required=True)
-    e.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    e.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
     e.set_defaults(func=export)
     a = ap.parse_args()
     a.func(a)

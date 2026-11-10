@@ -1,7 +1,7 @@
 """Search-baseline regressions: .venv/Scripts/python -m unittest discover -s tests -p test_search.py
 
 The beam search's own bookkeeping (train/goblin_search.py), with a stand-in net, env and
-`glados-score check`: which children it keeps, when it stops, and what it records. Nothing here
+`tantalos-score check`: which children it keeps, when it stops, and what it records. Nothing here
 runs the net or the solver.
 """
 
@@ -34,7 +34,7 @@ class Vocab:
 
 
 class Env:
-    """A stand-in `glados-score env`: `answers` maps a plan to what it says about it."""
+    """A stand-in `tantalos-score env`: `answers` maps a plan to what it says about it."""
 
     let_stop = False
 
@@ -86,7 +86,7 @@ class Ticks:
 
 def settings(**kw):
     a = Namespace(candidates=2, width=2, score="total", rows=8, temperature=1.0,
-                  step_temperature=1.0, max_plan=256, glados="none", seconds=10.0)
+                  step_temperature=1.0, max_plan=256, tantalos="none", seconds=10.0)
     for k, v in kw.items():
         setattr(a, k, v)
     return a
@@ -98,7 +98,7 @@ class Checked:
     def __init__(self, solves=()):
         self.solves, self.seen = set(solves), []
 
-    def __call__(self, items, glados, mode):
+    def __call__(self, items, tantalos, mode):
         plans = [p for it in items for p in it["plans"]]
         self.seen += plans
         return [{"verdict": "solved", "len": len(p.split())} if p in self.solves else {"verdict": "unsolved"}

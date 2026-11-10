@@ -1,4 +1,4 @@
-# glados: current roadmap
+# tantalos: current roadmap
 
 Updated 2026-10-29. Generate varied Portal 2 Puzzle Maker chambers that work in the game and
 use mechanisms found in highly rated Workshop levels. Goblin learns to solve them, including
@@ -14,7 +14,7 @@ QLoRA recommendation, greenfield layout and time estimates are historical, not c
 - A small GPT trained on generated and Workshop chambers, with training/evaluation/game checks
   managed by `train/run.py`. Follow `CLAUDE.md` for every run; do not bypass its workflow.
 - Goblin, the solution-policy net; checked plans and symmetry augmentation; identity-based
-  data splits; legal-token decoding through `glados-score env`; a manual self-play round in
+  data splits; legal-token decoding through `tantalos-score env`; a manual self-play round in
   `train/school.py`. Automated school training, a value head and tree search are still future work.
 
 ## Next milestones

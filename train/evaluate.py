@@ -152,10 +152,10 @@ def nearest(paths, probes):
     return best
 
 
-def time_generator(glados, count, seed):
+def time_generator(tantalos, count, seed):
     with tempfile.TemporaryDirectory() as d:
         out = Path(d) / "levels.jsonl"
-        data = Path(glados).resolve().with_name("glados-data" + Path(glados).suffix)
+        data = Path(tantalos).resolve().with_name("tantalos-data" + Path(tantalos).suffix)
         args = [str(data), "dataset", "--seed", str(seed), "--count", str(count), "--out", str(out)]
         t = time.time()
         subprocess.run(args, check=True, capture_output=True)
@@ -190,7 +190,7 @@ def report(ev):
         "",
         f"Step {ev['step']}, val loss {ev['val_loss']:.4f}. Temperature {ev['temperature']}, "
         f"top-k {ev['top_k']}, solver budget {ev['budget']}, seed {ev['seed']}"
-        + (", constrained decoding (glados-score grammar)." if ev.get("constrained") else ", free decoding."),
+        + (", constrained decoding (tantalos-score grammar)." if ev.get("constrained") else ", free decoding."),
         "",
         f"## Validity ({v['n']} levels asked for `{SOLVABLE}`)",
         "",
@@ -300,14 +300,14 @@ def main():
     ap.add_argument("--top-k", type=int, default=None)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--budget", type=int, default=50_000)
-    ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
     ap.add_argument("--out", default=None, help="directory (default <checkpoint dir>/eval)")
     ap.add_argument("--p2c", action="store_true", help="also write every solvable level as .p2c")
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     ap.add_argument("--cpu", action="store_true", help="sample on the CPU (e.g. while training)")
     ap.add_argument("--constrained", action="store_true",
-                    help="sample only tokens `glados-score grammar` allows (src/grammar.rs), here and in "
+                    help="sample only tokens `tantalos-score grammar` allows (src/grammar.rs), here and in "
                     "the rated-style section; EVAL and yield then compare only with constrained runs")
     ap.add_argument("--rated-n", type=int, default=512,
                     help="levels for the rated-style section (train/rated.py; 0: skip)")
@@ -339,23 +339,23 @@ def main():
         print(f"sampling {n:>4} x {' '.join(conds) or '(no conditions)'}", flush=True)
         t = time.time()
         got = sample.generate(model, vocab, n, conds, (), args.temperature, args.top_k, args.batch,
-                              constrained=args.constrained, glados=args.glados)
+                              constrained=args.constrained, tantalos=args.tantalos)
         if name == "baseline":
             baseline_gen_s = time.time() - t
         lines += got
         owner += [name] * n
     print(f"sampled {len(lines)} levels in {time.time() - t0:.0f}s; scoring", flush=True)
     t = time.time()
-    results = sample.score(lines, args.glados, args.budget, out / "p2c" if args.p2c else None)
+    results = sample.score(lines, args.tantalos, args.budget, out / "p2c" if args.p2c else None)
     score_s = time.time() - t
     # A parsed level whose tokens can't be re-encoded has no "tokens" (the later code skips it);
     # only a binary that never reports them is stale.
     parsed_rows = [r for r in results if r["verdict"] != "unparsed"]
     if parsed_rows and not any("tokens" in r for r in parsed_rows):
-        sys.exit("glados-score score didn't report canonical tokens: rebuild it (cargo build --release)")
+        sys.exit("tantalos-score score didn't report canonical tokens: rebuild it (cargo build --release)")
     with open(out / "samples.jsonl", "w", encoding="utf-8") as f:
         for name, line, r in zip(owner, lines, results):
-            # `sample` is the model's raw line; `line` is glados-score score's line number.
+            # `sample` is the model's raw line; `line` is tantalos-score score's line number.
             f.write(json.dumps({**r, "setting": name, "sample": line}) + "\n")
 
     by_setting = defaultdict(list)
@@ -428,12 +428,12 @@ def main():
     }
     if args.generator_count:
         print(f"timing the generator on {args.generator_count} levels", flush=True)
-        speed["generator"] = time_generator(args.glados, args.generator_count, args.seed + 1)
+        speed["generator"] = time_generator(args.tantalos, args.generator_count, args.seed + 1)
 
     rated_summary = None
     if args.rated_n:
         rated_summary, rated_rows, rated_prompt = rated.run(
-            model, vocab, args.rated_n, args.glados, args.budget, args.rated_temperature,
+            model, vocab, args.rated_n, args.tantalos, args.budget, args.rated_temperature,
             constrained=args.constrained)
         rated_summary.update(prompt=rated_prompt, temperature=args.rated_temperature)
         with open(out / "rated-samples.jsonl", "w", encoding="utf-8") as f:
