@@ -30,7 +30,7 @@ A training run is exactly these steps:
 1. `.venv/Scripts/python train/run.py start NAME --hours H --note "WHAT IT IS FOR"`
    (`--from OLDRUN` continues that run's model; by default it is the most recently trained net,
    see below). If it refuses, tell the user why and stop.
-2. `.venv/Scripts/python train/run.py wait NAME`, with the Bash tool's `run_in_background`.
+2. `.venv/Scripts/python train/run.py wait NAME`, using the available background execution mechanism.
    You are told when it ends. Don't poll; for a progress check, run `status NAME` once.
 3. When it ends, read the printed status and do every item under **NEXT STEPS**, in order.
    `wait` exits 0 when the run is complete, 1 if it failed, 2 if the Portal 2 check was
@@ -42,7 +42,7 @@ A training run is exactly these steps:
 your own initiative):
 
 1. `.venv/Scripts/python train/run.py pause NAME`. Works while it is TRAINING or INGAME (a
-   Portal 2 check, since 2026-11-07); if it says the run is in another step (evaluating, training
+   Portal 2 check); if it says the run is in another step (evaluating, training
    away, picking), tell the user and let it finish. It waits until training has saved and stopped
    (a minute or so, up to 20 if an eval is under way), or until the check has finished the level
    in hand and quit the game (autosaves put back), then prints PAUSED. If a `wait NAME` was going
@@ -50,7 +50,7 @@ your own initiative):
 2. Tell the user it is paused and how many hours are done (or that it paused in its Portal 2
    check). Nothing else runs; a paused run holds neither the GPU nor the machine.
 3. Only when the user says to carry on: `.venv/Scripts/python train/run.py resume NAME`, then
-   step 2 above (`wait NAME` with `run_in_background`). It trains for the hours still owed (or
+   step 2 above (`wait NAME` in the background). It trains for the hours still owed (or
    carries the Portal 2 check on, keeping the levels already checked) and then does every other
    step as usual. If it refuses (another run going), tell the user why.
 
@@ -78,21 +78,19 @@ for good and records it.
 ```
 
 - Defaults (data/v5b, learning rates, sizes) are already right: add no other options unless
-  the user names them. The default data (every `data/v5b/levels-*.jsonl`) holds the Workshop
-  levels as their 8 mirrored/turned versions, twice each (`levels-workshop-aug-x2.jsonl`), since
-  2026-10-26; since 2026-11-06 that file is built from `data/ws6/train.jsonl` (the 2026-11-02
-  download, 42,819 levels, about 45% of the lines; the ws5-based one is
-  `data/v5b/workshop-ws5-aug-x2.jsonl`, outside the pattern); the old 20 plain copies are `data/v5b/workshop-x20.jsonl`, used only if the user
-  asks (name all the files with `--data`). Anything after `--` goes to train.py. `--no-ingame` skips the Portal 2
-  steps: use it only if the user says not to launch the game.
+  the user names them. The default data pattern is `data/v5b/levels-*.jsonl`. Its Workshop
+  file, `levels-workshop-aug-x2.jsonl`, is built from `data/ws6/train.jsonl`, with eight
+  mirrored/turned versions repeated twice. Alternative Workshop files outside that pattern
+  require an explicit user request; name all input files with `--data` when overriding it.
+  Anything after `--` goes to train.py. Use `--no-ingame` only if the user says not to
+  launch the game.
 - **Warm-start by default:** unless the user says otherwise (or names a different `--from`),
   continue the most recently trained net of the same task: pass the final model of the newest
   completed run as `--from` (find it with `list`). Start a run from scratch only when the user
   asks for a fresh model. Note the known risk: recent warm starts have diverged under the warm
   rates (lr 2e-4) and finished well below their init, so report that if it happens again.
 - A 10-layer model doesn't fit at batch 16 on the 4 GB card: add `--batch 8 --accum 2` (the same
-  effective batch) to any `--layers 10` run. Measured 2026-10-20, when v5-fresh-10h-d ran out of
-  memory on its first step.
+  effective batch) to any `--layers 10` run.
 - The Portal 2 steps launch the game themselves (in the background, no focus needed) and never
   touch a game that is already running.
 - Name runs short and dated by topic, e.g. `v5-fresh-2h`, `v5-cont-1h`. The name can't exist yet.
@@ -107,30 +105,26 @@ next level tokens, items kept clear of the editor's rules, for `--constrained` i
 legal next plan tokens, for `goblin_eval.py --constrained`),
 `tantalos-data` (`dataset`, `mutate`), `tantalos-p2c` (`info`, `solve`, `tokens`, `vocab`, `editor`,
 `roundtrip`, `fixtures`), `tantalos-view`, `tantalos-workbench`, `tantalos-evolve`, and `reverse`.
-There is no `tantalos.exe` any more.
 
-Reading results. The goal (2026-10-25) is varied levels that use the mechanisms of highly rated
+Reading results. The goal is varied levels that use the mechanisms of highly rated
 Workshop levels, so the headline is the **RATED STYLE** line (`yield` in `list`, `rated_*` in
 runs.csv; train/rated.py, eval/report.md "Rated style"): 512 levels asked for Workshop-style
 levels at temperature 0.7. **Yield**: valid, novel, not solver-unsolvable levels per 1,000
 (higher is better; differences under ~50 are noise). **Strong**: solvable ones whose solution
 uses 2+ state-changing mechanics and at most 1 trick, per 1,000. **Profile gap**: mean
 difference in points between the samples' item-family mix and 5-star levels' (lower is better).
-Baseline, v5-cont-10h-d (2026-10-25, runs/v5-cont-10h-d/rated/): yield 207, strong 8, gap 23.5.
-Since 2026-11-01 level runs sample their evaluation and play-test levels with constrained
-decoding (`tantalos-score grammar`: levels that parse, items clear of the editor's rules), shown
-as `decoding` in runs.csv: their EVAL and RATED STYLE compare only with constrained runs. The
-constrained baseline is v6-fresh-12h/away (seed 7): yield 422, strong 25, gap 7.4 (it was 182,
-20, 11.0 constrained without the editor's rules, 2026-11-01).
-**EVAL solvable %** (share of levels asked for `<verdict:solvable>` our solver solves) is now a
-guardrail, not the target; differences under about 10 points are noise. Val loss: lower is
-better, but only comparable between runs on the same data; since 2026-10-25 val is split by
-puzzle (a Workshop level's copies and mutants stay on one side), so it isn't comparable with
-earlier runs, and each eval also logs it per source (gen, mutant, ws). **Workshop test loss**
+Level runs use constrained decoding (`tantalos-score grammar`: parseable levels with
+editor placement rules), recorded as `decoding` in runs.csv. Compare EVAL and RATED STYLE
+only between matching decoding modes and rule sets. Run-specific baselines belong in
+run reports and `train/runs.csv`.
+**EVAL solvable %** (share of levels asked for `<verdict:solvable>` our solver solves) is a
+guardrail; differences under about 10 points are noise. Val loss: lower is
+better, but only comparable between runs on the same data and split method. Validation is split by
+puzzle (a Workshop level's copies and mutants stay on one side), and each eval also logs
+it per source (gen, mutant, ws). **Workshop test loss**
 (`ws` in `list`, `holdout_*` in runs.csv): loss on 256 held-out Workshop levels
 (data/ws5/test.jsonl); lower is better, comparable across runs. If it rises while val loss
-falls, the model is memorizing Workshop levels: report that. (2026-10-25: v5-cont-10h-d scored
-~1.59 here against 0.24 on the Workshop levels it trained on.) The blind A/B verdicts outrank
+falls, the model is memorizing Workshop levels: report that. The blind A/B verdicts outrank
 all of these when they show a clear difference. A run that FAILED or DIED shows the last lines
 of its log; report them, don't retry blindly.
 
@@ -139,7 +133,7 @@ portal-requiring, novel ones in `data/harvest/RUN.jsonl`; train on them by addin
 `--data` next to the usual files (see its docstring). It uses the GPU and the solver, so not
 while a run or data generation is going.
 
-Training time: one run of 2 hours beats two chained 1-hour runs (a paused and resumed run counts
+Training time: prefer one continuous run to chained shorter runs (a paused and resumed run counts
 as one run). Each run's learning rate
 warms up and decays to its minimum over its own time, so a chained run starts back at a high
 rate and spends its first part undoing the fine-tuning the last one ended with. Chain runs only
@@ -188,11 +182,11 @@ python tools/workshop/annotations.py --generated --set ID --verdict none
 
 `train/broadcast.py` runs the stream's loop in rounds: the level net writes levels, Goblin
 solves them, Portal 2 plays them, and both nets train on them (its own `run.py start --quick` runs,
-named `bc-NAME-rRR-gen` / `-goblin`, `-solve` before 2026-10-27; never start those yourself). See docs/streaming.md.
+named `bc-NAME-rRR-gen` / `-goblin`; never start those yourself). See docs/streaming.md.
 
 1. `.venv/Scripts/python train/broadcast.py start NAME` (e.g. `live-01`; add options only if the
    user names them). If it refuses, tell the user why and stop.
-2. `.venv/Scripts/python train/broadcast.py wait NAME` with `run_in_background`. Don't poll; for
+2. `.venv/Scripts/python train/broadcast.py wait NAME` using the available background execution mechanism. Don't poll; for
    a progress check, run `status NAME` once.
 3. When it ends, do every item under **NEXT STEPS** in the printed status.
 
@@ -203,9 +197,8 @@ named `bc-NAME-rRR-gen` / `-goblin`, `-solve` before 2026-10-27; never start tho
 ## Goblin runs
 
 **Goblin** is the second net: it reads a level and writes its solution as plan tokens
-(src/plan.rs). It was called the solver net (task `solve`, runs `solve-...`) until 2026-10-27;
-"the solver" on its own still means the Rust BFS solver, which Goblin is not. `--task solve`,
-old checkpoints and `runs/solve-fresh-3h` still work. Same steps as above, with `--task goblin`
+(src/plan.rs). "The solver" on its own means the Rust BFS solver. `--task solve` is a
+compatibility alias for Goblin. Use the training workflow above with `--task goblin`
 in step 1:
 `.venv/Scripts/python train/run.py start NAME --task goblin --hours H --note "WHAT IT IS FOR"`.
 Name them `goblin-...`, e.g. `goblin-fresh-12h`. `--from` a level run starts from its weights (a
@@ -224,10 +217,10 @@ new task, fresh learning rates); `--from` a Goblin run continues it.
   `.venv/Scripts/python train/run.py list --task goblin`. `note` finds the right file itself.
 - The main score is **EVAL solved %**: on data/goblin, the share of test-ws and test-v6
   levels together (held-out Workshop levels our solver solves, and levels the level net wrote)
-  whose greedy plan `tantalos-score check` accepts (`decoding` in goblin-runs.csv: runs before
-  2026-10-29 decoded freely and score far lower, 20.2% against 57.3% constrained for
-  goblin-v6init-12h-b); on the old data/plans (solve-fresh-3h), of
-  1,024 test-gen levels. Higher is better; differences under about 5 points are noise. Also
+  whose greedy plan `tantalos-score check` accepts. Check `decoding` in goblin-runs.csv;
+  compare only matching decoding modes and test sets. Legacy data/plans runs use test-gen
+  rather than test-ws+v6 as their headline.
+  Higher is better; differences under about 5 points are noise. Also
   reported: pass@8, optimal %, test-gen (a guardrail now), test-mut, test-hard (levels whose
   search took over 50k states), the **probe** (held-out primers, one mechanic each: the
   per-mechanism scoreboard) and test-frontier (Workshop levels our solver runs out of budget
