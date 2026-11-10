@@ -1,13 +1,13 @@
 //! Tier-0 solver on the synthetic chambers: verdicts, shortest plans, mutations.
 
-use glados::builder::Builder;
-use glados::fixtures;
-use glados::geom::Dir;
-use glados::level::{ItemKind, Level};
-use glados::p2c::Puzzle;
-use glados::portals::{line_of_sight, Landing};
-use glados::regions::Move;
-use glados::solver::{
+use tantalos::builder::Builder;
+use tantalos::fixtures;
+use tantalos::geom::Dir;
+use tantalos::level::{ItemKind, Level};
+use tantalos::p2c::Puzzle;
+use tantalos::portals::{line_of_sight, Landing};
+use tantalos::regions::Move;
+use tantalos::solver::{
     judge, Action, CubeLoc, Judgement, Mode, Model, Problem, Verdict, DEFAULT_MAX_STATES,
 };
 
@@ -141,7 +141,7 @@ fn line_of_sight_through_an_edge_is_blocked() {
     // ray passes exactly through the x-parallel edge at y=1, z=2, inside the x=1 column.
     // Of the four voxels touching that edge, (1,0,2) is the one the ray doesn't enter.
     let room = |blocked: bool| {
-        let mut b = glados::builder::Builder::new("edge", [4, 3, 4]);
+        let mut b = tantalos::builder::Builder::new("edge", [4, 3, 4]);
         b.carve([0, 0, 1], [3, 2, 3]);
         if blocked {
             b.fill([1, 0, 2], [1, 0, 2]);

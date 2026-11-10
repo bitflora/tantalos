@@ -1,4 +1,4 @@
-//! What the command-line binaries (`src/bin/glados-*.rs`) share: dispatch, flag parsing,
+//! What the command-line binaries (`src/bin/tantalos-*.rs`) share: dispatch, flag parsing,
 //! reading .p2c files and JSONL input, and printing a level's metrics.
 
 use std::io::BufRead;

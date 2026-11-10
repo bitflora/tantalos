@@ -1,4 +1,4 @@
-//! glados: tooling for generating and solving Portal 2 Puzzle Maker levels.
+//! tantalos: tooling for generating and solving Portal 2 Puzzle Maker levels.
 //!
 //! Slice 1: `.p2c` I/O (`kv`, `p2c`), level semantics (`level`), walkable regions
 //! (`regions`), ASCII maps (`render`), and code-built test chambers (`builder`, `fixtures`).

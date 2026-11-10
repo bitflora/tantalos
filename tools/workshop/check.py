@@ -19,8 +19,8 @@ from convert import convert  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 EXE = ".exe" if sys.platform == "win32" else ""
-SCORE = ROOT / "target" / "release" / f"glados-score{EXE}"
-P2C = ROOT / "target" / "release" / f"glados-p2c{EXE}"
+SCORE = ROOT / "target" / "release" / f"tantalos-score{EXE}"
+P2C = ROOT / "target" / "release" / f"tantalos-p2c{EXE}"
 
 
 def score(tokens):

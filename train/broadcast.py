@@ -20,7 +20,7 @@ A round, in out/broadcast/NAME/round-RR/:
    each and check them (goblin_eval.solve_levels), and check the kept levels in Portal 2's editor
    (portal2.check; rejects go to data/ingame/invalid.jsonl as in every training run).
 2. play: about half levels the net solved and half it didn't, easiest first. A solved plan is
-   played as is (`glados-score route --plan`). A failed one is played as far as its steps fit, then
+   played as is (`tantalos-score route --plan`). A failed one is played as far as its steps fit, then
    the step that fits no move is tried; then the level is played again with the Rust solver's
    reference route.
 3. record: episodes.jsonl (a row per level played), rounds.jsonl (a row per round), and
@@ -56,7 +56,7 @@ import tier as tiers  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "out" / "broadcast"
 OVERLAY = Path(__file__).resolve().parent / "broadcast" / "overlay.html"
-GLADOS = ROOT / "target" / "release" / "glados-score.exe"
+TANTALOS = ROOT / "target" / "release" / "tantalos-score.exe"
 HARVEST = ROOT / "data" / "harvest"
 PLANS = ROOT / "data" / "plans"
 INGAME = ROOT / "data" / "ingame"
@@ -216,7 +216,7 @@ def sample_round(st, a, round_dir, gen_ckpt, tier):
         for start in range(0, n, a.chunk):
             k = min(a.chunk, n - start)
             lines = sample.generate(model, vocab, k, tiers.conds(t), (), 1.0, None, a.batch)
-            for r in sample.score(lines, GLADOS):
+            for r in sample.score(lines, TANTALOS):
                 r["tier"] = t
                 scored.append(r)
             sampled[t] += k
@@ -240,7 +240,7 @@ def goblin_round(st, a, kept, goblin_ckpt):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, vocab, _ = sample.load_checkpoint(goblin_ckpt, device)
     st.say(f"Goblin is solving {len(kept)} chambers")
-    solved = goblin_eval.solve_levels(model, vocab, kept, a.k, 1.0, GLADOS, ["conservative"], 64)
+    solved = goblin_eval.solve_levels(model, vocab, kept, a.k, 1.0, TANTALOS, ["conservative"], 64)
     del model
     free_gpu()
     for r, s in zip(kept, solved):
@@ -256,7 +256,7 @@ def goblin_round(st, a, kept, goblin_ckpt):
 def write_p2c(records, folder):
     """The levels as folder/NNNNN.p2c (in order); returns the paths."""
     folder.mkdir(parents=True, exist_ok=True)
-    subprocess.run([str(GLADOS), "score", "--budget", "1", "--p2c-all", str(folder)],
+    subprocess.run([str(TANTALOS), "score", "--budget", "1", "--p2c-all", str(folder)],
                    input="\n".join(r["tokens"] for r in records) + "\n",
                    capture_output=True, text=True, check=True)
     return [folder / f"{i:05}.p2c" for i in range(1, len(records) + 1)]
@@ -315,10 +315,10 @@ def queue(kept, n, seed):
 # --- play ---------------------------------------------------------------------------------
 
 def route(p2c, plan=None):
-    """(head, legs) of `glados-score route` (with `plan`: that plan, as far as it fits)."""
+    """(head, legs) of `tantalos-score route` (with `plan`: that plan, as far as it fits)."""
     import play
 
-    return play.route(GLADOS, p2c, plan)
+    return play.route(TANTALOS, p2c, plan)
 
 
 def mechanics(bits):
@@ -403,7 +403,7 @@ def play_round(st, a, d, round_dir, picked, files, session):
                 level["reference"] = {"steps": steps_of(rlegs)}
                 level["part"] = "reference"
                 st.set(level=level)
-                st.say("now GLaDOS's reference solution")
+                st.say("now Tantalos's reference solution")
                 rrow, rresults = session.play_level(p2c, rhead, rlegs, folder / "reference",
                                                     follow("reference", level["reference"]["steps"]))
                 ep["reference_play"] = rrow
@@ -432,11 +432,11 @@ def play_round(st, a, d, round_dir, picked, files, session):
 # --- feeding back ----------------------------------------------------------------------------
 
 def plans_for(records):
-    """The Rust solver's plan for each record (`glados-score score --plan-only`), as plans data rows."""
+    """The Rust solver's plan for each record (`tantalos-score score --plan-only`), as plans data rows."""
     out = []
     if not records:
         return out
-    p = subprocess.run([str(GLADOS), "score", "--plan-only", "--budget", "50000"],
+    p = subprocess.run([str(TANTALOS), "score", "--plan-only", "--budget", "50000"],
                        input="\n".join(r["tokens"] for r in records) + "\n",
                        capture_output=True, text=True, check=True)
     for r, line in zip(records, p.stdout.splitlines()):
@@ -573,7 +573,7 @@ def loop(d):
                    tier={"n": tier, "name": tiers.NAMES[tier], "conds": " ".join(tiers.TIERS[tier])})
             t_round = time.time()
 
-            st.phase("prep", "GLaDOS is designing test chambers", 15)
+            st.phase("prep", "Tantalos is designing test chambers", 15)
             kept, sampled = sample_round(st, a, round_dir, models["gen"], tier)
             goblin_round(st, a, kept, models["goblin"])
             st.phase("checking", "Checking the chambers in the editor", 10)
@@ -620,7 +620,7 @@ def loop(d):
                    "why": why}
 
             if not a.no_train and not stopping(d):
-                st.phase("training", "GLaDOS is learning", a.gen_hours * 60 + a.goblin_hours * 60 + 25)
+                st.phase("training", "Tantalos is learning", a.gen_hours * 60 + a.goblin_hours * 60 + 25)
                 level_data = [LEVEL_DATA] + [str(p.relative_to(ROOT)) for p in sorted(HARVEST.glob(f"broadcast-{name}-*.jsonl"))]
                 models["gen"] = train_one(st, d, name, rnd, "gen", models["gen"], a.gen_hours, level_data)
                 if not stopping(d):

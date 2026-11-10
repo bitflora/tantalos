@@ -1,14 +1,14 @@
 //! Token format round trips, decoder robustness, and the labelled dataset.
 
-use glados::dataset::{self, generate, label, Config, Label};
-use glados::fixtures;
-use glados::generator::Genome;
-use glados::geom::Dir;
-use glados::level::{ItemKind, Level};
-use glados::p2c::Puzzle;
-use glados::rng::Rng;
-use glados::solver::{judge, Judgement};
-use glados::tokens::{decode, encode, vocab};
+use tantalos::dataset::{self, generate, label, Config, Label};
+use tantalos::fixtures;
+use tantalos::generator::Genome;
+use tantalos::geom::Dir;
+use tantalos::level::{ItemKind, Level};
+use tantalos::p2c::Puzzle;
+use tantalos::rng::Rng;
+use tantalos::solver::{judge, Judgement};
+use tantalos::tokens::{decode, encode, vocab};
 
 const BUDGET: usize = 50_000;
 
@@ -287,7 +287,7 @@ fn rails_mount_on_a_solid_side() {
     assert!(problems.is_empty(), "{problems:?}");
     // With its left wall solid it keeps the usual mounting, angles and all.
     let left = decode(&format!("{ROOM} rail 5 3 1 5 1 1 osc")).unwrap();
-    let mut b = glados::builder::Builder::new(glados::generator::TITLE, [6, 6, 4]);
+    let mut b = tantalos::builder::Builder::new(tantalos::generator::TITLE, [6, 6, 4]);
     b.rail([5, 3, 1], [5, 1, 1], true, true);
     let angles = |p: &Puzzle| -> Vec<Option<[f64; 3]>> {
         p.items
@@ -316,7 +316,7 @@ fn pedestals_turn_away_from_panels() {
     let problems = level.mount_problems();
     assert!(problems.is_empty(), "{problems:?}");
     let pedestal = level.of_kind(&ItemKind::PedestalButton).next().unwrap();
-    assert_eq!(pedestal.angles.and_then(|a| glados::geom::rotate(a, [-1, 0, 0])), Some(Dir::PosX));
+    assert_eq!(pedestal.angles.and_then(|a| tantalos::geom::rotate(a, [-1, 0, 0])), Some(Dir::PosX));
     // Without the glass it keeps -x.
     let line = format!("{ROOM} pedestal 2 2 1 inf > exit");
     let level = Level::from_puzzle(&decode(&line).unwrap());

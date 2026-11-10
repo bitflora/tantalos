@@ -4,7 +4,7 @@ Samples solvable levels asking for long plans (sample.py, `--cond`), keeps the c
 that aren't trivial (random play rarely solves them, plan of 5+ moves), spreads the choice from
 short to long plans, checks the candidates in Portal 2's editor (portal2.py) so only levels the
 game accepts are handed out,
-and copies them into the Puzzle Maker's folder as glados-<run>-<number>.p2c (playtest.py). The
+and copies them into the Puzzle Maker's folder as tantalos-<run>-<number>.p2c (playtest.py). The
 pick is also kept in runs/NAME/playtest/ with picks.json (each pick's "game": valid, or
 unchecked when the game couldn't be used). run.py calls this after every training run.
 

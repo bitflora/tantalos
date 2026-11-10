@@ -1,6 +1,6 @@
 //! A browser app for triaging the downloaded Workshop levels.
 //!
-//! `glados-workbench` reads the Workshop corpus (`out/workshop/levels.jsonl`), the ws5
+//! `tantalos-workbench` reads the Workshop corpus (`out/workshop/levels.jsonl`), the ws5
 //! train/test splits, the Workshop ratings and item metadata, and serves a local app that
 //! shows every field we have on a level, its solver verdict, and its geometry. Notes, a
 //! personal star rating, a "staged for playtesting" flag and an "exclude from the test data"
@@ -49,7 +49,7 @@ use crate::view::geometry_json;
 const APP: &str = include_str!("workbench.html");
 
 const USAGE: &str = "usage:
-  glados-workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE]
+  tantalos-workbench [--all FILE] [--train FILE] [--test FILE] [--ratings FILE]
                    [--items FILE] [--fetched FILE] [--annotations FILE]
                    [--port N] [--no-open] [--list]
                          a browser app for the downloaded Workshop levels: every field we
@@ -59,7 +59,7 @@ const USAGE: &str = "usage:
                          train/workshop-annotations.jsonl.
                          (defaults: out/workshop/levels.jsonl, data/ws5/{train,test}.jsonl,
                          out/workshop/{ratings,items,fetched}.jsonl)
-  glados-workbench --generated [--run NAME] [--levels FILE]... [--annotations FILE]
+  tantalos-workbench --generated [--run NAME] [--levels FILE]... [--annotations FILE]
                    [--human-unsolvable FILE] [--port N] [--no-open] [--list]
                          the same app for the level net's own levels: the eval samples of a
                          run (default: the newest level run in runs/) and any --levels files
@@ -81,7 +81,7 @@ const DEFAULT_HUMAN_UNSOLVABLE: &str = "data/ingame/human-unsolvable.jsonl";
 const DEFAULT_RUNS: &str = "runs";
 /// Where `human-unsolvable.jsonl` rows written by this app say they came from; only these
 /// rows are ever removed again.
-const HUMAN_SOURCE: &str = "glados-workbench";
+const HUMAN_SOURCE: &str = "tantalos-workbench";
 
 /// The files the app reads.
 #[derive(Clone)]
@@ -196,7 +196,7 @@ struct State {
     staging: bool,
 }
 
-/// `glados-workbench`: parse the flags, then serve (or just print a summary).
+/// `tantalos-workbench`: parse the flags, then serve (or just print a summary).
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut paths = Paths::default();
     let mut port = 0u16;
@@ -337,7 +337,7 @@ fn print_summary(state: &State) {
         .join(", ");
     match &state.paths.generated {
         Some(g) => println!(
-            "glados-workbench: {} generated levels from {} ({by_verdict})",
+            "tantalos-workbench: {} generated levels from {} ({by_verdict})",
             state.records.len(),
             generated_files(g)
                 .iter()
@@ -347,7 +347,7 @@ fn print_summary(state: &State) {
                 .join(", ")
         ),
         None => println!(
-            "glados-workbench: {} levels ({by_verdict})",
+            "tantalos-workbench: {} levels ({by_verdict})",
             state.records.len()
         ),
     }
@@ -1318,11 +1318,11 @@ fn repo_root() -> Result<PathBuf, String> {
         .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
-        .ok_or("can't find the repo root from the glados executable")?;
+        .ok_or("can't find the repo root from the tantalos executable")?;
     if root.join("tools").join("workshop").join("stage.py").is_file() {
         return Ok(root.to_path_buf());
     }
-    Err("can't find tools/workshop/stage.py; run glados-workbench from the repo root".into())
+    Err("can't find tools/workshop/stage.py; run tantalos-workbench from the repo root".into())
 }
 
 fn python_exe(root: &Path) -> PathBuf {
@@ -1588,7 +1588,7 @@ mod tests {
 
     #[test]
     fn annotations_round_trip() {
-        let dir = std::env::temp_dir().join(format!("glados-wb-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tantalos-wb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes.jsonl");
@@ -1623,7 +1623,7 @@ mod tests {
 
     #[test]
     fn records_merge_without_losing_base_fields() {
-        let dir = std::env::temp_dir().join(format!("glados-wb-merge-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tantalos-wb-merge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let all = dir.join("all.jsonl");
@@ -1657,7 +1657,7 @@ mod tests {
 
     #[test]
     fn generated_levels_merge_by_tokens() {
-        let dir = std::env::temp_dir().join(format!("glados-wb-gen-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tantalos-wb-gen-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let run = dir.join("runs").join("r1");
         std::fs::create_dir_all(run.join("eval").join("ingame")).unwrap();
@@ -1703,7 +1703,7 @@ mod tests {
 
     #[test]
     fn human_unsolvable_rows_come_and_go() {
-        let dir = std::env::temp_dir().join(format!("glados-wb-human-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tantalos-wb-human-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("human-unsolvable.jsonl");
@@ -1714,7 +1714,7 @@ mod tests {
         sync_human_unsolvable(&path, "size 1  1 1", "r1 eval line 1", Some("broken, again")).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 2, "{text}");
-        assert!(text.contains("\"source\":\"glados-workbench r1 eval line 1\""));
+        assert!(text.contains("\"source\":\"tantalos-workbench r1 eval line 1\""));
         assert!(text.contains("broken, again") && text.contains(&format!("\"checked\":\"{}\"", today())));
         // A level someone else already recorded gets no second row, and keeps theirs.
         sync_human_unsolvable(&path, "size 2 2 2", "r1 eval line 9", Some("dup")).unwrap();

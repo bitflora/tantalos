@@ -1,10 +1,10 @@
 > Historical proposal, superseded by [the current roadmap](../plan.md).
 > Estimates and implementation suggestions below describe the original feasibility study.
 
-# Spec: Neural net that builds Portal levels (project "glados")
+# Spec: Neural net that builds Portal levels (project "tantalos")
 
 ## Context
-User wants feasibility spec: train a neural net to generate Portal levels. Questions: hardware, time, amateur viability. `/home/tjasko/code/glados` is empty — greenfield. This doc = spec + phased plan, not code yet.
+User wants feasibility spec: train a neural net to generate Portal levels. Questions: hardware, time, amateur viability. `/home/tjasko/code/tantalos` is empty — greenfield. This doc = spec + phased plan, not code yet.
 
 ## Key decision: target Portal 2 Puzzle Maker (PeTI), not raw Hammer maps
 - Raw Source maps (VMF/BSP brushes, arbitrary geometry, I/O logic) = huge unstructured output space. Not amateur-viable.
@@ -208,7 +208,7 @@ Rough estimates, assuming ~30k cached context + ~2k new input + ~1–3k output p
 - Overlays = local web app as OBS browser source, fed by harness over websocket: reasoning feed, top-down minimap from `.p2c` grid with player + portals, level card (generator prompt, BFS min-solution length, attempt #, cost so far), scoreboard (solved / gave up / unfair, generator win-rate vs player).
 - Twitch EventSub for chat + channel-point Predictions API: "Will Opus solve it?" bets, viewer votes on next-level constraints ("2 cubes + laser, hard").
 - **Never pipe raw chat into the model prompt.** Prompt injection, plus the model might repeat abusive chat on stream. Viewers choose only from fixed vote options.
-- Optional TTS narrator with an original voice. Don't clone GLaDOS / Ellen McLain's voice (impersonation + rights).
+- Optional TTS narrator with an original voice. Don't clone Tantalos / Ellen McLain's voice (impersonation + rights).
 
 **Reliability for unattended runs:** watchdog restarts game on crash. Stuck detection: no state change in N actions → `give_up` → mark level → next. Per-level and per-day spend caps. API error/refusal fallback (server-side `fallbacks`). Pre-queue 3+ compiled levels.
 
@@ -217,7 +217,7 @@ Rough estimates, assuming ~30k cached context + ~2k new input + ~1–3k output p
 - Twitch has no AI-disclosure rule yet. Label it as AI anyway ("AI-generated levels, AI player").
 - Unattended streams are fine if moderation stays on (AutoMod, mods, any chat-driven TTS disabled when away).
 - Twitch opted channels into Amazon gen-AI training by default (Aug 2026). The opt-out is in settings; your call.
-- GLaDOS/Aperture = Valve IP. Fan framing is common, but don't imply Valve affiliation; pick a channel name that isn't just "GLaDOS".
+- Tantalos/Aperture = Valve IP. Fan framing is common, but don't imply Valve affiliation; pick a channel name that isn't just "Tantalos".
 - Workshop-derived training data: don't stream others' workshop levels as your own; generated levels are fine.
 
 **Hardware:** gaming PC runs Portal 2 + OBS (NVENC encode) easily. ~6 Mbps upload for 1080p60. Harness is light (API calls). LLM cost >> hardware cost.
@@ -303,14 +303,14 @@ Training scale estimate: 10k–50k levels × 2–8k tokens ≈ 50–400M tokens.
 - Not viable: full Hammer-quality Portal 1/2 maps with custom geometry.
 
 ## Proposed repo layout (when building)
-- `glados/p2c/` — `.p2c` parser/writer
-- `glados/serialize/` — level ↔ token format
-- `glados/data/` — SteamCMD fetch, BSP decompile + grid reconstruction, vote filter
-- `glados/validate/` — structural checks, abstract solver
-- `glados/train/` — QLoRA fine-tune + sampling scripts
-- `glados/eval/` — metrics, playtest export
-- `glados/play/` — LLM player: tool API, abstract-sim adapter, SAR/TAS engine adapter, overlay state, memory
-- `glados/stream/` — OBS websocket control, browser overlay app, Twitch EventSub/Predictions, replay captioning
+- `tantalos/p2c/` — `.p2c` parser/writer
+- `tantalos/serialize/` — level ↔ token format
+- `tantalos/data/` — SteamCMD fetch, BSP decompile + grid reconstruction, vote filter
+- `tantalos/validate/` — structural checks, abstract solver
+- `tantalos/train/` — QLoRA fine-tune + sampling scripts
+- `tantalos/eval/` — metrics, playtest export
+- `tantalos/play/` — LLM player: tool API, abstract-sim adapter, SAR/TAS engine adapter, overlay state, memory
+- `tantalos/stream/` — OBS websocket control, browser overlay app, Twitch EventSub/Predictions, replay captioning
 
 ## Verification
 - Round-trip: every `.p2c` → tokens → `.p2c` is identical; written files open in Portal 2 editor and compile.

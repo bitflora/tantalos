@@ -1,4 +1,4 @@
-"""Load `glados-data dataset` JSONL into tensors, and turn labels into conditioning tokens.
+"""Load `tantalos-data dataset` JSONL into tensors, and turn labels into conditioning tokens.
 
 A training sequence is
 
@@ -52,9 +52,9 @@ LATER_FEATURES = ["laser", "receiver", "plate", "bridge", "funnel", "panel", "fl
                   "piston", "rail", "loosecube"]
 # Floor area (width x depth): small, medium, large, extra large.
 SIZE_BUCKETS = [("s", 49), ("m", 100), ("l", 144), ("xl", 10**9)]
-# Difficulty: the solution's chain depth (steps that each need an earlier one; glados metrics).
+# Difficulty: the solution's chain depth (steps that each need an earlier one; tantalos metrics).
 DIFF_BUCKETS = [0.0, 1.5, 3.0, 6.0, float("inf")]
-# glados `metrics::MECHANICS`, in bit order. Portal trips have their own group (`trips`).
+# tantalos `metrics::MECHANICS`, in bit order. Portal trips have their own group (`trips`).
 MECHANICS = [
     "portal_trip",
     "cube_portal",

@@ -1,13 +1,13 @@
 //! Turrets and gel on chambers built so the answer is known.
 
-use glados::builder::Builder;
-use glados::fixtures;
-use glados::geom::Dir;
-use glados::level::{Level, PaintKind};
-use glados::p2c::Puzzle;
-use glados::portals::Landing;
-use glados::regions::{Move, RegionGraph};
-use glados::solver::{judge, Action, Color, Judgement, Mode, Model, Verdict, DEFAULT_MAX_STATES};
+use tantalos::builder::Builder;
+use tantalos::fixtures;
+use tantalos::geom::Dir;
+use tantalos::level::{Level, PaintKind};
+use tantalos::p2c::Puzzle;
+use tantalos::portals::Landing;
+use tantalos::regions::{Move, RegionGraph};
+use tantalos::solver::{judge, Action, Color, Judgement, Mode, Model, Verdict, DEFAULT_MAX_STATES};
 use std::collections::{HashSet, VecDeque};
 
 fn model(p: &Puzzle, mode: Mode) -> Model {

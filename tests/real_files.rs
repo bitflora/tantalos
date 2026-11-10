@@ -1,9 +1,9 @@
 //! Real Puzzle Maker files (BEE2-items preview maps, the only public .p2c files found).
 
-use glados::geom::step;
-use glados::level::{ItemKind, Level};
-use glados::p2c::Puzzle;
-use glados::regions::RegionGraph;
+use tantalos::geom::step;
+use tantalos::level::{ItemKind, Level};
+use tantalos::p2c::Puzzle;
+use tantalos::regions::RegionGraph;
 
 const SKYBOX: &str = "fixtures/real/1501698868.p2c";
 const STYLE: &str = "fixtures/real/1500854111.p2c";

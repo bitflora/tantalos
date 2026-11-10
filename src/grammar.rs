@@ -21,7 +21,7 @@
 //!   floor; a piston's column is open; a field stays in the chamber; at most `MAX_TURRETS`
 //!   turrets. Every token allowed can be followed by one that is, so a level never gets stuck.
 //!
-//! With the editor's rules on (`Grammar::with_editor_rules`, what `glados-score grammar` serves),
+//! With the editor's rules on (`Grammar::with_editor_rules`, what `tantalos-score grammar` serves),
 //! the token that settles where an item goes (its last cell number or direction, a field's
 //! length, a piston's reach, a rail's far end) may not give it a new flag in our model of the
 //! Puzzle Maker's rules (`editor.rs`): two items in one cell, an item on a door frame or in a

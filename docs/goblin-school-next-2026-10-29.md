@@ -86,7 +86,7 @@ The approved first experiment is 30 minutes, roughly 20% buffer (export supplied
 
 1. Write `school.py export NAME --out data/school/NAME.jsonl`. It writes the buffer's plans as
    training rows, in the same row format as `data/goblin/train.jsonl`. Each plan becomes x4
-   symmetric copies, with `goblin_data.augment` (it calls `glados-data augment --plans`).
+   symmetric copies, with `goblin_data.augment` (it calls `tantalos-data augment --plans`).
 2. Train with `run.py`, never `train.py` directly:
    - a `--task goblin --quick --from goblin-v6init-12h-b` run;
    - `--data` naming `data/goblin/train.jsonl` and the export;
@@ -142,7 +142,7 @@ Three of those gaps are closed in the harness (2026-10-31, train/play.py, tests/
   in its way (00099), a platform arriving. A timed escape (`dash`) doesn't wait, since its door
   shuts again and the time is the point.
 - **A laser beam across the way is ducked under or jumped**, by how high the emitters put it
-  (`glados_lasers`, `beam_over`): over 40 units above the feet it is ducked under (crouched the
+  (`tantalos_lasers`, `beam_over`): over 40 units above the feet it is ducked under (crouched the
   player is 36 tall), lower it is jumped as before. Burnt again by what was tried, the other
   way is tried once. A beam bent by a reflection cube or sent through a portal is still not
   found, and then the jump comes first, as before (00172).
@@ -193,7 +193,7 @@ The 14 that never played, looked at offline (2026-11-02). 12 the editor marked i
 - 8 Workshop levels (00038, 00046, 00062, 00064, 00108, 00122, 00129, 00131): our own rules flag
   every one of them too (fields overlapping or across a door, plate targets in the air, rails
   sharing cells). The real maps passed the editor, so these are converter output, and the stager
-  should have left them out: `glados-p2c editor` on the staged p2c says so before the game does.
+  should have left them out: `tantalos-p2c editor` on the staged p2c says so before the game does.
 - 4 level-net levels our rules let through, three gaps in src/editor.rs, now closed and each
   scored against every stored in-game check (74,053 levels, runs/*/eval/ingame): a loose cube on
   a turret (00143, 00181; 66 of 66 flags), a door with an open voxel in the wall it is sunk into
@@ -223,7 +223,7 @@ door, which can't cover 18 turrets; it would need the number of turrets a step's
 Round e1/r01 (2026-10-31, from goblin-school-r00-b, `--no-prefix`): 391/4096 solved (142
 greedy, 249 by a sample), all beyond BFS; 31 liberal only; buffer 812 levels, 1,256 plans.
 Attempt 18,382 s. Polish hung 5 h on one 27x26x25 Workshop level (ws:132677917, ~50-step
-plans; staged as glados-school-r01-02755); polish now stops after POLISH_SECONDS (300) a level.
+plans; staged as tantalos-school-r01-02755); polish now stops after POLISH_SECONDS (300) a level.
 
 Paused 2026-10-31 by the user, to resume: export both rounds (writes only at the end; it was
 stopped part way, nothing written), then a 2-hour guarded run from goblin-v6init-12h-b with the
@@ -264,7 +264,7 @@ the model nearly had already. More of the same rounds is unlikely to pay off.
 `train/goblin_search.py` on `runs/goblin-school-r01-2h/best.pt`, 60 s a level a method, on the
 72 levels that run's greedy eval missed (24 each of test-ws, test-v6, test-frontier; seed 7,
 `out/search/r01-60s/`, 126 minutes). Best-of-N sampling in rounds of 32 against a 4-wide beam
-with 8 candidate steps a prefix, both constrained by `glados-score env`, both after a free
+with 8 candidate steps a prefix, both constrained by `tantalos-score env`, both after a free
 greedy plan, both ending rows inside a round when the clock runs out, both restarting rather
 than returning the budget unspent.
 
@@ -354,7 +354,7 @@ round 1) were plans with a portal loop (`Action::Loop`), which `route.rs` didn't
 bridge (measured on 00036 of round 1: fraction 1.0 over it, a player dropped on it rests 18.75
 over the floor, the bridge entity's box 64 wide and as long as the bridge). `ground_ahead`
 found no floor, `walk` waited 30 s and gave up: 13 of round 0's 92 replays hit that 30 s stall,
-6 of them in bridge levels. Now `glados_bridges` lists `projected_wall_entity` boxes and
+6 of them in bridge levels. Now `tantalos_bridges` lists `projected_wall_entity` boxes and
 `bridge_rise` stands in where the trace finds nothing, so the player hops on. 00036 went from a
 30 s stall and a death to playing out of the exit (10 ok, 2 recovered). Deployed stairs are
 probably invisible the same way (00112 of round 0 waited 30 s mid-climb), so `act_climb` doesn't

@@ -1,12 +1,12 @@
-//! `glados-view`: a browser app for saved solutions (`src/view.rs`).
+//! `tantalos-view`: a browser app for saved solutions (`src/view.rs`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use glados::cli::{self, Result};
+use tantalos::cli::{self, Result};
 
 const USAGE: &str = "usage:
-  glados-view [--roots DIR]... [--port N] [--no-open] [--list]
+  tantalos-view [--roots DIR]... [--port N] [--no-open] [--list]
                                 a browser app for saved solutions: scans the roots for
                                 <name>.route.jsonl with <name>.p2c beside it, serves them and
                                 draws the level in 2.5D with the plan playing back. --list just
@@ -45,7 +45,7 @@ fn run(args: &[String]) -> Result<()> {
         return Err("none of the roots exist; pass --roots DIR".into());
     }
     if list {
-        let found = glados::view::scan(&roots);
+        let found = tantalos::view::scan(&roots);
         for f in &found {
             println!(
                 "{}\t{}x{}x{}\t{} legs\t{}",
@@ -57,5 +57,5 @@ fn run(args: &[String]) -> Result<()> {
         println!("{} solutions", found.len());
         return Ok(());
     }
-    glados::view::serve(roots, port, open).map_err(Into::into)
+    tantalos::view::serve(roots, port, open).map_err(Into::into)
 }

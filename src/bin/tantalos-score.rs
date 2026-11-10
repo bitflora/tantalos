@@ -1,17 +1,17 @@
-//! `glados-score`: solving and checking for training, evaluation and play.
+//! `tantalos-score`: solving and checking for training, evaluation and play.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use glados::cli::{self, flags, load, parse, Result};
-use glados::level::Level;
-use glados::p2c::Puzzle;
-use glados::solver::{Mode, Model, Problem, DEFAULT_MAX_STATES};
-use glados::{dataset, plan, route, tokens};
+use tantalos::cli::{self, flags, load, parse, Result};
+use tantalos::level::Level;
+use tantalos::p2c::Puzzle;
+use tantalos::solver::{Mode, Model, Problem, DEFAULT_MAX_STATES};
+use tantalos::{dataset, plan, route, tokens};
 
 const USAGE: &str = "usage:
-  glados-score score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [--plan-only] [--plans K]
+  tantalos-score score [--budget N] [--p2c DIR] [--p2c-all DIR] [--editor-rules on|off] [--plan] [--plan-only] [--plans K]
                      [--alternatives N] [FILE]
                                 decode and solve one token sequence per line of FILE (or
                                 stdin); JSONL to stdout. --p2c writes the solvable ones,
@@ -27,7 +27,7 @@ const USAGE: &str = "usage:
                                 (with --plan-only): also \"alt_plans\", up to N plans that
                                 solve it another way (a face class the first plan fires at
                                 switched off; at most 3 actions longer)
-  glados-score check [--mode conservative|liberal] [--route DIR] [FILE]
+  tantalos-score check [--mode conservative|liberal] [--route DIR] [FILE]
                                 check plans: JSONL with \"tokens\" (a level) and \"plan\" (plan
                                 tokens) or \"plans\" (a list of them, all against one model),
                                 optionally \"min_len\", from FILE or stdin; one JSON line per
@@ -37,7 +37,7 @@ const USAGE: &str = "usage:
                                 laser spots, as the solver retries such levels.
                                 --route DIR: NNNNN.p2c and NNNNN.route.jsonl (as
                                 route writes) for the first solved plan of a line
-  glados-score env              the legal next plan tokens, for decoding plans step by step
+  tantalos-score env              the legal next plan tokens, for decoding plans step by step
                                 (src/env.rs): a JSONL server on stdin/stdout, one answer
                                 line per request line, flushed.
                                 {\"op\":\"open\",\"id\":ID,\"tokens\":LEVEL[,\"mode\":\"liberal\"]}
@@ -47,7 +47,7 @@ const USAGE: &str = "usage:
                                   (end: the plan solves if it stops here; dead: no step
                                   fits; whole: the plan so far is whole steps)
                                 {\"op\":\"close\",\"ids\":[ID,...]} -> {\"ok\":true}
-  glados-score grammar [--check FILE] [--editor-rules on|off]
+  tantalos-score grammar [--check FILE] [--editor-rules on|off]
                                 the legal next level tokens, for the level net's constrained
                                 decoding (src/grammar.rs): a JSONL server on stdin/stdout, one
                                 answer line per request line, flushed. Items go only where they
@@ -57,7 +57,7 @@ const USAGE: &str = "usage:
                                   (end: the level may end here)
                                 --check FILE: whether each line's \"tokens\" (JSONL) is a whole
                                 legal level; one JSON line per input, {\"ok\":B[,\"error\":...]}
-  glados-score route [--plan TOKENS [--mode conservative|liberal]] <file.p2c>
+  tantalos-score route [--plan TOKENS [--mode conservative|liberal]] <file.p2c>
                                 the conservative plan made concrete for playing it in the game:
                                 where to stand, look, fire and walk (JSON lines, src/route.rs).
                                 --plan: route that plan instead (plan tokens, src/plan.rs); one
@@ -295,7 +295,7 @@ fn run_score(args: &[String]) -> Result<()> {
             let (i, json, puzzle) = scored?;
             writeln!(out, "{json}")?;
             if let (Some(dir), Some(mut p)) = (&p2c_dir, puzzle) {
-                p.set_title(&format!("glados sample {i}"));
+                p.set_title(&format!("tantalos sample {i}"));
                 std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
             }
             Ok(())
@@ -306,8 +306,8 @@ fn run_score(args: &[String]) -> Result<()> {
 }
 
 fn run_env(args: &[String]) -> Result<()> {
-    use glados::env::Env;
-    use glados::mutate::{json_array, json_field};
+    use tantalos::env::Env;
+    use tantalos::mutate::{json_array, json_field};
     use std::io::BufRead;
     if !args.is_empty() {
         return Err(format!("env takes no arguments
@@ -367,7 +367,7 @@ fn run_env(args: &[String]) -> Result<()> {
                         })
                         .collect();
                     // All the open levels together: past this, each drops its older half.
-                    if envs.values().map(Env::cached).sum::<usize>() > 4 * glados::env::MAX_CACHED {
+                    if envs.values().map(Env::cached).sum::<usize>() > 4 * tantalos::env::MAX_CACHED {
                         envs.values_mut().for_each(|e| e.forget(e.cached() / 2));
                     }
                     format!("{{\"results\":[{}]}}", results.join(","))
@@ -389,8 +389,8 @@ fn run_env(args: &[String]) -> Result<()> {
 }
 
 fn run_grammar(args: &[String]) -> Result<()> {
-    use glados::grammar::Grammar;
-    use glados::mutate::{json_array, json_field};
+    use tantalos::grammar::Grammar;
+    use tantalos::mutate::{json_array, json_field};
     use std::io::BufRead;
     let mut check = None;
     let mut editor = true;
@@ -453,7 +453,7 @@ fn run_grammar(args: &[String]) -> Result<()> {
 }
 
 fn run_check(args: &[String]) -> Result<()> {
-    use glados::mutate::{json_array, json_field};
+    use tantalos::mutate::{json_array, json_field};
     let mut mode = Mode::Conservative;
     let mut route_dir = None;
     let mut rest = Vec::new();
@@ -578,7 +578,7 @@ fn run_check(args: &[String]) -> Result<()> {
             let (i, (json, routed)) = done?;
             writeln!(out, "{{\"line\":{i},{json}}}")?;
             if let (Some(dir), Some((mut p, lines))) = (&route_dir, routed) {
-                p.set_title(&format!("glados plan {i}"));
+                p.set_title(&format!("tantalos plan {i}"));
                 std::fs::write(dir.join(format!("{i:05}.p2c")), p.to_p2c())?;
                 std::fs::write(dir.join(format!("{i:05}.route.jsonl")), lines.join("\n") + "\n")?;
             }

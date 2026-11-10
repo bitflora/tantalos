@@ -239,7 +239,7 @@ pub struct Route {
     pub attempt: Option<Attempt>,
 }
 
-/// What `plan::check` said about a plan that was routed (`glados-score route --plan`).
+/// What `plan::check` said about a plan that was routed (`tantalos-score route --plan`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetCheck {
     /// solved, illegal, unfinished, unknown or unparsed.

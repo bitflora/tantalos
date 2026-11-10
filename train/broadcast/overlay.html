@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>GLaDOS overlay</title>
+<title>Tantalos overlay</title>
 <!-- The stream overlay for train/broadcast.py: an OBS browser source at 1920x1080 over the
      game capture (1280x800, top left). It polls state.json beside it every half second. -->
 <style>
@@ -79,7 +79,7 @@
 </head>
 <body>
 <div class="stage" id="stage">
-  <h2 id="stage-kicker">GLaDOS</h2>
+  <h2 id="stage-kicker">Tantalos</h2>
   <div class="big" id="stage-title">Starting</div>
   <div class="sub" id="stage-sub"></div>
   <svg id="loss" width="1168" height="330" viewBox="0 0 1168 330"></svg>
@@ -88,7 +88,7 @@
 
 <div class="side">
   <div class="brand">
-    <h1><span class="dot"></span>GLaDOS</h1>
+    <h1><span class="dot"></span>Tantalos</h1>
     <div class="row"><span class="chip phase" id="phase">starting</span><span class="chip tier" id="tier">T?</span></div>
   </div>
   <div class="facts" id="models"></div>
@@ -230,7 +230,7 @@ function render(st) {
       : `The net's plan breaks at step ${(net.steps_ok || 0) + 1}`;
     $("card-problem").textContent = solved ? "" : (net.problem || "");
     let html = stepList(lv.part === "reference" ? "The net's plan (played)" : "The net's plan", net.steps);
-    if (lv.reference) html += stepList("GLaDOS's reference solution", lv.reference.steps);
+    if (lv.reference) html += stepList("Tantalos's reference solution", lv.reference.steps);
     $("steps").innerHTML = html;
   } else {
     $("steps").innerHTML = "";
@@ -247,7 +247,7 @@ function render(st) {
       $("stage-sub").textContent = tr.result ? tr.result : `${tr.state || ""} · ${Math.round(tr.hours * 60)} minutes ${clock(st.phase_ends)}`;
       drawLoss(tr.losses);
     } else {
-      $("stage-kicker").textContent = st.round ? `Round ${st.round}` : "GLaDOS";
+      $("stage-kicker").textContent = st.round ? `Round ${st.round}` : "Tantalos";
       $("stage-title").textContent = st.phase_text || st.phase;
       $("stage-sub").textContent = (st.ticker || []).slice(-1)[0] || "";
       svg($("loss"), []);

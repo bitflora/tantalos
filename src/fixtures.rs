@@ -1,4 +1,4 @@
-//! Hand-designed test chambers. `glados-p2c fixtures` writes them to `fixtures/synthetic/`;
+//! Hand-designed test chambers. `tantalos-p2c fixtures` writes them to `fixtures/synthetic/`;
 //! tests check the committed files match this code.
 //!
 //! All use the Puzzle Maker convention of a solid floor layer at z=0 (so pits can be dug).

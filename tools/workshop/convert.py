@@ -1,4 +1,4 @@
-"""Recover a Puzzle Maker chamber from its compiled map (.bsp), as glados tokens (src/tokens.rs).
+"""Recover a Puzzle Maker chamber from its compiled map (.bsp), as tantalos tokens (src/tokens.rs).
 
     python tools/workshop/convert.py maps/*.bsp --report report.jsonl --tokens levels.txt
 
@@ -1259,7 +1259,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("bsp", nargs="+")
     ap.add_argument("--report", help="JSONL: one line per map with its tokens or why it's unsupported")
-    ap.add_argument("--tokens", help="write the converted maps' tokens here, one per line (for glados-score score)")
+    ap.add_argument("--tokens", help="write the converted maps' tokens here, one per line (for tantalos-score score)")
     a = ap.parse_args()
     report = open(a.report, "w", encoding="utf-8") if a.report else None
     toks = open(a.tokens, "w", encoding="utf-8") if a.tokens else None

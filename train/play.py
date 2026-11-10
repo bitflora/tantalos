@@ -4,7 +4,7 @@
     python train/play.py LEVEL.p2c... --port PORT --password PW     # a game you started yourself
     python train/play.py --spike fixtures/synthetic/worked_example.p2c --launch
 
-`glados-score route` turns the solver's shortest plan into cells, faces and points (src/route.rs).
+`tantalos-score route` turns the solver's shortest plan into cells, faces and points (src/route.rs).
 This loads the level into the Puzzle Maker (train/portal2.py), builds it, and plays it with the
 player's own controls: `setang` to look (a perfect mouse, turning smoothly so it can be watched;
 --fast snaps it, for validation runs) and +forward, +jump, +attack (blue),
@@ -65,7 +65,7 @@ from portal2 import Console, GameUnavailable, open_editor  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 VOXEL = 128.0
-SCRIPT = portal2.GAME / "portal2" / "scripts" / "vscripts" / "glados_play.nut"
+SCRIPT = portal2.GAME / "portal2" / "scripts" / "vscripts" / "tantalos_play.nut"
 LEVEL = portal2.STAGE / "play.p2c"
 COLORS = ("blue", "orange")
 FIRE_KEY = {"blue": "attack", "orange": "attack2"}
@@ -86,27 +86,27 @@ DIRS = {"-x": (-1, 0, 0), "+x": (1, 0, 0), "-y": (0, -1, 0), "+y": (0, 1, 0), "-
 
 VSCRIPT = r"""// Written by train/play.py and deleted when it quits: reports what the player steers by.
 // One line per thing, as long lines can be cut short.
-function glados_v(v) { return "[" + v.x + "," + v.y + "," + v.z + "]" }
-function glados_list(n, kind, cls) {
+function tantalos_v(v) { return "[" + v.x + "," + v.y + "," + v.z + "]" }
+function tantalos_list(n, kind, cls) {
 	local e = null
 	while ((e = Entities.FindByClassname(e, cls)) != null)
-		printl("GLADOS_ENT " + n + " " + kind + " {\"id\":" + e.entindex() + ",\"o\":" + glados_v(e.GetOrigin()) + ",\"a\":" + glados_v(e.GetAngles()) + "}")
+		printl("TANTALOS_ENT " + n + " " + kind + " {\"id\":" + e.entindex() + ",\"o\":" + tantalos_v(e.GetOrigin()) + ",\"a\":" + tantalos_v(e.GetAngles()) + "}")
 }
-function glados_obs(n) {
+function tantalos_obs(n) {
 	local p = GetPlayer()
 	if (p == null) {
-		printl("GLADOS_OBS " + n + " null")
+		printl("TANTALOS_OBS " + n + " null")
 	} else {
-		printl("GLADOS_OBS " + n + " {\"t\":" + Time() + ",\"o\":" + glados_v(p.GetOrigin()) + ",\"eye\":" + glados_v(p.EyePosition()) + ",\"v\":" + glados_v(p.GetVelocity()) + ",\"hp\":" + p.GetHealth() + "}")
-		glados_list(n, "portals", "prop_portal")
-		glados_list(n, "cubes", "prop_weighted_cube")
-		glados_list(n, "turrets", "npc_portal_turret_floor")
-		glados_list(n, "pedestals", "prop_button")
-		glados_list(n, "pedestals", "prop_under_button")
+		printl("TANTALOS_OBS " + n + " {\"t\":" + Time() + ",\"o\":" + tantalos_v(p.GetOrigin()) + ",\"eye\":" + tantalos_v(p.EyePosition()) + ",\"v\":" + tantalos_v(p.GetVelocity()) + ",\"hp\":" + p.GetHealth() + "}")
+		tantalos_list(n, "portals", "prop_portal")
+		tantalos_list(n, "cubes", "prop_weighted_cube")
+		tantalos_list(n, "turrets", "npc_portal_turret_floor")
+		tantalos_list(n, "pedestals", "prop_button")
+		tantalos_list(n, "pedestals", "prop_under_button")
 	}
-	printl("GLADOS_END " + n)
+	printl("TANTALOS_END " + n)
 }
-function glados_put(id, x, y, z) {
+function tantalos_put(id, x, y, z) {
 	local e = null
 	while ((e = Entities.FindByClassname(e, "prop_weighted_cube")) != null) {
 		if (e.entindex() == id) {
@@ -116,63 +116,63 @@ function glados_put(id, x, y, z) {
 		}
 	}
 }
-function glados_names() {
+function tantalos_names() {
 	foreach (cls in ["linked_portal_door", "prop_testchamber_door", "prop_floor_button", "prop_floor_cube_button", "prop_floor_ball_button", "prop_button", "prop_under_button", "prop_weighted_cube", "npc_portal_turret_floor", "prop_portal"]) {
 		local e = null
 		while ((e = Entities.FindByClassname(e, cls)) != null)
-			printl("GLADOS_NAME " + cls + " " + e.entindex() + " " + e.GetName() + " " + glados_v(e.GetOrigin()))
+			printl("TANTALOS_NAME " + cls + " " + e.entindex() + " " + e.GetName() + " " + tantalos_v(e.GetOrigin()))
 	}
 }
-function glados_arrival() {
+function tantalos_arrival() {
 	foreach (cls in ["trigger_once", "linked_portal_door", "func_tracktrain"]) {
 		local e = null
 		while ((e = Entities.FindByClassname(e, cls)) != null) {
 			local name = e.GetName()
 			if (name.find("leaving_elevator_trigger") != null || name == "@entrance_portal_elevator_side" || name.find("arrival_elevator-elevator_1") != null)
-				printl("GLADOS_ARRIVAL " + name + " " + glados_v(e.GetOrigin()))
+				printl("TANTALOS_ARRIVAL " + name + " " + tantalos_v(e.GetOrigin()))
 		}
 	}
 }
 // The level's own start (what the editor's Build & Play does): the relay that teleports the
 // player to the entry corridor and opens the entry door.
-function glados_start() {
+function tantalos_start() {
 	local e = null
 	while ((e = Entities.FindByClassname(e, "logic_relay")) != null) {
 		local n = e.GetName()
 		if (n.len() >= 15 && n.slice(n.len() - 15) == "player_start_rl") {
 			DoEntFire(n, "Trigger", "", 0, null, null)
-			printl("GLADOS_START " + n)
+			printl("TANTALOS_START " + n)
 		}
 	}
 }
 // How far a straight line from a to b gets before something solid stops it (0..1).
-function glados_trace(ax, ay, az, bx, by, bz) {
-	printl("GLADOS_TRACE " + TraceLine(Vector(ax, ay, az), Vector(bx, by, bz), GetPlayer()))
+function tantalos_trace(ax, ay, az, bx, by, bz) {
+	printl("TANTALOS_TRACE " + TraceLine(Vector(ax, ay, az), Vector(bx, by, bz), GetPlayer()))
 }
 // The light bridges, as boxes (origin + bounds): world traces go straight through them.
-function glados_bridges() {
+function tantalos_bridges() {
 	local e = null
 	while ((e = Entities.FindByClassname(e, "projected_wall_entity")) != null)
-		printl("GLADOS_BRIDGE {\"lo\":" + glados_v(e.GetOrigin() + e.GetBoundingMins()) + ",\"hi\":" + glados_v(e.GetOrigin() + e.GetBoundingMaxs()) + "}")
-	printl("GLADOS_BRIDGE_END")
+		printl("TANTALOS_BRIDGE {\"lo\":" + tantalos_v(e.GetOrigin() + e.GetBoundingMins()) + ",\"hi\":" + tantalos_v(e.GetOrigin() + e.GetBoundingMaxs()) + "}")
+	printl("TANTALOS_BRIDGE_END")
 }
 // The laser emitters and where they point (what burnt the player).
-function glados_lasers() {
+function tantalos_lasers() {
 	local e = null
 	while ((e = Entities.FindByClassname(e, "env_portal_laser")) != null)
-		printl("GLADOS_LASER {\"o\":" + glados_v(e.GetOrigin()) + ",\"a\":" + glados_v(e.GetAngles()) + "}")
-	printl("GLADOS_LASER_END")
+		printl("TANTALOS_LASER {\"o\":" + tantalos_v(e.GetOrigin()) + ",\"a\":" + tantalos_v(e.GetAngles()) + "}")
+	printl("TANTALOS_LASER_END")
 }
 // What is within r of a point: class, name, origin (what a blocked walk ran into).
-function glados_near(x, y, z, r) {
+function tantalos_near(x, y, z, r) {
 	local e = null
 	while ((e = Entities.FindInSphere(e, Vector(x, y, z), r)) != null) {
 		local c = e.GetClassname()
 		if (c != "player" && c != "weapon_portalgun" && c != "predicted_viewmodel" && c != "info_target")
-			printl("GLADOS_NEAR " + c + " " + e.GetName() + " " + glados_v(e.GetOrigin()) + " " + glados_v(e.GetAngles()))
+			printl("TANTALOS_NEAR " + c + " " + e.GetName() + " " + tantalos_v(e.GetOrigin()) + " " + tantalos_v(e.GetAngles()))
 	}
 }
-printl("GLADOS_SCRIPT loaded")
+printl("TANTALOS_SCRIPT loaded")
 """
 
 
@@ -208,7 +208,7 @@ def heading(angles):
 
 def beam_over(lasers, feet, reach=40.0):
     """How high over `feet` a laser beam crosses: of the beams in `lasers` (each {"o", "a"},
-    from `glados_lasers`) whose line passes within `reach` of the column over `feet`, the
+    from `tantalos_lasers`) whose line passes within `reach` of the column over `feet`, the
     lowest one's height over the feet, or None if none does. Only the straight beam an
     emitter makes is found this way: one bent by a reflection cube or sent through a portal
     is not, and nor is one the level has switched off."""
@@ -312,7 +312,7 @@ def fmt(p):
 # --- the game ------------------------------------------------------------------------------
 
 class Game:
-    """The player in a running level: what it sees (via glados_play.nut) and its controls."""
+    """The player in a running level: what it sees (via tantalos_play.nut) and its controls."""
 
     def __init__(self, con, origin=(0.0, 0.0, 0.0), turn_rate=TURN_RATE, exit_wait=EXIT_WAIT):
         self.con = con
@@ -333,7 +333,7 @@ class Game:
         self.trace = []         # one compact record per look
         self.events = []        # what happened that the route didn't ask for
         self.shots = []         # screenshot names taken
-        self.shot_prefix = "glados"
+        self.shot_prefix = "tantalos"
         self.firing = False     # portals are expected to move (a shot, portal_place)
         self.hazards = []       # [(index, kind, axis, plane, lo, hi)] in world units
         self.fields_on = set()  # hazard indices on during this leg
@@ -376,17 +376,17 @@ class Game:
             # portal); saying it again while in third person changes nothing.
             self.con.send("thirdperson")
             self.view_said = time.time()
-        self.con.send(f"script glados_obs({n})")
-        got = self.con.until(lambda l: l.strip() == f"GLADOS_END {n}", timeout)
+        self.con.send(f"script tantalos_obs({n})")
+        got = self.con.until(lambda l: l.strip() == f"TANTALOS_END {n}", timeout)
         if got is None:
             raise GameUnavailable("the game stopped reporting positions")
-        head = next((l for l in got[0] if l.startswith(f"GLADOS_OBS {n} ")), None)
+        head = next((l for l in got[0] if l.startswith(f"TANTALOS_OBS {n} ")), None)
         s = json.loads(head.split(" ", 2)[2]) if head else None
         if s is None:
             raise Stuck("no player")
         s.update(portals=[], cubes=[], turrets=[], pedestals=[])
         for l in got[0]:
-            if l.startswith(f"GLADOS_ENT {n} "):
+            if l.startswith(f"TANTALOS_ENT {n} "):
                 _, _, kind, item = l.split(" ", 3)
                 s[kind].append(json.loads(item))
         jump = False
@@ -549,7 +549,7 @@ class Game:
         return name
 
     def set_hazards(self, head):
-        """The level's hazard fields (`glados-score route`'s head), as planes in world units."""
+        """The level's hazard fields (`tantalos-score route`'s head), as planes in world units."""
         self.hazards = []
         for h, hz in enumerate(head.get("hazards", [])):
             for face in hz["faces"]:
@@ -561,17 +561,17 @@ class Game:
 
     def trace_line(self, a, b):
         """How far (0..1) a straight line from a to b gets before something solid."""
-        out = self.con.ask([f"script glados_trace({a[0]:.1f},{a[1]:.1f},{a[2]:.1f},"
+        out = self.con.ask([f"script tantalos_trace({a[0]:.1f},{a[1]:.1f},{a[2]:.1f},"
                             f"{b[0]:.1f},{b[1]:.1f},{b[2]:.1f})"], 5) or ""
-        m = re.search(r"GLADOS_TRACE ([-\d.e]+)", out)
+        m = re.search(r"TANTALOS_TRACE ([-\d.e]+)", out)
         return float(m.group(1)) if m else None
 
     def bridges(self):
         """Every light bridge as a box {"lo", "hi"} (world units; a bridge is 64 wide and flat)."""
-        out = self.con.ask(["script glados_bridges()"], 5) or ""
+        out = self.con.ask(["script tantalos_bridges()"], 5) or ""
         found = []
         for l in out.splitlines():
-            if l.startswith("GLADOS_BRIDGE {"):
+            if l.startswith("TANTALOS_BRIDGE {"):
                 try:
                     found.append(json.loads(l.split(" ", 1)[1]))
                 except ValueError:
@@ -580,10 +580,10 @@ class Game:
 
     def lasers(self):
         """Every laser emitter: {"o": origin, "a": angles}, for `beam_over`."""
-        out = self.con.ask(["script glados_lasers()"], 5) or ""
+        out = self.con.ask(["script tantalos_lasers()"], 5) or ""
         found = []
         for l in out.splitlines():
-            if l.startswith("GLADOS_LASER {"):
+            if l.startswith("TANTALOS_LASER {"):
                 try:
                     found.append(json.loads(l.split(" ", 1)[1]))
                 except ValueError:
@@ -592,25 +592,25 @@ class Game:
 
     def near(self, p, r):
         """Entities within r of p: [class name origin angles], nearest first."""
-        out = self.con.ask([f"script glados_near({p[0]:.1f},{p[1]:.1f},{p[2]:.1f},{r})"], 5) or ""
-        found = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("GLADOS_NEAR ")]
+        out = self.con.ask([f"script tantalos_near({p[0]:.1f},{p[1]:.1f},{p[2]:.1f},{r})"], 5) or ""
+        found = [l.split(" ", 1)[1] for l in out.splitlines() if l.startswith("TANTALOS_NEAR ")]
         return found[:20]
 
     # saving and loading: a leg is retried from where it started
     def save(self):
-        out = self.con.ask(["save glados_leg"], 20) or ""
+        out = self.con.ask(["save tantalos_leg"], 20) or ""
         return "SAVEGAME" in out
 
     def load(self, before):
         """Loads the save from the start of the leg and finds the portals and the held cube
         again (a load gives entities new numbers). `before`: the route's state then."""
         self.release_all()
-        self.con.send("load glados_leg")
+        self.con.send("load tantalos_leg")
         if self.con.until(lambda l: "END loading assets" in l, 60) is None:
             raise GameUnavailable("the save didn't load")
         time.sleep(1.0)
         end = time.time() + 20
-        while "GLADOS_SCRIPT loaded" not in (self.con.ask(["script_execute glados_play"], 10) or ""):
+        while "TANTALOS_SCRIPT loaded" not in (self.con.ask(["script_execute tantalos_play"], 10) or ""):
             if time.time() > end:
                 raise GameUnavailable("the script didn't load after loading the save")
             time.sleep(0.5)
@@ -800,10 +800,10 @@ class Game:
         if getattr(self, "stream", False):  # the overlay says the rest
             text = text[:60]
         if not self.text_made:
-            self.con.send('ent_create game_text targetname glados_text x 0.02 y 0.92 channel 3 '
+            self.con.send('ent_create game_text targetname tantalos_text x 0.02 y 0.92 channel 3 '
                           'holdtime 9999 fadein 0 fadeout 0 color "255 220 120"')
             self.text_made = True
-        self.con.send(f'ent_fire glados_text addoutput "message {text}"', "ent_fire glados_text display")
+        self.con.send(f'ent_fire tantalos_text addoutput "message {text}"', "ent_fire tantalos_text display")
 
     def teleport(self, feet):
         self.release_all()
@@ -1038,7 +1038,7 @@ class Game:
 
     def walk_points(self, points, cells, tol=8.0):
         """Walks a leg's straightened walk (`points`: cells to head for in turn, straight
-        lines checked clear by `glados-score route`), or its `cells` in routes made before those."""
+        lines checked clear by `tantalos-score route`), or its `cells` in routes made before those."""
         if points is None:
             return self.walk_cells(cells, tol)
         if not points:
@@ -1792,7 +1792,7 @@ class Game:
         return self.jumped
 
     def act_attempt(self, leg):
-        """Goblin's step that fits no move (`glados-score route --plan`): after the walk
+        """Goblin's step that fits no move (`tantalos-score route --plan`): after the walk
         toward it, a shot at the face it names (from the nearest cell that sees it, else from
         here), or nothing more. Never counts as done."""
         if leg.get("verb") == "fire" and leg.get("face"):
@@ -1891,7 +1891,7 @@ class Game:
                     if cube is not None:
                         p = s["eye"]
                         yaw = math.radians(self.yaw)
-                        self.con.send(f"script glados_put({cube['id']}, {p[0] + 60 * math.cos(yaw):.1f}, "
+                        self.con.send(f"script tantalos_put({cube['id']}, {p[0] + 60 * math.cos(yaw):.1f}, "
                                       f"{p[1] + 60 * math.sin(yaw):.1f}, {p[2] - 10:.1f})")
                         time.sleep(0.2)
                         self.tap("use")
@@ -1904,7 +1904,7 @@ class Game:
                 f = self.floor(want)
                 cube = self.nearest_cube(s, f, skip=used)
                 if cube is not None:
-                    self.con.send(f"script glados_put({cube['id']}, {f[0]:.1f}, {f[1]:.1f}, {f[2] + 24:.1f})")
+                    self.con.send(f"script tantalos_put({cube['id']}, {f[0]:.1f}, {f[1]:.1f}, {f[2] + 24:.1f})")
                     here = cube
             if here is not None:
                 used.add(here["id"])
@@ -1914,23 +1914,23 @@ class Game:
 
 # --- a level ---------------------------------------------------------------------------------
 
-def glados_exe(path=None):
+def tantalos_exe(path=None):
     if path:
         return Path(path)
-    for p in (ROOT / "target" / "release" / "glados-score.exe", ROOT / "target" / "debug" / "glados-score.exe"):
+    for p in (ROOT / "target" / "release" / "tantalos-score.exe", ROOT / "target" / "debug" / "tantalos-score.exe"):
         if p.exists():
             return p
-    sys.exit("no glados-score.exe: run `cargo build --release`")
+    sys.exit("no tantalos-score.exe: run `cargo build --release`")
 
 
 class NoRoute(Exception):
-    """`glados-score route` can't play the level."""
+    """`tantalos-score route` can't play the level."""
 
 
 def route(exe, level, plan=None, mode=None):
-    """(head, legs) of `glados-score route` for the level: the solver's plan, or with `plan` (plan
+    """(head, legs) of `tantalos-score route` for the level: the solver's plan, or with `plan` (plan
     tokens) that one, as far as it fits, routed by the `mode` model (conservative, the default,
-    or liberal) (src/bin/glados-score.rs print_route)."""
+    or liberal) (src/bin/tantalos-score.rs print_route)."""
     cmd = ([str(exe), "route"] + (["--plan", plan] if plan is not None else [])
            + (["--mode", mode] if plan is not None and mode else []) + [str(level)])
     out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
@@ -1940,7 +1940,7 @@ def route(exe, level, plan=None, mode=None):
 
 
 def route_lines(lines):
-    """(head, legs) from `glados-score route`'s JSON lines."""
+    """(head, legs) from `tantalos-score route`'s JSON lines."""
     rows = [json.loads(l) for l in lines if l.strip()]
     return rows[0], rows[1:]
 
@@ -1970,7 +1970,7 @@ def load_level(con, path, timeout=240):
     if "Loaded puzzle" not in out:
         raise GameUnavailable(f"the editor didn't load {path}: {out[-300:]}")
     portal2.VMF.unlink(missing_ok=True)
-    exported = con.ask(["puzzlemaker_export glados_check"], 30) or ""
+    exported = con.ask(["puzzlemaker_export tantalos_check"], 30) or ""
     invalid = [l.split("INVALID ITEM:", 1)[1].strip() for l in exported.splitlines() if "INVALID ITEM:" in l]
     if invalid:
         # Building it would only stop at a modal "Build Failed" dialog, which blocks the editor
@@ -1991,8 +1991,8 @@ def load_level(con, path, timeout=240):
         raise GameUnavailable("the level didn't restart")
     end = time.time() + timeout
     while time.time() < end:
-        out = con.ask(["sv_cheats 1", "script_execute glados_play"], 10) or ""
-        if "GLADOS_SCRIPT loaded" in out:
+        out = con.ask(["sv_cheats 1", "script_execute tantalos_play"], 10) or ""
+        if "TANTALOS_SCRIPT loaded" in out:
             return exported
         time.sleep(1)
     raise GameUnavailable("the level didn't finish loading")
@@ -2019,8 +2019,8 @@ def arrive(game, head):
                 if attempt == 4:
                     raise
                 time.sleep(1.5)
-    out = game.con.ask(["script glados_start()"], 5) or ""
-    if "GLADOS_START" in out:
+    out = game.con.ask(["script tantalos_start()"], 5) or ""
+    if "TANTALOS_START" in out:
         time.sleep(1.8)  # teleported after 0.5 s, the door opens after 1.5 s
         game.last = None
         game.obs()
@@ -2039,8 +2039,8 @@ def arrive(game, head):
             still = None
     if not walk_out(game, 8):
         points = {}
-        for l in (game.con.ask(["script glados_arrival()"], 5) or "").splitlines():
-            if l.startswith("GLADOS_ARRIVAL "):
+        for l in (game.con.ask(["script tantalos_arrival()"], 5) or "").splitlines():
+            if l.startswith("TANTALOS_ARRIVAL "):
                 _, name, xyz = l.split(" ", 2)
                 points.setdefault(name, []).append(json.loads(xyz))
         door = points.get("@entrance_portal_elevator_side", [None])[0]
@@ -2372,8 +2372,8 @@ def spike_check(game, head, exported):
     s = game.obs()
     say("player", f"feet {fmt(s['o'])}, eye {fmt(s['eye'])}, hp {s['hp']}")
     say("entities", f"{len(s['portals'])} portals, {len(s['cubes'])} cubes, {len(s['turrets'])} turrets")
-    for l in (con.ask(["script glados_names()"], 5) or "").splitlines():
-        if l.startswith("GLADOS_NAME "):
+    for l in (con.ask(["script tantalos_names()"], 5) or "").splitlines():
+        if l.startswith("TANTALOS_NAME "):
             say("  entity", l.split(" ", 1)[1][:150])
     t0 = time.time()
     for _ in range(20):
@@ -2381,7 +2381,7 @@ def spike_check(game, head, exported):
     say("observation rate", f"{20 / (time.time() - t0):.0f} Hz")
     out = con.ask(["portal_place"], 5) or ""
     say("portal_place usage", " | ".join(out.splitlines())[:300])
-    game.show("glados play: spike")
+    game.show("tantalos play: spike")
     say("game_text", "shown (look at the bottom left of the screen)")
     try:
         arrive(game, head)
@@ -2577,7 +2577,7 @@ class Session:
             folder.mkdir(parents=True)
             (folder / "route.jsonl").write_text(
                 "\n".join(json.dumps(x) for x in [head] + legs) + "\n", encoding="utf-8")
-            game.shot_prefix = f"glados-{key[-40:]}"
+            game.shot_prefix = f"tantalos-{key[-40:]}"
 
             def report(rec, folder=folder):
                 with open(folder / "legs.jsonl", "a", encoding="utf-8") as f:
@@ -2617,7 +2617,7 @@ def main():
     ap.add_argument("--fast", action="store_true",
                     help="snap the view instead of turning smoothly (for validation runs)")
     ap.add_argument("--spike", action="store_true", help="check the harness on the first level")
-    ap.add_argument("--glados", help="glados-score.exe (default: target/release, else target/debug)")
+    ap.add_argument("--tantalos", help="tantalos-score.exe (default: target/release, else target/debug)")
     ap.add_argument("--out", help="folder for reports: per level legs.jsonl, trace.jsonl and "
                     "screenshots, and summary.jsonl (levels already in it are skipped); "
                     "a file named STOP there ends the batch after the level being played")
@@ -2632,7 +2632,7 @@ def main():
     ap.add_argument("--stream", action="store_true",
                     help="for watching on stream: smooth turning, short on-screen step text")
     a = ap.parse_args()
-    exe = glados_exe(a.glados)
+    exe = tantalos_exe(a.tantalos)
     names = a.levels + (Path(a.list).read_text().split() if a.list else [])
     given = {}  # level path -> (plan, mode)
     if a.plans:

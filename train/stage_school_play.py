@@ -9,15 +9,15 @@ liberal one. Before more training on them, the game should agree. This picks, in
 every liberal-only plan of the round (routed with --mode liberal), every buffer level from a
 Workshop level, and a sample of --gen buffer levels the level net wrote; and writes them to
 out/school-play/NAME-rRR/: p2c/NNNNN.p2c, plans.jsonl (p2c, plan, mode, kind, identity, source:
-what play.py --plans reads) and MANIFEST.md. A plan `glados-score route` can't place step by step
+what play.py --plans reads) and MANIFEST.md. A plan `tantalos-score route` can't place step by step
 in full is left out and listed in the manifest with why: those need route.rs work first, and
-are often the riskiest plans (portal loops, flings), so the batch is biased toward easy ones. Nothing touches the game; needs target/release/glados-score.exe.
+are often the riskiest plans (portal loops, flings), so the batch is biased toward easy ones. Nothing touches the game; needs target/release/tantalos-score.exe.
 """
 import argparse, json, random, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GLADOS = ROOT / "target" / "release" / "glados-score.exe"
+TANTALOS = ROOT / "target" / "release" / "tantalos-score.exe"
 
 
 def read_jsonl(path):
@@ -52,7 +52,7 @@ def main():
         sys.exit(f"{out} is already staged")
     p2c = out / "p2c"
     p2c.mkdir(parents=True, exist_ok=True)
-    subprocess.run([str(GLADOS), "score", "--budget", "1", "--p2c-all", str(p2c)],
+    subprocess.run([str(TANTALOS), "score", "--budget", "1", "--p2c-all", str(p2c)],
                    input="\n".join(r["tokens"] for r, _, _ in picks) + "\n",
                    capture_output=True, text=True, check=True)
 
@@ -65,7 +65,7 @@ def main():
         if not f.exists():
             why = "no p2c written"
         else:
-            run = subprocess.run([str(GLADOS), "route", "--plan", r["plan"], "--mode", mode, str(f)],
+            run = subprocess.run([str(TANTALOS), "route", "--plan", r["plan"], "--mode", mode, str(f)],
                                  capture_output=True, text=True, encoding="utf-8")
             if run.returncode != 0:
                 why = (run.stderr or run.stdout).strip().splitlines()[-1:] or ["route failed"]

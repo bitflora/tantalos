@@ -1,26 +1,26 @@
-//! `glados-p2c`: one-off tools for .p2c files: what a level is, whether it's solvable, its
+//! `tantalos-p2c`: one-off tools for .p2c files: what a level is, whether it's solvable, its
 //! tokens, what the editor would flag; and the synthetic test chambers.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use glados::cli::{self, load, metric_lines, Result};
-use glados::level::Level;
-use glados::metrics::{assess, Assessment};
-use glados::regions::RegionGraph;
-use glados::solver::{judge, Judged, Judgement, Problem, DEFAULT_MAX_STATES};
-use glados::{dataset, fixtures, portals, render, tokens, view};
+use tantalos::cli::{self, load, metric_lines, Result};
+use tantalos::level::Level;
+use tantalos::metrics::{assess, Assessment};
+use tantalos::regions::RegionGraph;
+use tantalos::solver::{judge, Judged, Judgement, Problem, DEFAULT_MAX_STATES};
+use tantalos::{dataset, fixtures, portals, render, tokens, view};
 
 const USAGE: &str = "usage:
-  glados-p2c info <file.p2c>...     summary, region graph and ASCII map
-  glados-p2c solve <file.p2c>...    solvable / unsolvable / uncertain, shortest plan, metrics
-  glados-p2c tokens <file.p2c>...   the level as a token sequence (format: src/tokens.rs)
-  glados-p2c geometry <file.p2c>... the geometry the level views draw, one JSON line per file
-  glados-p2c vocab                  every token the format uses, one per line
-  glados-p2c editor <file.p2c|dir>...
+  tantalos-p2c info <file.p2c>...     summary, region graph and ASCII map
+  tantalos-p2c solve <file.p2c>...    solvable / unsolvable / uncertain, shortest plan, metrics
+  tantalos-p2c tokens <file.p2c>...   the level as a token sequence (format: src/tokens.rs)
+  tantalos-p2c geometry <file.p2c>... the geometry the level views draw, one JSON line per file
+  tantalos-p2c vocab                  every token the format uses, one per line
+  tantalos-p2c editor <file.p2c|dir>...
                                     items the Puzzle Maker would mark invalid, one JSON line per file
-  glados-p2c roundtrip <file.p2c>...  check parse -> write reproduces the file byte for byte
-  glados-p2c fixtures [dir]         write the synthetic test chambers (default fixtures/synthetic)";
+  tantalos-p2c roundtrip <file.p2c>...  check parse -> write reproduces the file byte for byte
+  tantalos-p2c fixtures [dir]         write the synthetic test chambers (default fixtures/synthetic)";
 
 fn main() -> ExitCode {
     cli::main(USAGE, |args| {
@@ -246,7 +246,7 @@ fn solve(path: &Path) -> Result<()> {
 }
 
 /// Where the player can get to under liberal rules, for seeing why a level isn't solved.
-fn print_reach(model: &glados::solver::Model) {
+fn print_reach(model: &tantalos::solver::Model) {
     let space = model.explore(DEFAULT_MAX_STATES);
     let mut seen = vec![false; model.graph.regions.len()];
     for i in 0..space.len() {
@@ -312,7 +312,7 @@ fn editor_check(args: &[String]) -> Result<()> {
     }
     for f in files {
         let (_, puzzle) = load(&f)?;
-        let flags = glados::editor::editor_flags(&Level::from_puzzle(&puzzle));
+        let flags = tantalos::editor::editor_flags(&Level::from_puzzle(&puzzle));
         let items: Vec<String> = flags
             .iter()
             .map(|fl| {

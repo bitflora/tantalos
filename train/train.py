@@ -1,11 +1,11 @@
-"""Train a small GPT on `glados-data dataset` output.
+"""Train a small GPT on `tantalos-data dataset` output.
 
-    cargo run --release --bin glados-data -- dataset --count 200000 --out data/levels.jsonl
+    cargo run --release --bin tantalos-data -- dataset --count 200000 --out data/levels.jsonl
     python train/train.py --data data/levels.jsonl --out runs/first
 
 --until 07:45 trains until a clock time instead of for --iters steps; --init starts from another
 run's weights. Every --eval-every steps: validation loss, then --score-n sampled levels run through
-`glados-score score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
+`tantalos-score score` (parse rate, solvable rate). Checkpoints: <out>/last.pt and <out>/best.pt
 (lowest validation loss). Log: <out>/log.jsonl. The run gets a row in train/runs.csv
 (train/record.py), with --note as its notes.
 
@@ -18,7 +18,7 @@ how far last.pt got (step, trained_s).
 --task goblin trains Goblin instead (the solver net, task "solve", before 2026-10-27; --task solve
 still works): it reads a level and writes its plan (data/goblin from train/goblin_data.py;
 sequences in train/data.py). Its eval replays greedy plans for --score-n
-validation levels with `glados-score check` and logs the solved share. --init from a level model keeps
+validation levels with `tantalos-score check` and logs the solved share. --init from a level model keeps
 the embeddings of the tokens both know (level words), and drops its conditions.
 
 Training batches hold levels of similar length (--bucket), so they pad little. On the GPU there is
@@ -58,7 +58,7 @@ from model import GPT, Config  # noqa: E402
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--data", nargs="+", required=True, help="JSONL files from `glados-data dataset`")
+    ap.add_argument("--data", nargs="+", required=True, help="JSONL files from `tantalos-data dataset`")
     ap.add_argument(
         "--task",
         type=task_name,
@@ -107,7 +107,7 @@ def main():
         type=int,
         default=32,
         help="levels sampled and scored per eval; with --task goblin, validation levels whose "
-        "greedy plans `glados-score check` replays (0: off)",
+        "greedy plans `tantalos-score check` replays (0: off)",
     )
     ap.add_argument(
         "--holdout",
@@ -121,7 +121,7 @@ def main():
                     "eval logs as val_by_source, the same ones every time, under their full conditions")
     ap.add_argument("--holdout-n", type=int, default=256,
                     help="how many of them, the same ones at every eval, under their full conditions")
-    ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
     ap.add_argument(
         "--gpu-mem",
         type=float,
@@ -409,7 +409,7 @@ def main():
                 try:
                     items = [{"tokens": lv, "plan": p, "min_len": val.min_lens[i] if val.min_lens[i] >= 0 else None}
                              for lv, p, i in zip(levels, plans, goblin_picks)]
-                    entry["goblin"] = goblin_eval.summarize(goblin_eval.check(items, args.glados))
+                    entry["goblin"] = goblin_eval.summarize(goblin_eval.check(items, args.tantalos))
                 except (OSError, ValueError, subprocess.CalledProcessError) as e:
                     print(f"checking plans failed, carrying on: {e}")
             elif args.score_n:
@@ -417,9 +417,9 @@ def main():
                 lines = sample.generate(model, vocab, args.score_n, ["<verdict:solvable>"])
                 model.train()
                 try:
-                    entry["samples"] = sample.summarize(sample.score(lines, args.glados))
+                    entry["samples"] = sample.summarize(sample.score(lines, args.tantalos))
                 except (OSError, ValueError, subprocess.CalledProcessError) as e:
-                    # Not worth the run: one died here when Windows couldn't start glados.
+                    # Not worth the run: one died here when Windows couldn't start tantalos.
                     print(f"scoring samples failed, carrying on: {e}")
             if device == "cuda":
                 # Hand back what sampling took, and note the most held since the last eval.

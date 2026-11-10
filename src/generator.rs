@@ -22,7 +22,7 @@ use crate::rng::Rng;
 
 /// Height of the standing cell over an untouched floor.
 pub const FLOOR: i32 = 2;
-pub const TITLE: &str = "glados generated";
+pub const TITLE: &str = "tantalos generated";
 /// Room size ranges: width and depth, and height including the floor.
 pub const MIN_WIDTH: i32 = 4;
 pub const MAX_WIDTH: i32 = 16;

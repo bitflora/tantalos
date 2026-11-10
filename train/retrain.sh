@@ -7,8 +7,8 @@
 #   RELABEL=1 bash train/retrain.sh runs/v2 07:40      # after changing the solver
 #   DATA=data/v2 bash train/retrain.sh runs/v2 07:40 --init runs/night/best.pt
 #
-# DATA (default data/v2) holds `glados-data dataset` output: levels-*.jsonl and vocab.txt.
-# RELABEL=1 first re-scores every level with the current `glados-score score` into
+# DATA (default data/v2) holds `tantalos-data dataset` output: levels-*.jsonl and vocab.txt.
+# RELABEL=1 first re-scores every level with the current `tantalos-score score` into
 # $DATA/relabelled/ and trains on that, so solver changes don't need the slow
 # generator run again. (The generator's own choices still followed the old solver.)
 #
@@ -33,7 +33,7 @@ UNTIL=$2
 shift 2
 DATA=${DATA:-data/v2}
 PY=${PY:-.venv/Scripts/python}
-GLADOS=target/release/glados-score.exe
+TANTALOS=target/release/tantalos-score.exe
 log() { echo "[$(date +%T)] $*"; }
 
 cargo build --release --quiet
@@ -45,7 +45,7 @@ if [ "${RELABEL:-0}" = 1 ]; then
         dest="$DATA/relabelled/$(basename "$f")"
         log "relabelling $f"
         $PY -c "import json, sys; [print(json.loads(l)['tokens']) for l in sys.stdin]" < "$f" \
-            | $GLADOS score - > "$dest"
+            | $TANTALOS score - > "$dest"
         relabelled+=("$dest")
     done
     files=("${relabelled[@]}")

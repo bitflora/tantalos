@@ -15,12 +15,12 @@ One checkpoint, one set of levels, one time budget a level, and two ways of spen
 
 Both are given a free greedy plan first, so each is at least as good as the run's own evaluation
 and the comparison is about what the extra budget buys. Both write only legal steps
-(`glados-score env`, src/env.rs), so a plan fails only by never reaching the exit, and both
-confirm a solve with `glados-score check` in conservative mode.
+(`tantalos-score env`, src/env.rs), so a plan fails only by never reaching the exit, and both
+confirm a solve with `tantalos-score check` in conservative mode.
 
 Per level and method it records: whether it solved, the solved plan's length in steps and in
-tokens, wall-clock seconds, net forward passes, plan tokens written, `glados-score check` plans,
-`glados-score env` requests, and peak GPU memory. Writes <out>/results.jsonl, summary.json and
+tokens, wall-clock seconds, net forward passes, plan tokens written, `tantalos-score check` plans,
+`tantalos-score env` requests, and peak GPU memory. Writes <out>/results.jsonl, summary.json and
 report.md (default out: out/search/NAME).
 
 This answers one question only: whether bounded search with the policy alone buys solves that
@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import goblin_eval  # noqa: E402
 from data import BOS, EOS, SEP  # noqa: E402
 from record import GOBLIN, task_name  # noqa: E402
-from sample import DEFAULT_GLADOS, load_checkpoint  # noqa: E402
+from sample import DEFAULT_TANTALOS, load_checkpoint  # noqa: E402
 from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -137,18 +137,18 @@ ARGUMENTS = {"blue", "orange", "+x", "-x", "+y", "-y", "+z", "-z"}
 
 
 def steps_in(plan):
-    """A plan's length in steps: `glados-score check` counts them, this is for plans it hasn't
+    """A plan's length in steps: `tantalos-score check` counts them, this is for plans it hasn't
     seen. A step starts at a verb; a verb is a word that isn't an argument."""
     return sum(1 for w in plan.split() if not w.isdigit() and w not in ARGUMENTS)
 
 
-def solve_check(level, plans, glados, cost):
-    """The first of `plans` that `glados-score check` calls solved, as (plan, result), or None."""
+def solve_check(level, plans, tantalos, cost):
+    """The first of `plans` that `tantalos-score check` calls solved, as (plan, result), or None."""
     if not plans:
         return None
     cost.checks += len(plans)
     results = goblin_eval.check([{"tokens": level["tokens"], "min_len": level.get("min_len"), "plans": plans}],
-                                glados, "conservative")
+                                tantalos, "conservative")
     for plan, r in zip(plans, results):
         if r.get("verdict") == "solved":
             return plan, r
@@ -162,7 +162,7 @@ def greedy_first(model, vocab, level, env, args, budget, cost):
     outs = model.generate_many(prompts, args.max_plan, EOS, 1.0, 1, args.rows, constrain)
     plan = " ".join(vocab.decode(outs[0]))
     cost.tokens += len(outs[0])
-    return plan, solve_check(level, [plan] if plan else [], args.glados, cost)
+    return plan, solve_check(level, [plan] if plan else [], args.tantalos, cost)
 
 
 def sample_level(model, vocab, level, env, args, budget, cost):
@@ -176,7 +176,7 @@ def sample_level(model, vocab, level, env, args, budget, cost):
         cost.tokens += sum(len(o) for o in outs)
         plans = sorted({" ".join(vocab.decode(o)) for o in outs if o})
         plans_tried += len(plans)
-        hit = solve_check(level, plans, args.glados, cost)
+        hit = solve_check(level, plans, args.tantalos, cost)
         if hit:
             return {"solved": True, "plan": hit[0], "result": hit[1], "rounds": rounds, "plans": plans_tried}
     return {"solved": False, "rounds": rounds, "plans": plans_tried}
@@ -231,7 +231,7 @@ def beam_level(model, vocab, level, env, args, budget, cost):
             plans = list(children)
             answers = env.next([SEARCH_KEY] * len(plans), plans)
             at_goal = [p for p, a in zip(plans, answers) if a.get("end")]
-            hit = solve_check(level, at_goal, args.glados, cost)
+            hit = solve_check(level, at_goal, args.tantalos, cost)
             if hit:
                 return hit
             why["dead"] += sum(bool(a.get("dead")) for a in answers)
@@ -359,7 +359,7 @@ def main():
                          "confident enough that 8 sampled steps are often only 2 different ones, "
                          "so a warmer one widens the search")
     ap.add_argument("--max-plan", type=int, default=goblin_eval.MAX_CONSTRAINED, help="most words in a plan")
-    ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(DEFAULT_TANTALOS))
     ap.add_argument("--seed", type=int, default=None, help="default: a fresh one (printed)")
     ap.add_argument("--cpu", action="store_true")
     args = ap.parse_args()
@@ -398,7 +398,7 @@ def main():
     out = Path(args.out) if args.out else ROOT / "out" / "search" / args.name
     out.mkdir(parents=True, exist_ok=True)
 
-    env = goblin_eval.Env(args.glados)
+    env = goblin_eval.Env(args.tantalos)
     records, sets = [], {}
     with open(out / "results.jsonl", "w", encoding="utf-8") as f:
         for name, recs in todo:

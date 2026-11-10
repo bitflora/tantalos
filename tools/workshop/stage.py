@@ -5,8 +5,8 @@
     python tools/workshop/stage.py --id 100091397 --force   # make another copy
 
 The workbench's **Stage** button calls this. It compiles the level's token sequence with the
-release `glados-score.exe` (`score --editor-rules off --p2c-all`), copies the resulting .p2c into the
-Puzzle Maker folder as `glados-wb-NNNNN.p2c`, adds a preview .jpg, retitles it `wb <title>`, and
+release `tantalos-score.exe` (`score --editor-rules off --p2c-all`), copies the resulting .p2c into the
+Puzzle Maker folder as `tantalos-wb-NNNNN.p2c`, adds a preview .jpg, retitles it `wb <title>`, and
 marks the level `staged` in `train/workshop-annotations.jsonl`. Each new copy is also logged in
 `train/workbench-staged.jsonl` (workshop id, title, file, date, rating) so agents and the next
 run can find it. A level already staged there (or in `train/unsolv-staged.jsonl`) is reused
@@ -19,11 +19,11 @@ workbench passes the tokens on stdin instead:
         --series gen --key id --registry train/generated-staged.jsonl \
         --annotations train/generated-annotations.jsonl < level.txt
 
-which writes `glados-gen-NNNNN.p2c`, titled `gen <title>`.
+which writes `tantalos-gen-NNNNN.p2c`, titled `gen <title>`.
 
-It never starts or touches Portal 2. It needs `target/release/glados-score.exe`; build it first
+It never starts or touches Portal 2. It needs `target/release/tantalos-score.exe`; build it first
 (`cargo build --release`, not during a training run). The Puzzle Maker folder is the same one
-`train/playtest.py` uses; `--puzzles DIR` or `GLADOS_PUZZLES` overrides it. `--registry FILE`,
+`train/playtest.py` uses; `--puzzles DIR` or `TANTALOS_PUZZLES` overrides it. `--registry FILE`,
 `--annotations FILE`, `--all FILE`, `--train FILE` and `--test FILE` override the other paths.
 """
 
@@ -59,15 +59,15 @@ class StageError(Exception):
     pass
 
 
-def glados_bin():
-    override = os.environ.get("GLADOS_BIN")
+def tantalos_bin():
+    override = os.environ.get("TANTALOS_BIN")
     if override:
         return Path(override)
-    for name in ("glados-score.exe", "glados-score"):
+    for name in ("tantalos-score.exe", "tantalos-score"):
         path = ROOT / "target" / "release" / name
         if path.is_file():
             return path
-    raise StageError("target/release/glados-score.exe is missing: cargo build --release (not during a training run)")
+    raise StageError("target/release/tantalos-score.exe is missing: cargo build --release (not during a training run)")
 
 
 def find_level(wid, paths):
@@ -120,15 +120,15 @@ def existing_file(wid, puzzles, registries, key="workshop_id"):
 
 def next_name(puzzles, series=SERIES):
     numbers = []
-    for path in Path(puzzles).glob(f"glados-{series}-*.p2c"):
+    for path in Path(puzzles).glob(f"tantalos-{series}-*.p2c"):
         m = re.search(r"-(\d{5})\.p2c$", path.name)
         if m:
             numbers.append(int(m.group(1)))
     n = max(numbers, default=0) + 1
-    while (Path(puzzles) / f"glados-{series}-{n:05d}.p2c").exists() or \
-            (Path(puzzles) / f"glados-{series}-{n:05d}.jpg").exists():
+    while (Path(puzzles) / f"tantalos-{series}-{n:05d}.p2c").exists() or \
+            (Path(puzzles) / f"tantalos-{series}-{n:05d}.jpg").exists():
         n += 1
-    return f"glados-{series}-{n:05d}.p2c"
+    return f"tantalos-{series}-{n:05d}.p2c"
 
 
 def safe_title(title, wid, series=SERIES):
@@ -140,21 +140,21 @@ def safe_title(title, wid, series=SERIES):
 def compile_p2c(tokens, budget):
     """Run the release solver and return its first .p2c for this one token line."""
     (ROOT / "out").mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="glados-stage-", dir=ROOT / "out"))
+    work = Path(tempfile.mkdtemp(prefix="tantalos-stage-", dir=ROOT / "out"))
     try:
-        cmd = [str(glados_bin()), "score", "--editor-rules", "off", "--budget", str(budget),
+        cmd = [str(tantalos_bin()), "score", "--editor-rules", "off", "--budget", str(budget),
                "--p2c-all", str(work)]
         try:
             r = subprocess.run(cmd, input=tokens.strip() + "\n", text=True, encoding="utf-8",
                                errors="replace", capture_output=True, cwd=ROOT, timeout=180)
         except subprocess.TimeoutExpired:
-            raise StageError("glados-score score timed out after 180s")
+            raise StageError("tantalos-score score timed out after 180s")
         if r.returncode:
-            raise StageError("glados-score score failed:\n" + r.stderr.strip()[-2000:])
+            raise StageError("tantalos-score score failed:\n" + r.stderr.strip()[-2000:])
         files = sorted(work.glob("*.p2c"))
         if not files:
             detail = (r.stderr or r.stdout).strip()[-2000:]
-            raise StageError("glados-score score wrote no .p2c for this level" + (":\n" + detail if detail else ""))
+            raise StageError("tantalos-score score wrote no .p2c for this level" + (":\n" + detail if detail else ""))
         text = files[0].read_bytes().decode("utf-8")
         try:
             summary = preview.summary(files[0])
@@ -261,7 +261,7 @@ def main():
     ap.add_argument("--title", help="the level's title (default: the corpus title, or the id)")
     ap.add_argument("--origin", help="with --tokens-stdin: where the level came from (run, file, line)")
     ap.add_argument("--series", default=SERIES,
-                    help="file series: glados-SERIES-NNNNN.p2c, titled 'SERIES <title>' (default %(default)s)")
+                    help="file series: tantalos-SERIES-NNNNN.p2c, titled 'SERIES <title>' (default %(default)s)")
     ap.add_argument("--key", default="workshop_id",
                     help="id field in the registry and annotation store (default %(default)s)")
     ap.add_argument("--all", default=str(DEFAULT_ALL), help=f"corpus (default {DEFAULT_ALL})")
@@ -270,9 +270,9 @@ def main():
     ap.add_argument("--annotations", default=str(annotations.DEFAULT),
                     help=f"annotation store (default {annotations.DEFAULT})")
     ap.add_argument("--registry",
-                    default=os.environ.get("GLADOS_STAGE_REGISTRY", str(DEFAULT_REGISTRY)),
+                    default=os.environ.get("TANTALOS_STAGE_REGISTRY", str(DEFAULT_REGISTRY)),
                     help=f"staged-file registry (default {DEFAULT_REGISTRY})")
-    ap.add_argument("--puzzles", default=os.environ.get("GLADOS_PUZZLES", str(playtest.PUZZLES)),
+    ap.add_argument("--puzzles", default=os.environ.get("TANTALOS_PUZZLES", str(playtest.PUZZLES)),
                     help="Puzzle Maker folder (default %(default)s)")
     ap.add_argument("--budget", type=int, default=50_000, help="solver budget for the p2c compile (default 50000)")
     ap.add_argument("--force", action="store_true", help="stage another copy even if one already exists")

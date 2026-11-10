@@ -1,4 +1,4 @@
-//! Symmetric copies of a level: mirrored and turned about the vertical (`glados-data augment`).
+//! Symmetric copies of a level: mirrored and turned about the vertical (`tantalos-data augment`).
 //!
 //! Gravity only picks out z, so mirroring a chamber in x and turning it by quarter turns about
 //! z gives 8 versions of every level that play the same: the same plan, moved. The Workshop

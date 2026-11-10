@@ -26,8 +26,8 @@ from pathlib import Path
 
 GAME = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Portal 2")
 EXE = GAME / "portal2.exe"
-STAGE = GAME / "portal2" / "puzzles" / "glados_check"
-VMF = GAME / "sdk_content" / "maps" / "glados_check.vmf"
+STAGE = GAME / "portal2" / "puzzles" / "tantalos_check"
+VMF = GAME / "sdk_content" / "maps" / "tantalos_check.vmf"
 PREVIEW = GAME / "portal2" / "maps" / "puzzlemaker" / "preview.bsp"
 CANARY = Path(__file__).resolve().parent.parent / "fixtures" / "ingame" / "canary_invalid.p2c"
 INVALID = re.compile(r"INVALID ITEM:\s+(\S+)\s+\(\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*\)")
@@ -152,7 +152,7 @@ class Console:
         if password:
             self.send(f"PASS {password}")
         # A game still starting up can take a while to answer, or drop what it was sent.
-        while self.ask(["echo glados_hello"], 5) is None:
+        while self.ask(["echo tantalos_hello"], 5) is None:
             if time.time() > end:
                 raise GameUnavailable("the console didn't answer (wrong password?)")
 
@@ -193,7 +193,7 @@ class Console:
 
     def ask(self, cmds, timeout=5):
         """Runs commands and returns what they printed, or None on timeout."""
-        tag = f"glados_ack_{next(Console.acks)}"
+        tag = f"tantalos_ack_{next(Console.acks)}"
         self.send(*cmds, f"echo {tag}")
         got = self.until(lambda l: l.strip() == tag, timeout)
         return None if got is None else "\n".join(got[0])
@@ -386,10 +386,10 @@ def check_one(path, n, con, pid, timeout=20, settle=0.1, keep_vmf=None):
     # it draws, so the export waits `settle` seconds after the load: straight after it (even a
     # few `wait` frames after), the export passes every level as valid. 50 ms was enough in
     # tests, 100 ms with the game behind other windows; check() watches for it not being enough.
-    tag = f"glados_check_{next(Console.acks)}"
+    tag = f"tantalos_check_{next(Console.acks)}"
     texts = {}
     for stage, cmd in (("load", f'puzzlemaker_load_dev "{staged.as_posix()}"'),
-                       ("export", "puzzlemaker_export glados_check")):
+                       ("export", "puzzlemaker_export tantalos_check")):
         if stage == "export":
             time.sleep(settle)
         try:

@@ -1,6 +1,6 @@
 """Read and write the workbench's per-level annotations.
 
-The `glados-workbench` browser app saves one JSON object per annotated Workshop level in
+The `tantalos-workbench` browser app saves one JSON object per annotated Workshop level in
 `train/workshop-annotations.jsonl`. Agents can use this module or its command line instead of
 the browser:
 
@@ -17,10 +17,10 @@ The file is the canonical store: `train/workshop-annotations.jsonl`, one object 
      "updated":1792888260}
 
 The generated-level store (`--generated`, `train/generated-annotations.jsonl`, written by
-`glados-workbench --generated`) has the same fields keyed by `"id"` (a hash of the level's
+`tantalos-workbench --generated`) has the same fields keyed by `"id"` (a hash of the level's
 tokens), plus `human_verdict` (solvable, unsolvable or broken, from a play-test), `tokens` and
 `origin` (run, file and line). An unsolvable or broken verdict also adds the level to
-`data/ingame/human-unsolvable.jsonl` (source `glados-workbench ...`), which training runs
+`data/ingame/human-unsolvable.jsonl` (source `tantalos-workbench ...`), which training runs
 train away from; clearing it removes that row again:
 
     python tools/workshop/annotations.py --generated --set 3f0c... --verdict unsolvable \
@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT = ROOT / "train" / "workshop-annotations.jsonl"
 GENERATED = ROOT / "train" / "generated-annotations.jsonl"
 HUMAN_UNSOLVABLE = ROOT / "data" / "ingame" / "human-unsolvable.jsonl"
-HUMAN_SOURCE = "glados-workbench"
+HUMAN_SOURCE = "tantalos-workbench"
 VERDICTS = ("solvable", "unsolvable", "broken")
 # Kept with a generated level's annotation, but not what makes one non-empty.
 LEVEL_FIELDS = ("tokens", "origin")
@@ -92,7 +92,7 @@ def load(path=DEFAULT):
 
 def save(records, path=DEFAULT):
     """Write the non-empty annotations atomically, sorted by id. The generated-level fields are
-    written only when set, so the Workshop store keeps its shape (as glados-workbench does)."""
+    written only when set, so the Workshop store keeps its shape (as tantalos-workbench does)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     key = key_of(path)
@@ -148,7 +148,7 @@ def update(wid, path=DEFAULT, **changes):
 
 def sync_human_unsolvable(tokens, origin, note, path=HUMAN_UNSOLVABLE):
     """Make human-unsolvable.jsonl agree with a generated level's verdict, like
-    glados-workbench: drop the rows this tool wrote for these tokens, then add one back if
+    tantalos-workbench: drop the rows this tool wrote for these tokens, then add one back if
     `note` is given and nobody else's row covers the level."""
     path = Path(path)
     tokens = " ".join(tokens.split())

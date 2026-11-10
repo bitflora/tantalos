@@ -8,7 +8,7 @@
 
 The lessons of the level net's data (v6, 2026-10-26) carried over to Goblin
 (docs/goblin-plan-2026-10-27.md):
-- Workshop levels first, as their 8 mirrored/turned versions (`glados-data augment --plans`
+- Workshop levels first, as their 8 mirrored/turned versions (`tantalos-data augment --plans`
   moves the plans with them) rather than copies;
 - generated levels that change the room's state over trivial ones, without near-copies
   (tools/select_generated.py);
@@ -17,7 +17,7 @@ The lessons of the level net's data (v6, 2026-10-26) carried over to Goblin
 
 Steps:
 1. select (cheap): each part's levels to plan, in parts/NAME.todo.jsonl.
-2. plan (the CPU on every thread): `glados-score score --plan-only --plans 8` (and
+2. plan (the CPU on every thread): `tantalos-score score --plan-only --plans 8` (and
    `--alternatives`, plans that solve it another way) into parts/NAME.jsonl. Resumable: a
    stopped run carries on from parts/NAME.partial; a finished part is kept while its settings
    (in NAME.params.json) match.
@@ -72,13 +72,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from data import MECHANICS  # noqa: E402
 import rated  # noqa: E402
-from sample import DEFAULT_GLADOS  # noqa: E402
+from sample import DEFAULT_TANTALOS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "workshop"))
 from annotations import excluded_ids  # noqa: E402
 
-AUGMENT = ROOT / "target" / "release" / "glados-data.exe"
+AUGMENT = ROOT / "target" / "release" / "tantalos-data.exe"
 TRICKS = ROOT / "tools" / "workshop" / "excluded-tricks.jsonl"
 WS_TRAIN, WS_TEST = "data/ws5/train.jsonl", "data/ws5/test.jsonl"
 WS6_TRAIN = "data/ws6/train.jsonl"
@@ -208,7 +208,7 @@ def select(part, args, rng):
 def plan_part(part, todo, out, settings, args):
     """Plans `todo` (records) into `out`; returns counts. Carries on from the `.partial` file a
     stopped run left, if it was made with the same settings."""
-    cmd = [str(Path(args.glados).resolve()), "score", "--plan-only", "--budget", str(part.budget),
+    cmd = [str(Path(args.tantalos).resolve()), "score", "--plan-only", "--budget", str(part.budget),
            "--plans", str(args.plans)]
     if part.alternatives:
         cmd += ["--alternatives", str(part.alternatives)]
@@ -234,7 +234,7 @@ def plan_part(part, todo, out, settings, args):
             print(f"  {part.name}: {tmp.name} was built with {old}, not {settings}: starting over", flush=True)
     tmp_params.write_text(json.dumps(settings) + "\n")
     start = time.time()
-    # One glados process for the whole part: a thread feeds it the levels while this one reads
+    # One tantalos process for the whole part: a thread feeds it the levels while this one reads
     # its answers, which come back in input order.
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
     sent = deque()
@@ -249,7 +249,7 @@ def plan_part(part, todo, out, settings, args):
                 sent.append(r)
                 proc.stdin.write(r["tokens"] + "\n")
         except BrokenPipeError:
-            pass  # glados stopped: its exit code says why
+            pass  # tantalos stopped: its exit code says why
         except BaseException as e:  # noqa: BLE001
             feed_error.append(e)
         finally:
@@ -293,7 +293,7 @@ def plan_part(part, todo, out, settings, args):
     if feed_error:
         raise feed_error[0]
     if sent:
-        sys.exit(f"{part.name}: glados answered {counts['levels']} levels and left {len(sent)} unanswered")
+        sys.exit(f"{part.name}: tantalos answered {counts['levels']} levels and left {len(sent)} unanswered")
     tmp.replace(out)
     tmp_params.unlink(missing_ok=True)
     counts["seconds"] = round(time.time() - start)
@@ -333,7 +333,7 @@ def primers(rows, rng):
 
 
 def augment(rows, syms_of, label):
-    """`rows` with their plans moved by each symmetry `syms_of(row)` lists (`glados-data augment
+    """`rows` with their plans moved by each symmetry `syms_of(row)` lists (`tantalos-data augment
     --plans`): one row per version that keeps a plan, its other fields as the original's."""
     groups = defaultdict(list)
     for i, r in enumerate(rows):
@@ -510,7 +510,7 @@ def main():
     ap.add_argument("--plans", type=int, default=8, help="most different shortest plans per level")
     ap.add_argument("--every", type=int, default=2048, help="a progress line every N levels")
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(DEFAULT_TANTALOS))
     args = ap.parse_args()
     if sys.platform == "win32":
         import ctypes

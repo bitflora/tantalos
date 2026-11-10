@@ -21,7 +21,7 @@ most one chunk is lost.
 ## Rules
 
 - Don't train, don't run `cargo build`, and don't start any other GPU or heavy job while it
-  runs. It uses the GPU and `target/release/glados-score.exe`.
+  runs. It uses the GPU and `target/release/tantalos-score.exe`.
 - Don't change `train/school.py` or any option of the command below.
 - Don't delete anything under `runs/school/`.
 - Don't commit or push. The round's outputs under `runs/` are not committed.
@@ -49,7 +49,7 @@ Run each of these. Stop and tell the user if any check fails.
 3. The model and the binary exist:
 
    ```bash
-   ls runs/goblin-v6init-12h-b/best.pt target/release/glados-score.exe
+   ls runs/goblin-v6init-12h-b/best.pt target/release/tantalos-score.exe
    ```
 
 4. The round hasn't been started before:
@@ -105,7 +105,7 @@ user it is saved and resumable with the same command. Don't delete anything.
 traceback):
 
 1. Copy the last 30 lines of `runs/school-e1-r00.log` to the user.
-2. If the error is `glados-score env stopped` or `memory allocation ... failed`, run the same
+2. If the error is `tantalos-score env stopped` or `memory allocation ... failed`, run the same
    command again once: it resumes.
 3. If it fails a second time, or the error is anything else, stop and report. Don't edit code to
    work around it.

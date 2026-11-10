@@ -1,20 +1,20 @@
-//! `glados-data`: making training data, generated levels and mutants of existing ones.
+//! `tantalos-data`: making training data, generated levels and mutants of existing ones.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use glados::cli::{self, flags, parse, Result};
-use glados::{augment, dataset, editor, level, mutate, plan, tokens};
+use tantalos::cli::{self, flags, parse, Result};
+use tantalos::{augment, dataset, editor, level, mutate, plan, tokens};
 
 const USAGE: &str = "usage:
-  glados-data dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
+  tantalos-data dataset [--seed N] [--count N] [--budget N] [--fresh P] [--out FILE]
                       [--portals-required true|false] [--max-unsolved P]
                                 labelled token sequences as JSONL, and vocab.txt beside it
                                 (default data/levels-<seed>.jsonl). --portals-required true:
                                 drop levels solvable without portals; --max-unsolved: most
                                 share of levels that aren't solvable
-  glados-data mutate [--seed N] [--per-level N] [--tries N] [--max-tokens N] [--budget N]
+  tantalos-data mutate [--seed N] [--per-level N] [--tries N] [--max-tokens N] [--budget N]
                      [--give-up N] [--threads N] [--out FILE] [FILE]
                                 1-3 random edits to each level of FILE (JSONL with \"tokens\",
                                 or stdin), scored with editor rules off; writes the mutants
@@ -22,7 +22,7 @@ const USAGE: &str = "usage:
                                 and differ from their parent, as JSONL with \"mutated_from\"
                                 (the parent's workshop_id, or its line) and \"edits\".
                                 --give-up N: drop a level with no mutant after N tries
-  glados-data augment [--syms r0,r90,...|all] [--check] [--plans] [--budget N]
+  tantalos-data augment [--syms r0,r90,...|all] [--check] [--plans] [--budget N]
                       [--editor-rules on|off] [--threads N] [--out FILE] [FILE]
                                 the 8 mirrored/turned versions of each level of FILE (JSONL
                                 with \"tokens\", or stdin; src/augment.rs), one JSON line each:
@@ -208,7 +208,7 @@ fn run_augment(args: &[String]) -> Result<()> {
         Some(p) => Box::new(std::io::BufWriter::new(std::fs::File::create(p)?)),
         None => Box::new(std::io::BufWriter::new(std::io::stdout().lock())),
     };
-    let label = |p: &glados::p2c::Puzzle| {
+    let label = |p: &tantalos::p2c::Puzzle| {
         let flags: Vec<String> = editor::editor_flags(&level::Level::from_puzzle(p))
             .into_iter()
             .flat_map(|f| { let name = f.name; f.rules.into_iter().map(move |r| format!("{name}:{r}")) })
@@ -219,9 +219,9 @@ fn run_augment(args: &[String]) -> Result<()> {
     };
     // The line's plans, by field: moved by `sym` and kept if they solve the moved level `q`.
     // (field, kept plans) per field the line has, and how many were dropped.
-    let move_plans = |line: &str, size: [i32; 3], q: &glados::p2c::Puzzle, sym: augment::Sym| {
+    let move_plans = |line: &str, size: [i32; 3], q: &tantalos::p2c::Puzzle, sym: augment::Sym| {
         let level = level::Level::from_puzzle(q);
-        let mut checker = plan::Checker::new(&level, glados::solver::Mode::Conservative).ok();
+        let mut checker = plan::Checker::new(&level, tantalos::solver::Mode::Conservative).ok();
         let mut fields = Vec::new();
         let mut dropped = 0;
         for key in ["plan", "plans", "alt_plans"] {

@@ -43,7 +43,7 @@ class SchoolTests(unittest.TestCase):
 
     def test_attempt_keeps_alignment_when_a_prompt_is_skipped(self):
         levels = [{"tokens": t} for t in ("first", "unknown", "last")]
-        args = SimpleNamespace(chunk=3, k=2, env=None, glados="mock")
+        args = SimpleNamespace(chunk=3, k=2, env=None, tantalos="mock")
 
         def check(items, *args):
             return [{"level": item["tokens"], "plan": p} for item in items for p in item["plans"]]
@@ -107,7 +107,7 @@ class SchoolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
             out = Path(tmp)
             args = SimpleNamespace(name="test", round=0, model="mock", seed=1, k=1, free=True, no_prefix=False,
-                                   levels=1, glados="mock", chunk=1)
+                                   levels=1, tantalos="mock", chunk=1)
             pool = {"id": {"identity": "id", "tokens": "level", "frontier": True, "source": "test"}}
 
             def attempt(model, vocab, levels, args, save):

@@ -1,8 +1,8 @@
-"""Sample levels from a checkpoint and score them with `glados-score score`.
+"""Sample levels from a checkpoint and score them with `tantalos-score score`.
 
     python train/sample.py runs/first/best.pt --n 64 --verdict solvable --len 5-7
     python train/sample.py runs/first/best.pt --cond "<trips:2+> <fizzler:yes>" --prefix "size 8 8 6"
-    python train/sample.py runs/first/best.pt --constrained   # only tokens `glados-score grammar` allows
+    python train/sample.py runs/first/best.pt --constrained   # only tokens `tantalos-score grammar` allows
 
 Writes the token lines and the scores next to each other (default: <run>/samples/), and the
 solvable levels as .p2c with --p2c.
@@ -25,8 +25,8 @@ from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 EXE = ".exe" if sys.platform == "win32" else ""
-# score, check and route; the other glados-* binaries sit beside it (src/bin/).
-DEFAULT_GLADOS = ROOT / "target" / "release" / f"glados-score{EXE}"
+# score, check and route; the other tantalos-* binaries sit beside it (src/bin/).
+DEFAULT_TANTALOS = ROOT / "target" / "release" / f"tantalos-score{EXE}"
 
 
 def load_checkpoint(path, device):
@@ -45,14 +45,14 @@ def prompt(vocab, conds, prefix):
 
 
 class Grammar:
-    """`glados-score grammar` (src/grammar.rs), running: the level tokens that may come next.
+    """`tantalos-score grammar` (src/grammar.rs), running: the level tokens that may come next.
     Keeping items clear of the editor's rules makes it about 3 times slower a token, so it runs
     `procs` servers, each level always on the same one (by its first tokens) to keep their caches."""
 
     KEY = 24  # tokens: the geometry's start, which a level keeps once written
 
-    def __init__(self, glados=DEFAULT_GLADOS, procs=4):
-        self.procs = [subprocess.Popen([str(Path(glados).resolve()), "grammar"], stdin=subprocess.PIPE,
+    def __init__(self, tantalos=DEFAULT_TANTALOS, procs=4):
+        self.procs = [subprocess.Popen([str(Path(tantalos).resolve()), "grammar"], stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
                       for _ in range(procs)]
 
@@ -71,7 +71,7 @@ class Grammar:
                 continue
             line = proc.stdout.readline()
             if not line:
-                raise RuntimeError(f"glados-score grammar stopped (exit code {proc.poll()})")
+                raise RuntimeError(f"tantalos-score grammar stopped (exit code {proc.poll()})")
             for i, r in zip(part, json.loads(line)["results"]):
                 results[i] = r
         return results
@@ -107,16 +107,16 @@ class LegalLevels:
 
 
 def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, batch=32, refill=False,
-             constrained=False, glados=DEFAULT_GLADOS):
+             constrained=False, tantalos=DEFAULT_TANTALOS):
     """`n` token lines (prefix included). `refill` starts a new level in a batch row as soon as
     its last one ends (GPT.generate_refill): levels from the same distribution (greedy ones
     identical), 1.6 times as fast for v6-fresh-12h at batch 64 (2026-10-27), but other samples
-    for a given seed than without it. `constrained` writes only tokens `glados-score grammar`
+    for a given seed than without it. `constrained` writes only tokens `tantalos-score grammar`
     allows (src/grammar.rs: levels that parse, wires to items that exist, items mounted on
     something), refilling rows as `refill` does."""
     p = prompt(vocab, list(conds), list(prefix))
     if constrained:
-        grammar = Grammar(glados)
+        grammar = Grammar(tantalos)
         try:
             outs = model.generate_many([p] * n, model.cfg.block_size, EOS, temperature, top_k, batch,
                                        LegalLevels(grammar, vocab, prefix))
@@ -134,17 +134,17 @@ def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, 
     return lines
 
 
-def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None, editor_rules=True, p2c_all=False,
+def score(lines, tantalos=DEFAULT_TANTALOS, budget=50_000, p2c_dir=None, editor_rules=True, p2c_all=False,
           low_priority=False):
-    """One result dict per line, from `glados-score score`. p2c_dir gets the solvable levels as
+    """One result dict per line, from `tantalos-score score`. p2c_dir gets the solvable levels as
     .p2c (every parsed one with p2c_all); editor_rules=False is how Workshop levels are scored;
     low_priority runs it at below-normal priority (on Windows)."""
-    args = [str(Path(glados).resolve()), "score", "--budget", str(budget)]
+    args = [str(Path(tantalos).resolve()), "score", "--budget", str(budget)]
     if p2c_dir:
         args += ["--p2c-all" if p2c_all else "--p2c", str(p2c_dir)]
     if not editor_rules:
         args += ["--editor-rules", "off"]
-    # Empty lines would be skipped by glados and break the alignment.
+    # Empty lines would be skipped by tantalos and break the alignment.
     text = "\n".join(line if line.strip() else "<empty>" for line in lines) + "\n"
     flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if low_priority and sys.platform == "win32" else 0
     out = subprocess.run(args, input=text, capture_output=True, text=True, check=True, creationflags=flags)
@@ -154,17 +154,17 @@ def score(lines, glados=DEFAULT_GLADOS, budget=50_000, p2c_dir=None, editor_rule
 class Scorer:
     """`score` in the background, so the CPU scores one chunk of levels while the GPU samples the
     next: `send` a list of lines (returns at once), `take` the oldest chunk's results. Each chunk
-    is its own `glados-score score`, at below-normal priority: it still gets every idle core, but
+    is its own `tantalos-score score`, at below-normal priority: it still gets every idle core, but
     the sampling thread (which keeps the GPU fed) wins when they compete. (Not one long-lived
-    process: glados writes its results only when its input ends.)"""
+    process: tantalos writes its results only when its input ends.)"""
 
-    def __init__(self, glados=DEFAULT_GLADOS, budget=50_000):
-        self.glados, self.budget = glados, budget
+    def __init__(self, tantalos=DEFAULT_TANTALOS, budget=50_000):
+        self.tantalos, self.budget = tantalos, budget
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.pending = []
 
     def send(self, lines):
-        self.pending.append(self.pool.submit(score, list(lines), self.glados, self.budget, low_priority=True))
+        self.pending.append(self.pool.submit(score, list(lines), self.tantalos, self.budget, low_priority=True))
 
     def take(self):
         return self.pending.pop(0).result()
@@ -201,10 +201,10 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--top-k", type=int, default=None)
     ap.add_argument("--constrained", action="store_true",
-                    help="write only tokens `glados-score grammar` allows (src/grammar.rs)")
+                    help="write only tokens `tantalos-score grammar` allows (src/grammar.rs)")
     ap.add_argument("--out", default=None, help="directory (default <checkpoint dir>/samples)")
     ap.add_argument("--p2c", action="store_true", help="also write solvable levels as .p2c")
-    ap.add_argument("--glados", default=str(DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(DEFAULT_TANTALOS))
     ap.add_argument("--budget", type=int, default=50_000)
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
@@ -226,9 +226,9 @@ def main():
     out = Path(args.out) if args.out else Path(args.checkpoint).parent / "samples"
     out.mkdir(parents=True, exist_ok=True)
     lines = generate(model, vocab, args.n, conds, args.prefix.split(), args.temperature, args.top_k,
-                     constrained=args.constrained, glados=args.glados)
+                     constrained=args.constrained, tantalos=args.tantalos)
     (out / "levels.txt").write_text("\n".join(lines) + "\n")
-    results = score(lines, args.glados, args.budget, out / "p2c" if args.p2c else None)
+    results = score(lines, args.tantalos, args.budget, out / "p2c" if args.p2c else None)
     with open(out / "scores.jsonl", "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in results)
     print(f"conditions: {' '.join(conds) or '(none)'}")

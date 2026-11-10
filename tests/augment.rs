@@ -1,18 +1,18 @@
-//! Mirrored and turned copies of levels (`glados-data augment`, src/augment.rs): each of the 8
+//! Mirrored and turned copies of levels (`tantalos-data augment`, src/augment.rs): each of the 8
 //! versions is the same level moved, cell for cell and face for face, and plays the same.
 
-use glados::augment::{apply_plan, editor_rules, moved_level, placed, variant, Sym};
-use glados::dataset::label_with_plan;
-use glados::fixtures;
-use glados::generator::Genome;
-use glados::geom::{step, Dir};
-use glados::level::Level;
-use glados::p2c::Puzzle;
-use glados::rng::Rng;
-use glados::plan::{self, encode_actions, Checker};
-use glados::solver::{judge, Judgement, Mode, Model, Verdict};
-use glados::tokens::{decode, encode};
-use glados::turrets::{danger, TurretSight};
+use tantalos::augment::{apply_plan, editor_rules, moved_level, placed, variant, Sym};
+use tantalos::dataset::label_with_plan;
+use tantalos::fixtures;
+use tantalos::generator::Genome;
+use tantalos::geom::{step, Dir};
+use tantalos::level::Level;
+use tantalos::p2c::Puzzle;
+use tantalos::rng::Rng;
+use tantalos::plan::{self, encode_actions, Checker};
+use tantalos::solver::{judge, Judgement, Mode, Model, Verdict};
+use tantalos::tokens::{decode, encode};
+use tantalos::turrets::{danger, TurretSight};
 
 const BUDGET: usize = 50_000;
 
@@ -207,7 +207,7 @@ fn plans_move_with_their_level() {
 }
 
 /// Workshop levels whose solver results depended on which way round they were built
-/// (2026-10-25, `glados-data augment --check` on ws5 train), and the cut-down levels that
+/// (2026-10-25, `tantalos-data augment --check` on ws5 train), and the cut-down levels that
 /// still showed it. Bridges through portals: routes claimed the cells they share in
 /// coordinate order, and with bits short the first routes (or bridges) in that order got
 /// them; an entry door onto a faith plate had no region unless a route happened to claim it.

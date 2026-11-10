@@ -74,7 +74,7 @@ class ExportTests(unittest.TestCase):
                  patch.object(school, "validate_buffer"), \
                  patch.object(school, "check_items", return_value=[[{"verdict": "solved"}], [{"verdict": "illegal"}]]), \
                  patch.object(school.goblin_data, "augment", side_effect=lambda rows, syms, label: rows):
-                school.export(SimpleNamespace(name="test", out=out, glados="checker"))
+                school.export(SimpleNamespace(name="test", out=out, tantalos="checker"))
             self.assertEqual(json.loads(out.read_text())["plan"], "a")
             self.assertEqual(json.loads(out.with_suffix(".rejected.jsonl").read_text())["plan"], "b")
 
@@ -87,7 +87,7 @@ class ExportTests(unittest.TestCase):
                  patch.object(school, "validate_buffer") as validate, \
                  patch.object(school, "check_items", return_value=[[{"verdict": "solved"}], [{"verdict": "solved"}]]), \
                  patch.object(school.goblin_data, "augment", side_effect=lambda rows, syms, label: rows):
-                school.export(SimpleNamespace(name="test", out=out, glados="checker"))
+                school.export(SimpleNamespace(name="test", out=out, tantalos="checker"))
                 rows = [json.loads(line) for line in out.read_text().splitlines()]
                 self.assertEqual([r["plan"] for r in rows], ["a", "b"])
                 self.assertTrue(all(r["identity"] == "puzzle" and r["min_len"] is None for r in rows))
@@ -100,7 +100,7 @@ class ExportTests(unittest.TestCase):
                  patch.object(school, "test_identities", return_value=set()), \
                  patch.object(school, "validate_buffer", side_effect=ValueError("invalid")):
                 with self.assertRaises(ValueError):
-                    school.export(SimpleNamespace(name="test", out=out, glados="checker"))
+                    school.export(SimpleNamespace(name="test", out=out, tantalos="checker"))
             self.assertFalse(out.exists())
 
 

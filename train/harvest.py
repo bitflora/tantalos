@@ -3,7 +3,7 @@
     python train/harvest.py runs/v4-warm-3h/best.pt --n 4096
     python train/harvest.py runs/v4-warm-3h/best.pt --n 4096 --cond "<verdict:solvable> <diff:4>"
 
-Samples `--n` levels with the given conditions, scores them with `glados-score score`, and keeps
+Samples `--n` levels with the given conditions, scores them with `tantalos-score score`, and keeps
 the ones that are solvable, need portals (the solver can't finish them without firing one)
 and are novel: not an exact copy of a level in `--data`, and no same-size level there with
 token 4-gram Jaccard similarity of `--max-similarity` or more (the measure evaluate.py's novelty
@@ -25,7 +25,7 @@ Put earlier harvests in `--data` here so later rounds only keep levels new to al
 (`uncertain`: editor-valid, not proven unsolvable), once each, to FILE: Goblin's self-play pool
 (docs/goblin-plan-2026-10-27.md), levels it can only get by beating the search.
 
-Speed: the GPU samples chunk c+1 while one long-lived `glados-score score` (sample.Scorer, at
+Speed: the GPU samples chunk c+1 while one long-lived `tantalos-score score` (sample.Scorer, at
 below-normal priority) scores chunk c, and a batch row starts a new level as soon as its last
 one ends (GPT.generate_refill). The progress lines say how long the GPU sampled and how long it
 then waited for the scorer: the larger one is the bottleneck.
@@ -55,7 +55,7 @@ from evaluate import nearest  # noqa: E402
 from seeding import resolve  # noqa: E402
 
 SOLVABLE = "<verdict:solvable>"
-# Fields of a `glados-score score` line that make up a dataset record.
+# Fields of a `tantalos-score score` line that make up a dataset record.
 RECORD_KEYS = ("tokens", "n_tokens", "verdict", "min_len", "needs_portals", "metrics")
 
 
@@ -80,11 +80,11 @@ def known_hashes(paths):
 
 
 def candidate(r):
-    """Solvable and needs a portal (a `glados-score score` result)."""
+    """Solvable and needs a portal (a `tantalos-score score` result)."""
     if r["verdict"] != "solvable":
         return False
     if "needs_portals" not in r:
-        sys.exit("glados-score score didn't report needs_portals: rebuild it (cargo build --release)")
+        sys.exit("tantalos-score score didn't report needs_portals: rebuild it (cargo build --release)")
     return bool(r["needs_portals"])
 
 
@@ -105,7 +105,7 @@ def novel(candidates, data, max_similarity=0.9, counts=None):
 
 
 def keep(results, data, max_similarity=0.9, counts=None):
-    """harvest's rules on `glados-score score` results: solvable, needs portals, novel (`novel`)."""
+    """harvest's rules on `tantalos-score score` results: solvable, needs portals, novel (`novel`)."""
     return novel([r for r in results if candidate(r)], data, max_similarity, counts)[0]
 
 
@@ -126,7 +126,7 @@ def main():
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--chunk", type=int, default=1024, help="levels sampled and scored at a time")
     ap.add_argument("--budget", type=int, default=50_000)
-    ap.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
+    ap.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
     ap.add_argument("--seed", type=int, default=None,
                     help="default: a fresh, unpredictable seed (printed; pass it back to repeat)")
     args = ap.parse_args()
@@ -212,7 +212,7 @@ def main():
             f.write(json.dumps({"start": start, "k": k, "results": results}) + "\n")
         tally(results)
 
-    # The GPU samples chunk c+1 while glados scores chunk c (sample.Scorer).
+    # The GPU samples chunk c+1 while tantalos scores chunk c (sample.Scorer).
     for start in range(0, args.n, args.chunk):
         k = min(args.chunk, args.n - start)
         if start in saved and saved[start]["k"] == k:
@@ -222,7 +222,7 @@ def main():
         t = time.time()
         lines = sample.generate(model, vocab, k, conds, (), args.temperature, args.top_k, args.batch, refill=True)
         sampling += time.time() - t
-        scorer = scorer or sample.Scorer(args.glados, args.budget)
+        scorer = scorer or sample.Scorer(args.tantalos, args.budget)
         scorer.send(lines)
         queued.append((start, k))
         while len(queued) > 1:

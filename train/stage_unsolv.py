@@ -13,15 +13,15 @@ Steps: take levels of data/ws5/train.jsonl labelled unsolvable, drop those alrea
 the original) or that have no map in out/workshop/bsp. Smallest first (or with `--order rating`
 most Workshop stars first, then most ratings: `stars`/`votes` from `fetch.py ratings`), one per
 item set. Re-score
-each pick with the current release `glados-score.exe` (50k and 250k budgets, editor rules off)
-and `glados-p2c editor`; keep only those still unsolvable and without editor flags. Write p2c/, tokens,
+each pick with the current release `tantalos-score.exe` (50k and 250k budgets, editor rules off)
+and `tantalos-p2c editor`; keep only those still unsolvable and without editor flags. Write p2c/, tokens,
 scores, MANIFEST.md in out/unsolv-DATE[-N]/, copy to the Puzzle Maker folder as
-glados-ws5b-unsolv-NNNNN (the series continues the highest number there; Title `unsolv <title>`,
+tantalos-ws5b-unsolv-NNNNN (the series continues the highest number there; Title `unsolv <title>`,
 items in Description, a .jpg preview, timestamps a second apart), and append to the registry.
 
 It never starts or touches Portal 2. The real-editor check (`train/portal2.py check`) needs the
 game closed; run it afterwards if the user asks (see CLAUDE.md "Staging unsolvable levels").
-Needs target/release/glados-score.exe and glados-p2c.exe (don't rebuild them during a training run).
+Needs target/release/tantalos-score.exe and tantalos-p2c.exe (don't rebuild them during a training run).
 """
 import argparse, datetime, json, re, subprocess, sys, time
 from pathlib import Path
@@ -33,8 +33,8 @@ import playtest  # noqa: E402
 import preview  # noqa: E402
 import bsp  # noqa: E402
 
-SCORE = ROOT / "target" / "release" / "glados-score.exe"
-P2C = ROOT / "target" / "release" / "glados-p2c.exe"
+SCORE = ROOT / "target" / "release" / "tantalos-score.exe"
+P2C = ROOT / "target" / "release" / "tantalos-p2c.exe"
 DATA = ROOT / "data" / "ws5" / "train.jsonl"
 BSPS = ROOT / "out" / "workshop" / "bsp"
 REGISTRY = ROOT / "train" / "unsolv-staged.jsonl"
@@ -48,7 +48,7 @@ def registry():
 
 def staged_titles():
     out = set()
-    for p in playtest.PUZZLES.glob("glados-*-unsolv-*.p2c"):
+    for p in playtest.PUZZLES.glob("tantalos-*-unsolv-*.p2c"):
         m = re.search(r'"Title"\s+"unsolv ([^"]*)"', p.read_bytes().decode("utf-8", "replace"))
         if m:
             out.add(m[1])
@@ -170,12 +170,12 @@ def main():
     if len(files) != len(keep):
         sys.exit(f"{len(files)} p2c files for {len(keep)} levels: check {out}")
 
-    last = max([int(m[1]) for p in playtest.PUZZLES.glob(f"glados-{SERIES}-unsolv-*.p2c")
+    last = max([int(m[1]) for p in playtest.PUZZLES.glob(f"tantalos-{SERIES}-unsolv-*.p2c")
                 if (m := re.search(r"-(\d{5})\.p2c$", p.name))] or [0])
     now = int(time.time())
     rows = []
     for i, ((r, x, y), src, fl) in enumerate(zip(keep, files, flags)):
-        name = f"glados-{SERIES}-unsolv-{last + 1 + i:05d}.p2c"
+        name = f"tantalos-{SERIES}-unsolv-{last + 1 + i:05d}.p2c"
         dst = playtest.PUZZLES / name
         text = playtest.restamp(src.read_bytes().decode("utf-8"), now + i)
         text = playtest.retitle(text, f"unsolv {r['title']}")
@@ -191,7 +191,7 @@ def main():
 
     lines = [f"# {len(rows)} more unsolvable Workshop levels, staged {day}", "",
              "Source: `data/ws5/train.jsonl`, picked by `train/stage_unsolv.py`. Still unsolvable with the "
-             "current release build at 50k and 250k (`glados-score score --editor-rules off`). A published "
+             "current release build at 50k and 250k (`tantalos-score score --editor-rules off`). A published "
              "puzzle was solved by its author, so the verdict is a solver gap.", "",
              "| staged file | workshop id | title | rating | tokens | items | editor flags | in game |",
              "|---|---|---|---|---:|---|---|---|"]

@@ -1,14 +1,14 @@
-//! Edits to finished levels (`glados-data mutate`).
+//! Edits to finished levels (`tantalos-data mutate`).
 
 use std::collections::{BTreeMap, HashSet};
 
-use glados::dataset::{label_with, Label};
-use glados::fixtures;
-use glados::level::Level;
-use glados::mutate::{json_field, mutants, mutate, normalize, Config};
-use glados::p2c::Puzzle;
-use glados::rng::Rng;
-use glados::tokens::{decode, encode};
+use tantalos::dataset::{label_with, Label};
+use tantalos::fixtures;
+use tantalos::level::Level;
+use tantalos::mutate::{json_field, mutants, mutate, normalize, Config};
+use tantalos::p2c::Puzzle;
+use tantalos::rng::Rng;
+use tantalos::tokens::{decode, encode};
 
 fn fixture(name: &str) -> Puzzle {
     fixtures::all()
