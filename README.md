@@ -1,4 +1,5 @@
-# tantalos
+# TANTaLOS
+## Totally Alive Nifty Tester and Loving Operating System
 
 Tooling for generating and solving Portal 2 Puzzle Maker levels. See [plan.md](plan.md).
 
