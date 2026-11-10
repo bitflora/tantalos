@@ -47,10 +47,11 @@ const USAGE: &str = "usage:
                                   (end: the plan solves if it stops here; dead: no step
                                   fits; whole: the plan so far is whole steps)
                                 {\"op\":\"close\",\"ids\":[ID,...]} -> {\"ok\":true}
-  glados-score grammar [--check FILE]
+  glados-score grammar [--check FILE] [--editor-rules on|off]
                                 the legal next level tokens, for the level net's constrained
                                 decoding (src/grammar.rs): a JSONL server on stdin/stdout, one
-                                answer line per request line, flushed.
+                                answer line per request line, flushed. Items go only where they
+                                add no editor flag (src/editor.rs), unless --editor-rules off.
                                 {\"levels\":[TOKENS,...]} (each a level's tokens so far)
                                   -> {\"results\":[{\"allowed\":[TOKEN,...],\"end\":B} or {\"error\":...},...]}
                                   (end: the level may end here)
@@ -392,10 +393,18 @@ fn run_grammar(args: &[String]) -> Result<()> {
     use glados::mutate::{json_array, json_field};
     use std::io::BufRead;
     let mut check = None;
+    let mut editor = true;
     let mut rest = Vec::new();
     for (flag, value) in flags(args, &mut rest)? {
         match flag {
             "--check" => check = Some(value),
+            "--editor-rules" => {
+                editor = match value {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("--editor-rules: on or off, not {value}").into()),
+                }
+            }
             _ => return Err(format!("unknown flag {flag}
 {USAGE}").into()),
         }
@@ -404,7 +413,7 @@ fn run_grammar(args: &[String]) -> Result<()> {
         return Err(format!("grammar takes no arguments
 {USAGE}").into());
     }
-    let mut grammar = Grammar::new();
+    let mut grammar = if editor { Grammar::with_editor_rules() } else { Grammar::new() };
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     if let Some(file) = check {
         for line in std::io::BufReader::new(std::fs::File::open(file)?).lines() {

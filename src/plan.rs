@@ -153,6 +153,20 @@ pub fn encode(route: &Route) -> String {
                 };
                 put(&["dive", color_word(color)], &[to]);
             }
+            // So is the one looped through.
+            Act::Loop { face, refire, .. } => {
+                let color = if before.portals[1] == Some(*face) {
+                    Color::Orange
+                } else {
+                    Color::Blue
+                };
+                put(&["loop", color_word(color)], &[]);
+                if let Some((_, (c, d), _)) = refire {
+                    put(&[], &[*c]);
+                    put(&[dir_token(*d)], &[]);
+                }
+                put(&[], &[to]);
+            }
             Act::Exit { .. } => put(&["exit"], &[]),
         }
         before = &leg.after;

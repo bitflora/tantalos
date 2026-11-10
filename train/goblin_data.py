@@ -30,7 +30,10 @@ The parts:
     ws-test   ws5 test levels it solves (annotation-excluded ones left out), 500k
     ws-deep   ws5 train levels out of the 500k budget, tried at 1M (--deep; the solved
               ones join ws)
-    mut       Workshop mutants (data/v5b/levels-mutants*.jsonl): at most MAX_PER_PARENT per
+    ws6       data/ws6 train levels (the 2026-11-02 download) that ws5 lacks and our solver solves,
+              500k; they join ws. data/ws6/test stays out of training; the held-out sets still
+              come from ws5
+    mut      Workshop mutants (data/v5b/levels-mutants*.jsonl): at most MAX_PER_PARENT per
               parent, near-copies dropped; mutants of ws5 test levels make test-mut
     gen       generated levels (data/v5b/levels-[1-5].jsonl): every one that changes the room's
               state twice or more, SIMPLE of the others, near-copies dropped
@@ -78,6 +81,7 @@ from annotations import excluded_ids  # noqa: E402
 AUGMENT = ROOT / "target" / "release" / "glados-data.exe"
 TRICKS = ROOT / "tools" / "workshop" / "excluded-tricks.jsonl"
 WS_TRAIN, WS_TEST = "data/ws5/train.jsonl", "data/ws5/test.jsonl"
+WS6_TRAIN = "data/ws6/train.jsonl"
 MUTANTS = ["data/v5b/levels-mutants*.jsonl"]
 GENERATED = ["data/v5b/levels-[1-5].jsonl"]
 HARVEST = ["data/goblin/harvest/*.jsonl"]
@@ -104,6 +108,7 @@ PARTS = [
     Part("ws", [WS_TRAIN], ("solvable",), False, "ws", 500_000, 4),
     Part("ws-test", [WS_TEST], ("solvable",), False, "ws", 500_000, 0, test=True),
     Part("ws-deep", [WS_TRAIN], ("uncertain",), False, "ws", 1_000_000, 4),
+    Part("ws6", [WS6_TRAIN], ("solvable",), False, "ws", 500_000, 4),
     Part("mut", MUTANTS, ("solvable",), False, "mut", 50_000, 2),
     Part("gen", GENERATED, ("solvable",), True, "gen", 50_000, 2),
     Part("v6", HARVEST, ("solvable",), True, "v6", 50_000, 2),
@@ -163,8 +168,10 @@ def tricks_ids():
 
 def select(part, args, rng):
     """The records of `part` to plan, as a list (step 1)."""
-    if part.name in ("ws", "ws-test", "ws-deep"):
+    if part.name in ("ws", "ws-test", "ws-deep", "ws6"):
         skip = tricks_ids() if part.name != "ws-test" else excluded_ids()
+        if part.name == "ws6":
+            skip = skip | {str(r.get("workshop_id")) for r in read([WS_TRAIN, WS_TEST])}
         out = []
         for r in read(part.files):
             verdict = r.get("solver_verdict") if part.name == "ws-deep" else r.get("verdict")
@@ -394,7 +401,7 @@ def assemble(out, args, rng):
     sets = defaultdict(list)
     train = defaultdict(list)  # by src: rows still to augment
     counts = Counter()
-    for r in load_part(out, "ws") + load_part(out, "ws-deep"):
+    for r in load_part(out, "ws") + load_part(out, "ws-deep") + load_part(out, "ws6"):
         train["ws"].append(r)
     for r in load_part(out, "ws-test"):
         r.pop("source_tokens", None)

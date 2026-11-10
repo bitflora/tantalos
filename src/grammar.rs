@@ -21,12 +21,24 @@
 //!   floor; a piston's column is open; a field stays in the chamber; at most `MAX_TURRETS`
 //!   turrets. Every token allowed can be followed by one that is, so a level never gets stuck.
 //!
-//! Not checked: anything between items (overlaps, a laser hitting nothing, a door's floor, which
-//! may be a panel or bridge written after it), goo, and our model of the editor's rules
-//! (`editor.rs`).
+//! With the editor's rules on (`Grammar::with_editor_rules`, what `glados-score grammar` serves),
+//! the token that settles where an item goes (its last cell number or direction, a field's
+//! length, a piston's reach, a rail's far end) may not give it a new flag in our model of the
+//! Puzzle Maker's rules (`editor.rs`): two items in one cell, an item on a door frame or in a
+//! field, fields or panels overlapping. The level so far, the item finished with any legal
+//! tokens and its wires left out, is decoded and its flags compared with the level's before the
+//! item. Only the last token is filtered, never the ones already written; when every choice
+//! would be flagged they all stay, so a level still never gets stuck.
+//!
+//! Not checked: anything else between items (a laser hitting nothing, a door's floor, which
+//! may be a panel or bridge written after it), and goo.
 
-use std::collections::{BTreeSet, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+
+use crate::editor::{editor_flags, target_name, Flag};
+use crate::level::{ItemKind, Level};
 
 use crate::geom::{step, Cell, Dir};
 use crate::level::MAX_TURRETS;
@@ -189,6 +201,154 @@ impl Geo {
 #[derive(Default)]
 pub struct Grammar {
     geos: HashMap<String, Rc<Geo>>,
+    /// Whether items may not add editor flags (`editor.rs`).
+    editor: bool,
+    /// Levels so far to try items in, by their tokens (None: they don't decode).
+    probes: HashMap<String, Option<Rc<RefCell<Probe>>>>,
+    /// Places tried for an item, by the tokens up to its word: whether it gets no editor flag there.
+    tried: HashMap<String, HashMap<Place, bool>>,
+}
+
+/// Levels kept to try items in (each holds its chamber: fewer than `MAX_CACHED`).
+const MAX_PROBES: usize = 256;
+
+/// A level so far, to try an item in: its editor flags without it.
+struct Probe {
+    level: Level,
+    flags: BTreeSet<Flag>,
+}
+
+impl Probe {
+    /// Whether the item `word` with the tokens `toks` gets no editor flag in the level. The item
+    /// is decoded on its own in an open chamber (over a floor at its height, for stairs) and
+    /// added to the level with what `Level` works out of it (a field's faces, a glass panel's),
+    /// so that reads the open chamber, not the level's. A faith plate's target is asked about only
+    /// if `target` (once it's being placed).
+    fn fits(&mut self, word: &str, toks: &[&str], target: bool) -> bool {
+        let [x, y, z] = self.level.size;
+        let floor = if word == "stairs" { toks[2] } else { "0" };
+        let text = format!("size {x} {y} {z} open 0 0 {floor} {} {} {} {word} {}", x - 1, y - 1, z - 1, toks.join(" "));
+        let Ok(p) = crate::tokens::decode(&text) else { return true };
+        let mut alone = Level::from_puzzle(&p);
+        let l = &mut self.level;
+        // What the item rests on is the level's, not the open chamber's (as `decode` places it):
+        // a rail platform is mounted on whichever surface runs all along its track, a gel
+        // dropper hangs from the ceiling over its splat.
+        for r in &alone.rails {
+            let track = r.track();
+            let a = (0..3).find(|&a| r.cell[a] != r.end[a]).unwrap_or(0);
+            let left = crate::builder::Builder::rail_up(Dir::from_axis(a, r.end[a] > r.cell[a]));
+            let up = [left, left.opposite()]
+                .into_iter()
+                .chain(Dir::HORIZONTAL)
+                .chain([Dir::PosZ, Dir::NegZ])
+                .filter(|d| d.axis() != a)
+                .find(|&d| track.iter().all(|&c| l.solid(step(c, d.opposite()))));
+            if let (Some(up), Some(it)) = (up, alone.items.iter_mut().find(|it| it.index == r.item)) {
+                it.normal = Some(up);
+            }
+        }
+        if let Some(splat) = alone.items.iter().find(|it| it.kind == ItemKind::PaintSplat).map(|it| it.cell) {
+            let mut top = splat;
+            while !l.solid(step(top, Dir::PosZ)) {
+                top = step(top, Dir::PosZ);
+            }
+            for it in alone.items.iter_mut().filter(|it| it.kind == ItemKind::PaintDropper) {
+                it.cell = top;
+            }
+        }
+        let lens = (l.items.len(), l.barriers.len(), l.hazards.len(), l.stairs.len(), l.rails.len());
+        let next = l.items.iter().map(|i| i.index).max().unwrap_or(-1) + 1;
+        let index: HashMap<i32, i32> = alone.items.iter().enumerate().map(|(k, it)| (it.index, next + k as i32)).collect();
+        let new = |i: i32| index.get(&i).copied().unwrap_or(-1);
+        let mine: HashSet<(&'static str, Cell)> = alone
+            .items
+            .iter()
+            .filter(|it| target || it.kind != ItemKind::PlateTarget)
+            .filter_map(|it| Some((target_name(&it.kind)?, it.cell)))
+            .collect();
+        // A field reaches across the open chamber: each of its lines only as far as the level's
+        // first wall, as `Level` would have it there.
+        let sweeps: HashMap<i32, Dir> = alone.items.iter().filter_map(|it| Some((it.index, it.normal?))).collect();
+        let hazards: Vec<_> = alone
+            .hazards
+            .into_iter()
+            .map(|mut h| {
+                let n = sweeps.get(&h.item).copied();
+                let (mut kept, mut open, mut prev) = (Vec::new(), true, None);
+                for (c, f) in h.faces {
+                    let along = n.is_some_and(|n| prev.map(|p| step(p, n)) == Some(c));
+                    open = (open || !along) && l.in_interior(c) && !l.solid(c);
+                    if open {
+                        kept.push((c, f));
+                    }
+                    prev = Some(c);
+                }
+                h.faces = kept;
+                h.item = new(h.item);
+                h
+            })
+            .collect();
+        l.hazards.extend(hazards);
+        l.items.extend(alone.items.into_iter().map(|mut it| {
+            it.index = new(it.index);
+            it
+        }));
+        l.barriers.extend(alone.barriers.into_iter().map(|mut b| {
+            b.item = new(b.item);
+            b
+        }));
+        l.stairs.extend(alone.stairs.into_iter().map(|mut st| {
+            st.item = new(st.item);
+            st
+        }));
+        l.rails.extend(alone.rails.into_iter().map(|mut r| {
+            r.item = new(r.item);
+            r
+        }));
+        // `decode` keeps goo out of the cells items stand in: off the chamber while it's asked.
+        let cells: HashSet<Cell> = mine.iter().map(|m| m.1).collect();
+        let goo: Vec<(usize, Cell)> = (0..lens.0)
+            .filter(|&i| l.items[i].kind == ItemKind::Goo && cells.contains(&l.items[i].cell))
+            .map(|i| (i, l.items[i].cell))
+            .collect();
+        for &(i, _) in &goo {
+            l.items[i].cell = [-1, -1, -1];
+        }
+        let ok = editor_flags(l).into_iter().all(|f| self.flags.contains(&f) || !mine.contains(&(f.name, f.pos)));
+        for &(i, c) in &goo {
+            l.items[i].cell = c;
+        }
+        l.items.truncate(lens.0);
+        l.barriers.truncate(lens.1);
+        l.hazards.truncate(lens.2);
+        l.stairs.truncate(lens.3);
+        l.rails.truncate(lens.4);
+        ok
+    }
+}
+
+/// Where an item goes: its cell, and the surface it's on for wall-mounted ones.
+type Place = (Cell, Option<Dir>);
+
+/// A level's tokens without its wires, which may name items not written yet and move nothing.
+fn unwired<'t>(toks: &[&'t str]) -> Vec<&'t str> {
+    let mut kept = Vec::with_capacity(toks.len());
+    let mut i = 0;
+    while i < toks.len() {
+        if toks[i] == ">" {
+            i += if toks.get(i + 1) == Some(&"exit") { 2 } else { 3 };
+            continue;
+        }
+        kept.push(toks[i]);
+        i += 1;
+    }
+    kept
+}
+
+fn decoded(toks: &[&str]) -> Option<Level> {
+    let p = crate::tokens::decode(&unwired(toks).join(" ")).ok()?;
+    Some(Level::from_puzzle(&p))
 }
 
 impl Grammar {
@@ -196,10 +356,53 @@ impl Grammar {
         Grammar::default()
     }
 
+    /// One whose items also keep clear of the editor's rules (`editor.rs`).
+    pub fn with_editor_rules() -> Grammar {
+        Grammar {
+            editor: true,
+            ..Grammar::default()
+        }
+    }
+
+    /// The level of tokens so far (an unfinished one too) to try items in, if they decode.
+    fn probe(&mut self, toks: &[&str]) -> Option<Rc<RefCell<Probe>>> {
+        let key = toks.join(" ");
+        if let Some(p) = self.probes.get(&key) {
+            return p.clone();
+        }
+        if self.probes.len() >= MAX_PROBES {
+            self.probes.clear();
+        }
+        let p = decoded(toks).map(|level| {
+            let flags = editor_flags(&level).into_iter().collect();
+            Rc::new(RefCell::new(Probe { level, flags }))
+        });
+        self.probes.insert(key, p.clone());
+        p
+    }
+
+    /// Whether an item `word`, after the level's tokens `before`, gets no editor flag
+    /// (`Probe::fits`) at one of `places` with some way of finishing it (`tails`). It stops at the
+    /// first such place, and remembers the places it tried.
+    fn some_clear(&mut self, before: &[&str], word: &str, places: &[Place], tails: Tails) -> bool {
+        let Some(probe) = self.probe(before) else { return true };
+        let mut probe = probe.borrow_mut();
+        let tried = self.tried.entry(format!("{} {word}", before.join(" "))).or_default();
+        places.iter().any(|&(c, d)| {
+            *tried.entry((c, d)).or_insert_with(|| {
+                let at: Vec<&str> = c.iter().map(|&v| NUMS[v as usize]).chain(d.map(dir_token)).collect();
+                tails((c, d)).into_iter().any(|tail| probe.fits(word, &[&at[..], &tail[..]].concat(), false))
+            })
+        })
+    }
+
     /// What may follow `tokens`, or why they aren't the start of a legal level.
     pub fn next(&mut self, tokens: &[&str]) -> Result<Next, String> {
         if self.geos.len() > MAX_CACHED {
             self.geos.clear();
+        }
+        if self.tried.len() > MAX_CACHED {
+            self.tried.clear();
         }
         let mut p = Parser {
             toks: tokens,
@@ -212,6 +415,7 @@ impl Grammar {
             count: [0; 22],
             debt: [-1; 22],
             poured: Vec::new(),
+            start: 0,
         };
         match p.level() {
             Halt::At(opts, end) => Ok(Next {
@@ -257,7 +461,15 @@ struct Parser<'a, 'g> {
     debt: [i32; 22],
     /// Per gel, whether it's poured (only those take wires).
     poured: Vec<bool>,
+    /// Where the item being read starts (its word).
+    start: usize,
 }
+
+/// The ways to finish an item after a token that places it, each its tokens: legal ones (they
+/// don't move it), one per way it may still lie there (a panel's swing, say).
+type Tail<'t> = &'t dyn Fn(&str) -> Vec<Vec<&'static str>>;
+/// The same after its place.
+type Tails<'t> = &'t dyn Fn(Place) -> Vec<Vec<&'static str>>;
 
 fn nums(lo: i32, hi: i32) -> Opts {
     (lo.max(0)..=hi.min(MAX_NUM)).map(|n| NUMS[n as usize]).collect()
@@ -327,10 +539,6 @@ impl<'a> Parser<'a, '_> {
         self.take(nums(lo, hi), false).map(num_of)
     }
 
-    fn dir(&mut self, ds: impl IntoIterator<Item = Dir>) -> R<Dir> {
-        self.take(dirs(ds), false).map(dir_of)
-    }
-
     fn word(&mut self, words: &[&'static str]) -> R<&'a str> {
         self.take(words.iter().copied().collect(), false)
     }
@@ -363,12 +571,75 @@ impl<'a> Parser<'a, '_> {
         Ok(c)
     }
 
-    /// One of `faces`: a cell and a direction.
-    fn face_in(&mut self, faces: &[(Cell, Dir)]) -> R<(Cell, Dir)> {
-        let cells: Vec<Cell> = faces.iter().map(|f| f.0).collect();
-        let c = self.cell_in(&cells)?;
-        let d = self.dir(faces.iter().filter(|f| f.0 == c).map(|f| f.1))?;
-        Ok((c, d))
+    /// One of `places` (a cell, then a direction for faces), each token of it, when it's the
+    /// one being written with the editor's rules on, leading to some place where the item
+    /// (finished with one of `tails`) gets no editor flag (`Grammar::some_clear`), unless none does.
+    fn place_in(&mut self, places: &[Place], tails: Tails) -> R<Place> {
+        let mut c = [0; 3];
+        for k in 0..3 {
+            let group: Vec<Place> = places.iter().filter(|p| p.0[..k] == c[..k]).copied().collect();
+            let opts = group.iter().map(|p| NUMS[p.0[k] as usize]).collect();
+            let opts = self.leading_clear(opts, |t| group.iter().filter(|p| p.0[k] == num_of(t)).copied().collect(), tails);
+            c[k] = self.take(opts, false).map(num_of)?;
+        }
+        if places.first().is_some_and(|p| p.1.is_none()) {
+            return Ok((c, None));
+        }
+        let here: Vec<Place> = places.iter().filter(|p| p.0 == c).copied().collect();
+        let opts = dirs(here.iter().map(|p| p.1.expect("faces have a direction")));
+        let opts = self.leading_clear(opts, |t| vec![(c, Some(dir_of(t)))], tails);
+        Ok((c, Some(self.take(opts, false).map(dir_of)?)))
+    }
+
+    /// Those of `opts` (the token being written) whose `places` have a clear one (`place_in`).
+    fn leading_clear(&mut self, opts: Opts, places: impl Fn(&str) -> Vec<Place>, tails: Tails) -> Opts {
+        if self.pos < self.toks.len() || !self.grammar.editor {
+            return opts;
+        }
+        let toks = self.toks;
+        let (before, word) = (&toks[..self.start], toks[self.start]);
+        let clear: Opts = opts
+            .iter()
+            .copied()
+            .filter(|t| self.grammar.some_clear(before, word, &places(t), tails))
+            .collect();
+        if clear.is_empty() { opts } else { clear }
+    }
+
+    /// One of `cells` where the item (finished with one of `tails`) gets no editor flag (`place_in`).
+    fn cell_placing(&mut self, cells: &[Cell], tails: Tails) -> R<Cell> {
+        let places: Vec<Place> = cells.iter().map(|&c| (c, None)).collect();
+        Ok(self.place_in(&places, tails)?.0)
+    }
+
+    /// One of `faces` where the item (finished with one of `tails`) gets no editor flag (`place_in`).
+    fn face_placing(&mut self, faces: &[(Cell, Dir)], tails: Tails) -> R<(Cell, Dir)> {
+        let places: Vec<Place> = faces.iter().map(|&(c, d)| (c, Some(d))).collect();
+        let (c, d) = self.place_in(&places, tails)?;
+        Ok((c, d.expect("faces have a direction")))
+    }
+
+    /// One of `opts`, a token that settles where the item goes. At the end of the tokens, with
+    /// the editor's rules on, only those after which the item, finished with one of `tail`, gets
+    /// no editor flag (`Probe::fits`), unless that's none of them.
+    fn placing(&mut self, opts: Opts, tail: Tail) -> R<&'a str> {
+        if self.pos < self.toks.len() || !self.grammar.editor {
+            return self.take(opts, false);
+        }
+        let Some(probe) = self.grammar.probe(&self.toks[..self.start]) else {
+            return self.take(opts, false);
+        };
+        let mut probe = probe.borrow_mut();
+        let (word, written) = (self.toks[self.start], &self.toks[self.start + 1..]);
+        // A faith plate's face and target cell's first two numbers are written.
+        let target = word == "plate" && written.len() >= 6;
+        let clear: Opts = opts
+            .iter()
+            .copied()
+            .filter(|t| tail(t).into_iter().any(|end| probe.fits(word, &[written, &[*t], &end[..]].concat(), target)))
+            .collect();
+        drop(probe);
+        self.take(if clear.is_empty() { opts } else { clear }, false)
     }
 
     /// One of `opts` for which `ok` holds (asked only of the token there, if there is one).
@@ -521,11 +792,19 @@ impl<'a> Parser<'a, '_> {
         let k = SECTIONS.iter().position(|ws| ws.contains(&word)).unwrap();
         self.section = k;
         self.count[k] += 1;
+        self.start = self.pos - 1;
         let g = self.geo();
         let s = self.size;
+        let none = |_: &str| vec![vec![]];
+        let on = |_: &str| vec![vec!["on"]];
+        let finished = |tail: &'static [&'static str]| move |_: Place| vec![tail.to_vec()];
+        // Every way a panel or bridge may swing out from its face, then `rest`.
+        let swings = |rest: &'static [&'static str]| {
+            move |(_, n): Place| across(n.unwrap()).map(|d| [&[dir_token(d)][..], rest].concat()).collect()
+        };
         match word {
             "entry" | "exit" => {
-                self.face_in(&g.doors)?;
+                self.face_placing(&g.doors, &finished(&[]))?;
                 if word == "exit" {
                     self.either(["inv"].into_iter().collect(), |p| p.items())?;
                 }
@@ -543,64 +822,77 @@ impl<'a> Parser<'a, '_> {
                     hi[k] = self.take_if(nums(lo[k], s[k] - 1), ok).map(num_of)?;
                 }
                 let fits = |n: Dir, grow: Dir| grow.axis() != n.axis() && glass_mounted(&g, lo, hi, n, grow);
-                let n = self.dir(
-                    DIRS.into_iter()
-                        .filter(|n| lo[n.axis()] == hi[n.axis()] && DIRS.iter().any(|&gr| fits(*n, gr))),
+                let grows = |n: &str| {
+                    let n = dir_of(n);
+                    DIRS.into_iter().filter(|&gr| fits(n, gr)).map(|gr| vec![dir_token(gr)]).collect()
+                };
+                let n = self.placing(
+                    dirs(DIRS.into_iter()
+                        .filter(|n| lo[n.axis()] == hi[n.axis()] && DIRS.iter().any(|&gr| fits(*n, gr)))),
+                    &grows,
                 )?;
-                self.dir(DIRS.into_iter().filter(|&gr| fits(n, gr)))?;
+                self.placing(dirs(DIRS.into_iter().filter(|&gr| fits(dir_of(n), gr))), &none)?;
             }
             "fizzler" | "laserfield" => {
-                let (c, n) = self.face_in(&g.all_faces)?;
-                let along = self.dir(across(n))?;
+                // Placed as a field one cell long, then as long as it gets.
+                let short = |(_, n): Place| across(n.unwrap()).map(|d| vec![dir_token(d), "1", "on"]).collect();
+                let (c, n) = self.face_placing(&g.all_faces, &short)?;
+                let along = dir_of(self.placing(dirs(across(n)), &|_| vec![vec!["1", "on"]])?);
                 let room = (0..)
                     .take_while(|&k| {
                         let v = along.vector();
                         g.idx(std::array::from_fn(|a| c[a] + v[a] * k)).is_some()
                     })
                     .count() as i32;
-                self.num(1, room)?;
+                self.placing(nums(1, room), &on)?;
                 self.on_off()?;
             }
             "gel" => {
-                let (_, n) = self.face_in(&g.all_faces)?;
+                let (_, n) = self.face_placing(&g.all_faces, &finished(&["bounce", "splat"]))?;
                 self.word(&PAINT_KINDS)?;
                 let kinds: &[&'static str] = if n == Dir::PosZ { &["stream", "splat"] } else { &["splat"] };
-                let poured = self.word(kinds)? == "stream";
+                let poured_on = |t: &str| vec![if t == "stream" { vec!["on"] } else { vec![] }];
+                let poured = self.placing(kinds.iter().copied().collect(), &poured_on)? == "stream";
                 self.poured.push(poured);
                 if poured {
                     self.on_off()?;
                 }
             }
             "dropper" => {
-                self.cell_in(g.ceiling())?;
+                self.cell_placing(g.ceiling(), &finished(&["standard"]))?;
                 self.word(&CUBE_KINDS)?;
                 self.either(["wait"].into_iter().collect(), |p| p.items())?;
             }
             "button" => {
-                self.cell_in(g.floor())?;
+                self.cell_placing(g.floor(), &finished(&["weighted"]))?;
                 self.word(&BUTTON_KINDS)?;
                 self.wires()?;
             }
             "pedestal" => {
-                self.cell_in(g.floor())?;
+                self.cell_placing(g.floor(), &finished(&["inf"]))?;
                 let mut opts = nums(3, 30);
                 opts.insert("inf");
                 self.take(opts, false)?;
                 self.wires()?;
             }
             "turret" => {
-                self.cell_in(g.floor())?;
+                self.cell_placing(g.floor(), &finished(&["0"]))?;
                 self.num(0, 7)?;
             }
             "cube" => {
-                self.any_cell()?;
+                self.num(0, s[0] - 1)?;
+                self.num(0, s[1] - 1)?;
+                self.placing(nums(0, s[2] - 1), &|_| vec![vec![CUBE_KINDS[0]]])?;
                 self.word(&CUBE_KINDS)?;
             }
             "laser" | "catcher" | "relay" => {
-                let (_, n) = self.face_in(&g.all_faces)?;
+                let laser = word == "laser";
+                let centred = move |_: Place| vec![if laser { vec!["center", "on"] } else { vec!["center"] }];
+                let (_, n) = self.face_placing(&g.all_faces, &centred)?;
                 let mut opts = dirs(across(n));
                 opts.insert("center");
-                self.take(opts, false)?;
+                let tail = |_: &str| vec![if laser { vec!["on"] } else { vec![] }];
+                self.placing(opts, &tail)?;
                 if word == "laser" {
                     self.on_off()?;
                 } else {
@@ -608,43 +900,42 @@ impl<'a> Parser<'a, '_> {
                 }
             }
             "plate" => {
-                let (c, _) = self.face_in(&g.all_faces)?;
+                let target = |(c, _): Place| {
+                    let z = if c[2] + 1 < s[2] { c[2] + 1 } else { c[2] - 1 };
+                    vec![vec![NUMS[c[0] as usize], NUMS[c[1] as usize], NUMS[z.max(0) as usize], "+z"]]
+                };
+                let (c, _) = self.face_placing(&g.all_faces, &target)?;
                 let x = self.num(0, s[0] - 1)?;
                 let y = self.num(0, s[1] - 1)?;
-                self.take(
-                    nums(0, s[2] - 1)
-                        .into_iter()
-                        .filter(|t| [x, y, num_of(t)] != c)
-                        .collect(),
-                    false,
-                )?;
-                self.dir(DIRS)?;
+                let facing = |_: &str| DIRS.map(|d| vec![dir_token(d)]).to_vec();
+                self.placing(nums(0, s[2] - 1).into_iter().filter(|t| [x, y, num_of(t)] != c).collect(), &facing)?;
+                self.placing(dirs(DIRS), &none)?;
             }
             "bridge" => {
-                let (_, n) = self.face_in(&g.all_faces)?;
-                self.dir(across(n))?;
+                let (_, n) = self.face_placing(&g.all_faces, &swings(&["on"]))?;
+                self.placing(dirs(across(n)), &on)?;
                 self.on_off()?;
             }
             "funnel" => {
-                self.face_in(&g.all_faces)?;
+                self.face_placing(&g.all_faces, &finished(&["on"]))?;
                 self.on_off()?;
                 self.either(["rev"].into_iter().collect(), |p| p.items())?;
             }
             "panel" | "glasspanel" => {
-                let (_, n) = self.face_in(&g.all_faces)?;
-                self.dir(across(n))?;
+                let (_, n) = self.face_placing(&g.all_faces, &swings(&["2", "on"]))?;
+                self.placing(dirs(across(n)), &|_| vec![vec!["2", "on"]])?;
                 self.take(["2", "3", "4", "6"].into_iter().collect(), false)?;
                 self.on_off()?;
             }
             "flip" => {
-                self.face_in(&g.all_faces)?;
+                self.face_placing(&g.all_faces, &finished(&[]))?;
             }
             "stairs" => {
-                self.face_in(&g.stairs)?;
+                self.face_placing(&g.stairs, &finished(&["on"]))?;
                 self.on_off()?;
             }
             "piston" => {
-                let (c, n) = self.face_in(g.pistons())?;
+                let (c, n) = self.face_placing(g.pistons(), &finished(&["0", "1", "on"]))?;
                 // Open as far as it reaches (on a floor, also to stand on its top): `Level`.
                 let v = n.vector();
                 let open = |t: i32| {
@@ -652,11 +943,21 @@ impl<'a> Parser<'a, '_> {
                     (0..=reach).all(|l| !g.solid(std::array::from_fn(|a| c[a] + v[a] * l)))
                 };
                 let lo = self.take_if(nums(0, 3), |t| open(num_of(t) + 1)).map(num_of)?;
-                self.take_if(nums(lo + 1, 4), |t| open(num_of(t)))?;
+                let reach = nums(lo + 1, 4).into_iter().filter(|t| open(num_of(t))).collect();
+                self.placing(reach, &on)?;
                 self.on_off()?;
             }
             "rail" => {
-                let c = self.any_cell()?;
+                // Placed by its start among the items, on a track one cell long each way from there.
+                let all: Vec<Cell> = crate::level::cells_between([0, 0, 0], [s[0] - 1, s[1] - 1, s[2] - 1]).collect();
+                let track = |(c, _): Place| {
+                    DIRS.into_iter()
+                        .map(|d| step(c, d))
+                        .filter(|e| (0..3).all(|a| (0..s[a]).contains(&e[a])))
+                        .map(|e| vec![NUMS[e[0] as usize], NUMS[e[1] as usize], NUMS[e[2] as usize], "osc"])
+                        .collect()
+                };
+                let c = self.cell_placing(&all, &track)?;
                 let mut e = [0; 3];
                 for a in 0..3 {
                     let moved = (0..a).filter(|&b| e[b] != c[b]).count();
@@ -665,7 +966,34 @@ impl<'a> Parser<'a, '_> {
                         (0, 2) => nums(0, s[a] - 1).into_iter().filter(|t| num_of(t) != c[a]).collect(),
                         _ => nums(0, s[a] - 1),
                     };
-                    e[a] = self.take(opts, false).map(num_of)?;
+                    // The rest of the far end: the start's, or one cell from it along a later
+                    // axis if the track hasn't moved yet.
+                    let rest = |t: &str| {
+                        let mut end = e;
+                        end[a] = num_of(t);
+                        let moved = (0..=a).any(|b| end[b] != c[b]);
+                        let finish = |end: Cell| {
+                            let mut toks: Vec<&'static str> = (a + 1..3).map(|b| NUMS[end[b] as usize]).collect();
+                            toks.push("osc");
+                            toks
+                        };
+                        let mut end = c;
+                        if moved {
+                            return vec![finish(end)];
+                        }
+                        let mut ends = Vec::new();
+                        for b in a + 1..3 {
+                            for v in [c[b] - 1, c[b] + 1] {
+                                if (0..s[b]).contains(&v) {
+                                    end[b] = v;
+                                    ends.push(finish(end));
+                                    end[b] = c[b];
+                                }
+                            }
+                        }
+                        ends
+                    };
+                    e[a] = self.placing(opts, &rest).map(num_of)?;
                 }
                 self.word(&["osc", "on", "off"])?;
             }
@@ -886,6 +1214,49 @@ mod tests {
     }
 
     #[test]
+    fn editor_rules_keep_items_off_a_door() {
+        let base = "size 8 8 4 open 1 1 1 6 6 2 entry 1 2 1 +x exit 6 6 1 -x plate 1 2";
+        let toks: Vec<&str> = base.split_whitespace().collect();
+        assert_eq!(Grammar::new().next(&toks).unwrap().allowed, vec!["1", "2"]);
+        // A faith plate in the entry door's cell shares it (`editor.rs`); one above doesn't.
+        assert_eq!(Grammar::with_editor_rules().next(&toks).unwrap().allowed, vec!["2"]);
+        // Levels already written aren't asked: the plate there still reads.
+        let whole = format!("{base} 1 +z 3 3 1 +z");
+        assert_eq!(Grammar::with_editor_rules().check(&whole.split_whitespace().collect::<Vec<_>>()), Ok(()));
+    }
+
+    #[test]
+    fn editor_rules_never_get_stuck_and_flag_less() {
+        // Random walks as above (past a goo-free geometry), with and without the rules: never
+        // stuck, and with them the levels they end (almost) never get an editor flag.
+        let flagged = |mut g: Grammar| {
+            let mut rng = crate::rng::Rng::new(11);
+            let (mut ended, mut flagged) = (0, 0);
+            for _ in 0..40 {
+                // A small chamber without goo keeps it quick.
+                let mut toks: Vec<&str> = "size 7 7 4 open 1 1 1 5 5 2 entry".split_whitespace().collect();
+                for _ in 0..300 {
+                    let n = g.next(&toks).unwrap();
+                    assert!(!n.allowed.is_empty() || n.end, "stuck after {}", toks.join(" "));
+                    if n.end && (n.allowed.is_empty() || rng.below(4) == 0) {
+                        let p = crate::tokens::decode(&toks.join(" ")).unwrap();
+                        let level = crate::level::Level::from_puzzle(&p);
+                        ended += 1;
+                        flagged += usize::from(!editor_flags(&level).is_empty());
+                        break;
+                    }
+                    toks.push(n.allowed[rng.below(n.allowed.len())]);
+                }
+            }
+            (ended, flagged)
+        };
+        let (n0, off) = flagged(Grammar::new());
+        let (n1, on) = flagged(Grammar::with_editor_rules());
+        assert!(n0 > 20 && n1 > 20, "only {n0} and {n1} walks ended");
+        assert!(off > 5 && on <= 1, "{on} of {n1} flagged with the rules, {off} of {n0} without");
+    }
+
+    #[test]
     fn rejects_what_decode_would() {
         let mut g = Grammar::new();
         let bad = format!("{ROOM} entry 1 1 1 +x exit 2 2 1 -x button 1 2 1 cube > field 0");
@@ -894,3 +1265,5 @@ mod tests {
         assert_eq!(g.check(&ok.split_whitespace().collect::<Vec<_>>()), Ok(()));
     }
 }
+
+

@@ -1,7 +1,8 @@
 """Collect Puzzle Maker chambers from the Portal 2 Workshop as glados training levels.
 
     python tools/workshop/fetch.py list --pages 100       # find puzzles: out/workshop/items.jsonl
-    python tools/workshop/fetch.py download               # fetch them:   out/workshop/bsp/<id>.bsp
+    python tools/workshop/fetch.py list --created 2013-01-01 2014-01-01   # every puzzle made in 2013
+    python tools/workshop/fetch.py download               # fetch them:   out/workshop/bsp/<id>.bsp.zst
     python tools/workshop/fetch.py build                  # convert+solve: out/workshop/levels.jsonl
     python tools/workshop/fetch.py pipeline               # download while converting+scoring
 
@@ -14,6 +15,10 @@ the CPU-bound converter and solver instead of doing the two phases one after the
 `list` reads the Workshop's public browse pages (top rated by default), singleplayer only and
 without the tags of co-op and custom maps, then keeps the items published from the Puzzle
 Maker (file `mymaps/<number>.bsp`). Metadata comes from the keyless GetPublishedFileDetails API.
+Browsing stops at page 1,000 of any order (30,000 items; 866,007 singleplayer items on
+2026-10-31), so `--created FROM TO` lists by creation date instead, a window of `--window-days`
+at a time (2013 had 6,691 items in May, far under the cap), every page of each. Such items are
+listed under the sort `mostrecent@START-END` (Unix times), which `ratings` reads back the same way.
 
 `download` doesn't take whole maps (5-40 MB, mostly lighting and packed files). It reads the
 header, then the entity lump, and stops there if the instance names already rule the map out
@@ -40,7 +45,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bsp import HEADER_SIZE, USED_LUMPS, Bsp, BspError, entities_ok, lump_table, parse_entities, slim  # noqa: E402
+from bsp import (HEADER_SIZE, USED_LUMPS, Bsp, BspError, entities_ok, lump_table, map_files, map_id,  # noqa: E402
+                 parse_entities, slim, write_map)
 from convert import Unsupported, convert, screen  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -111,9 +117,14 @@ def get_range(url, start, length):
 # ---- list ----
 
 def browse_page(sort, page, excluded):
-    """The page's item ids, in order, and the star ratings it shows ({id: {stars, votes}})."""
+    """The page's item ids, in order, and the star ratings it shows ({id: {stars, votes}}). A sort
+    `ORDER@START-END` browses ORDER among the items created between those Unix times."""
+    sort, _, window = sort.partition("@")
     q = [("appid", APP), ("browsesort", sort), ("actualsort", sort), ("section", "readytouseitems"),
          ("days", -1), ("numperpage", 30), ("p", page), ("requiredtags[]", "Singleplayer")]
+    if window:
+        start, end = window.split("-")
+        q += [("created_date_range_filter_start", start), ("created_date_range_filter_end", end)]
     q += [("excludedtags[]", t) for t in excluded]
     _, body = retrying(lambda: fetch_url(BROWSE + "?" + urllib.parse.urlencode(q)), what=f"browse page {page}")
     text = body.decode("utf-8", "replace")
@@ -177,10 +188,17 @@ def cmd_list(a):
         known = {json.loads(l)["id"] for l in open(items_path, encoding="utf-8")}
     excluded = [] if a.all_items else EXCLUDED_TAGS
     added = 0
+    sorts, pages = a.sort, range(a.start, a.start + a.pages)
+    if a.created:
+        day = 86400
+        start, end = (int(time.mktime(time.strptime(d, "%Y-%m-%d"))) for d in a.created)
+        sorts = [f"mostrecent@{t}-{min(t + a.window_days * day, end)}"
+                 for t in range(start, end, a.window_days * day)]
+        pages = range(a.start, 1001)  # every page of each window
     with open(items_path, "a", encoding="utf-8") as f:
-        for sort in a.sort:
+        for sort in sorts:
             prev = None
-            for page in range(a.start, a.start + a.pages):
+            for page in pages:
                 ids, rated = browse_page(sort, page, excluded)
                 if not ids or ids == prev:  # past the last page (Steam repeats it)
                     break
@@ -340,7 +358,7 @@ def fetch_once(item, bsp_dir):
             lumps[i] = data[table[i][0] - o:table[i][0] - o + table[i][1]]
     blob = slim(header, lumps)
     Bsp(blob).check()
-    (bsp_dir / f"{item['id']}.bsp").write_bytes(blob)
+    write_map(bsp_dir, item["id"], blob)
     return {"status": "ok", "bytes": fetched}
 
 
@@ -441,30 +459,30 @@ def cmd_build(a):
         ok = read_ids(out / "fetched.jsonl", status="ok")
         now = time.time()
         paths = []
-        for path in sorted((out / "bsp").glob("*.bsp")):
-            if path.stem in done:
+        for path in map_files(out / "bsp"):
+            if map_id(path) in done:
                 continue
             try:
                 old = now - path.stat().st_mtime > 60
             except OSError:
                 continue
-            if path.stem in ok or old:
+            if map_id(path) in ok or old:
                 paths.append(path)
         if not paths:
             return 0
     else:
-        paths = sorted((out / "bsp").glob("*.bsp"))
+        paths = map_files(out / "bsp")
     ids, lines, problems = [], [], {}
     with open(out / "report.jsonl", "a" if incremental else "w", encoding="utf-8") as report:
         for path in paths:
-            rec = {"id": path.stem}
+            rec = {"id": map_id(path)}
             try:
                 rec["tokens"] = convert(Bsp.open(path))
-                ids.append(path.stem)
+                ids.append(map_id(path))
                 lines.append(rec["tokens"])
             except (Unsupported, BspError) as e:
                 rec["error"] = str(e)
-                problems[path.stem] = str(e)
+                problems[map_id(path)] = str(e)
             report.write(json.dumps(rec) + "\n")
     print(f"converted {len(lines)} of {len(paths)}; {len(problems)} unsupported "
           f"(see report.jsonl)", file=sys.stderr)
@@ -537,6 +555,10 @@ def main():
                    help="browse orders: toprated, mostrecent, trend, totaluniquesubscribers, ...")
     p.add_argument("--pages", type=int, default=20, help="pages of 30 per sort (Steam stops near 1667)")
     p.add_argument("--start", type=int, default=1)
+    p.add_argument("--created", nargs=2, metavar=("FROM", "TO"),
+                   help="list every puzzle created from FROM up to TO (YYYY-MM-DD), past the page cap")
+    p.add_argument("--window-days", type=int, default=30,
+                   help="with --created: days per browse window (each must stay under 30,000 items)")
     p.add_argument("--delay", type=float, default=1.0, help="seconds between browse pages")
     p.add_argument("--all-items", action="store_true", help="don't exclude tags of unsupported items")
     p = sub.add_parser("ratings", help="star ratings of the listed puzzles, onto the level files")

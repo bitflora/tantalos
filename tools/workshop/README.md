@@ -6,7 +6,7 @@ the compiled map, as glados tokens, and label it with the solver like any genera
 
 ```bash
 python tools/workshop/fetch.py list --pages 100   # out/workshop/items.jsonl (30 puzzles a page)
-python tools/workshop/fetch.py download           # out/workshop/bsp/<id>.bsp, fetched.jsonl
+python tools/workshop/fetch.py download           # out/workshop/bsp/<id>.bsp.zst (zstd), fetched.jsonl
 python tools/workshop/fetch.py download --retry-errors
 python tools/workshop/fetch.py build              # out/workshop/levels.jsonl, report.jsonl
 python tools/workshop/check.py                    # converter vs. known puzzles (needs release glados)
@@ -84,7 +84,9 @@ the decoder's own pedestal-side and goo-cell choices), doesn't read back (14: wi
 past 32 in levels with over 32 panels) or is over 969 tokens (143). Since 2026-10-26 it is
 `data/v5b/levels-workshop-aug-x2.jsonl`, in run.py's default `levels-*.jsonl`, and the x20 file is
 `data/v5b/workshop-x20.jsonl`, outside it (name it with `--data` to train on it again). ws5 test is
-never augmented.
+never augmented. Since 2026-11-06 it is built from `data/ws6/train.jsonl` (42,819 levels: 339k
+versions, 679k lines; 161 bunny-hop/glitch levels skipped); the ws5-based file is
+`data/v5b/workshop-ws5-aug-x2.jsonl`, and ws6 test is never augmented either.
 
 `--check` on 600 ws5 levels: 99.1% of versions got the original's verdict, plan length and
 editor flags at first; the rest showed the solver depending on orientation (bridge routes,

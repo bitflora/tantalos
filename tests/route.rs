@@ -129,6 +129,10 @@ fn check(name: &str, level: &Level, r: &Route) {
                 assert_eq!(*edge, end, "{at}");
                 assert_eq!(leg.after.player, *landing, "{at}");
             }
+            Act::Loop { face, landing, .. } => {
+                assert_eq!(face.0, end, "{at}");
+                assert_eq!(leg.after.player, *landing, "{at}");
+            }
             Act::Exit { cell, .. } => {
                 assert_eq!(*cell, level.exit().unwrap().cell, "{at}");
                 assert_eq!(end, *cell, "{at}");

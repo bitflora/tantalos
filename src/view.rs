@@ -409,7 +409,9 @@ fn item_json(found: &Mutex<Vec<Found>>, path: &str) -> Result<String, String> {
     ))
 }
 
-pub(crate) fn geometry_json(level: &Level) -> String {
+/// The level's geometry as one JSON object: what the workbench, `glados view` and
+/// `train/preview.py` draw.
+pub fn geometry_json(level: &Level) -> String {
     let mut solid = Vec::new();
     let mut goo = Vec::new();
     for c in level.cells() {
@@ -422,7 +424,7 @@ pub(crate) fn geometry_json(level: &Level) -> String {
     let white: Vec<String> = level
         .portal_surfaces()
         .iter()
-        .map(|&(c, d)| format!("{},\"{}\"", cell_json(c), dir_name(d)))
+        .map(|&(c, d)| format!("[{},{},{},\"{}\"]", c[0], c[1], c[2], dir_name(d)))
         .collect();
 
     let mut items = Vec::new();
@@ -752,6 +754,15 @@ mod tests {
             assert!(json.contains(&format!("\"{field}\":")), "missing {field}");
         }
         assert!(json.contains("\"k\":\"door\""), "no entry/exit marker");
+    }
+
+    #[test]
+    fn white_faces_are_cell_and_direction_entries() {
+        // The pages read each entry as [x, y, z, "dir"].
+        let level = Level::from_puzzle(&crate::fixtures::worked_example());
+        let json = geometry_json(&level);
+        let (c, d) = level.portal_surfaces()[0];
+        assert!(json.contains(&format!("\"white\":[[{},{},{},\"{}\"]", c[0], c[1], c[2], dir_name(d))));
     }
 
     #[test]

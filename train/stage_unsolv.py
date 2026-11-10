@@ -57,8 +57,8 @@ def staged_titles():
 
 def pre_painted(wid):
     """True if the compiled map paints gel with @pre_paint_sprayer entities (or has no map)."""
-    path = BSPS / f"{wid}.bsp"
-    if not path.exists():
+    path = bsp.map_path(BSPS, wid)
+    if path is None:
         return True
     for ent in bsp.Bsp.open(path).entities():
         e = dict(ent)

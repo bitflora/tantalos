@@ -448,6 +448,55 @@ fn workshop_tricks_the_editor_allows() {
 }
 
 #[test]
+fn levels_the_game_refused_in_goblins_replays() {
+    // Level-net levels from Goblin's self-play buffer that Portal 2's editor marked invalid
+    // (out/school-play/e1-r00, 2026-11-01); each list is the game's INVALID ITEM log.
+    let flagged = |tokens: &str| -> Vec<(&'static str, [i32; 3])> {
+        let level = Level::from_puzzle(&glados::tokens::decode(tokens).unwrap());
+        glados::editor::editor_flags(&level).into_iter().map(|f| (f.name, f.pos)).collect()
+    };
+    // 00181: loose cubes on turrets, both flagged; the cubes beside them are fine.
+    let p = flagged(
+        "size 9 6 4 open 0 0 0 7 5 3 8 2 3 8 3 3 white +x 7 0 0 7 5 3 black -x black +y 6 5 0 \
+         6 5 0 8 1 3 8 5 3 black -y 1 0 0 1 5 0 8 2 3 8 5 3 white +z 0 0 3 6 5 3 white -z 0 0 0 \
+         8 5 2 entry 1 0 0 +y exit 6 5 0 -y glass 3 0 0 3 5 1 -x +z dropper 7 0 3 reflection \
+         button 7 5 0 cube > exit pedestal 0 5 0 inf > dropper 0 turret 4 1 0 0 turret 4 2 0 0 \
+         turret 4 3 0 0 cube 4 0 0 standard cube 4 1 0 companion cube 4 2 0 companion \
+         cube 4 3 0 companion cube 5 1 0 companion laser 0 1 0 +x center on catcher 7 2 0 -x center > exit",
+    );
+    let mut want: Vec<_> = (1..=3).flat_map(|y| [("cube", [4, y, 0]), ("turret", [4, y, 0])]).collect();
+    want.sort();
+    assert_eq!(p, want);
+    // 00174: the exit door's frame takes in the open cell over the wall beside it.
+    let p = flagged(
+        "size 10 8 7 open 1 0 0 8 7 2 1 2 3 8 4 6 1 5 3 8 7 3 9 4 4 9 4 4 2 5 4 8 7 6 1 0 5 8 7 6 \
+         0 4 6 8 5 6 white +x 8 1 0 8 7 6 8 0 2 9 3 6 black -x 9 0 0 9 0 1 1 5 0 8 7 1 1 6 5 8 6 5 \
+         0 4 6 8 5 6 white +y 4 7 0 9 7 6 1 7 2 9 7 6 1 4 4 8 7 6 white -y 1 0 0 5 7 6 6 0 2 9 3 6 \
+         white +z 1 0 2 9 7 2 white -z 1 0 0 5 4 4 6 1 0 8 7 6 4 5 0 9 7 6 5 1 5 9 3 6 \
+         entry 7 0 0 +y exit 1 6 5 +x dropper 8 3 6 sphere dropper 8 7 6 companion \
+         button 1 6 0 sphere > exit button 1 7 0 cube > exit pedestal 1 0 5 inf > dropper 0 \
+         pedestal 6 0 5 inf > dropper 1 pedestal 8 2 0 inf > dropper 1 \
+         plate 1 0 0 +z 1 7 5 +z plate 8 7 0 +z 8 0 5 +z",
+    );
+    assert_eq!(p, vec![("doorexit", [1, 6, 5])]);
+    // 00188: two flip panels on the floor sunk into the wall behind a rail's track.
+    let p = flagged(
+        "size 13 13 4 open 0 0 0 7 7 3 4 8 0 7 8 3 4 9 2 7 12 3 8 2 3 8 3 3 8 8 3 12 8 3 \
+         white +x 7 1 0 7 4 3 7 0 1 12 1 3 7 5 3 12 7 3 white -x 0 3 0 3 12 3 0 0 3 3 12 3 \
+         4 8 3 12 8 3 white +y 0 7 0 7 11 3 white -y 3 0 0 12 1 3 0 0 3 12 1 3 white -z 3 0 0 \
+         12 0 3 4 1 0 12 4 2 0 3 0 3 12 3 entry 1 0 0 +y exit 7 12 2 -y \
+         dropper 4 12 3 franken dropper 5 12 3 franken dropper 6 12 3 franken \
+         dropper 7 6 3 reflection dropper 7 7 3 sphere \
+         button 5 8 0 sphere > flip 0 > flip 1 > flip 2 > flip 3 button 5 10 2 weighted > exit \
+         button 5 12 2 cube > exit button 6 8 0 sphere > rail 0 \
+         laser 7 0 0 -x center on catcher 3 0 0 +y center > dropper 4 \
+         catcher 5 0 0 +y center > dropper 4 flip 4 9 2 +x flip 4 9 3 +x flip 5 9 2 +z \
+         flip 6 9 2 +z rail 7 8 1 4 8 1 osc",
+    );
+    assert_eq!(p, vec![("flipPanel", [5, 9, 2]), ("flipPanel", [6, 9, 2]), ("raillift", [7, 8, 1])]);
+}
+
+#[test]
 fn a_reflection_cube_can_aim_at_an_angle() {
     // Workshop 3660480385 "EZ": one cube in front of the emitter, turned so the beam crosses
     // both floor relays on its way to the catcher on the far wall; only an angled aim does it.

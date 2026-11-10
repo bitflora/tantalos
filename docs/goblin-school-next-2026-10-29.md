@@ -188,6 +188,38 @@ wrong, but after the duck fix it is better evidence than it was.
 Next: out/school-play/e1-r01-2755 (ws:132677917, staged but unplayed), 00048 on its own for the
 ceiling shot, and the 14 that never played — those are worth a look as converter bugs.
 
+The 14 that never played, looked at offline (2026-11-02). 12 the editor marked invalid, not 2:
+
+- 8 Workshop levels (00038, 00046, 00062, 00064, 00108, 00122, 00129, 00131): our own rules flag
+  every one of them too (fields overlapping or across a door, plate targets in the air, rails
+  sharing cells). The real maps passed the editor, so these are converter output, and the stager
+  should have left them out: `glados-p2c editor` on the staged p2c says so before the game does.
+- 4 level-net levels our rules let through, three gaps in src/editor.rs, now closed and each
+  scored against every stored in-game check (74,053 levels, runs/*/eval/ingame): a loose cube on
+  a turret (00143, 00181; 66 of 66 flags), a door with an open voxel in the wall it is sunk into
+  (00174; 476 of 476), an item sunk into the wall behind a rail's track (00188, flip panels on the
+  floor above it; 144 of 144). Together 516 more of the game's flags, and no flag the game didn't
+  give; door misses fell from 907 to 482. On 4,000 ws5 train levels they newly flag 1 (a rail),
+  on 4,000 data/v6 generated levels 29 (0.7%, nearly all doors). Since the grammar keeps items
+  clear of these rules, constrained decoding now avoids them too; levels labelled before keep
+  their old labels (not rescored).
+- 00196 (level net, 105 gel droppers) didn't build: very likely VBSP's entity limit (see the
+  "too many items" note), not a placement rule. 00170 (level net, 27x27x25, two funnels and a
+  laser) took the game down twice on load; only the game or its crash dumps can say why.
+
+00099 can't be settled offline. The plan sends the laser through a portal and up the x=15 column
+to the catcher, through 18 turrets in a row. src/lasers.rs assumes a beam destroys every turret in
+its cells at once and reaches the catcher; by hand the door opened only after a long delay, and
+not within the harness's 80 s.
+The user confirmed it (2026-11-02): a laser takes several seconds to destroy each turret. So the
+plan is right and the level solvable; only the time is missing. In the solver that matters only
+where a beam is on for a moment: steady beams wait in a settled state (their turrets go down in
+`settle_devices`), and timed dashes don't recompute beams at all. A funnel sweep's beam now stops
+at a turret still standing (src/solver.rs `beam_hits_with`; tests/playtested.rs, the sweep test
+with a turret in the swept beam's way). Left for the harness: play.py waits 10 s at a shut exit
+door, which can't cover 18 turrets; it would need the number of turrets a step's beams burn down
+(from `route`) and wait several seconds for each.
+
 Round e1/r01 (2026-10-31, from goblin-school-r00-b, `--no-prefix`): 391/4096 solved (142
 greedy, 249 by a sample), all beyond BFS; 31 liberal only; buffer 812 levels, 1,256 plans.
 Attempt 18,382 s. Polish hung 5 h on one 27x26x25 Workshop level (ws:132677917, ~50-step
@@ -280,3 +312,81 @@ lowest peak memory (349 MB) and 7 env asks, while the env replays that level's w
 prefix instantly and sampling finished it in 61 s — a machine stall, not the level. The
 deadline forces EOS between token steps, so it cannot preempt a single blocked forward pass.
 Excluding the level entirely leaves the verdict unchanged.
+
+### Replay harness, more play-tests (2026-11-02)
+
+Round 1's buffer staged as out/school-play/e1-r01 (111 levels to play; 3 played so far, the rest
+paused for the work below), and the portal loops that no round could replay before.
+
+**Portal loops now route and play.** Of the levels the stager left out, 56 (24 of round 0, 32 of
+round 1) were plans with a portal loop (`Action::Loop`), which `route.rs` didn't ground. Now:
+
+- `Act::Loop` in src/route.rs: walk onto the floor portal, out of the other one, back down into
+  it, out of the old one (or, with a refire, of the new face) at the speed of the fall, landing
+  where `flings::fly` says. A refire face must be seen at a fair angle (25 degrees) from where
+  the eye really is on the way down: just out of the wall portal, in the middle of its cell, a
+  cell further out. Fire steps before a loop prefer the faces it needs (`loop_faces`): a face
+  class can mix wall and floor faces, and the earlier shot had put the "floor" portal on a wall.
+  28 of the 56 route this way (tests/plan.rs `loops_route`).
+- The angle rule is from the game: all 4 mid-fall shots fired along the wall the player came out
+  of missed (00024, 00026 x2, 00027 of round 0). The 13 loops that route only with such a shot
+  are left out; that the solver allows them is a model question (below).
+- `act_loop` in train/play.py: the shot waits for the eye to see the face at a fair angle
+  (`loop_shot_ready`; out of a wall portal the player drifts off it at about 200, 50 units in a
+  quarter second), then fires. 00024's shot, which missed when fired at once, landed.
+- Out of a wall portal at walking pace the player still crosses about 200 a second and sails over
+  the floor portal (00117: 1.5 cells past it, never back in). `air_push` steers in the air toward
+  the speed that comes down on its middle: facing the way of the motion (the view after a portal
+  is whatever the portal made it, and a push on a stale heading went sideways), back and strafe
+  keys at speeds that make up 0.85 of the difference (`AIR_DECEL`: cl_backspeed 40 braked 102
+  in 0.53 s). Tuned on 00117's three loops: one push at full speed went nowhere, the whole
+  difference stopped 30 short of the hole, 0.6 sailed past it, 0.85 put two of three back in at
+  full speed (about 1,000 down) and the third came down on the rim and dropped in slowly.
+- Of the 28 that route, 7 were played before the user called time (out/school-play/check2-play,
+  check3-play, brake*-play, loops-final-play): 00080's refire loop and 00113's plain one play
+  clean, and 00117's last loop; the rest fail on the model questions below (00024: the 1,000
+  cap; 00065: a portal on a button) or land on the floor portal's rim (00115, 00117). The other
+  21 loop levels haven't been played: `play.py --plans out/school-play/loops2.jsonl --launch
+  --fast --out out/school-play/loops-final-play` resumes them (needs this branch's route.rs
+  built into target/release first).
+
+**Light bridges are invisible to the floor check.** VScript `TraceLine` goes straight through a
+bridge (measured on 00036 of round 1: fraction 1.0 over it, a player dropped on it rests 18.75
+over the floor, the bridge entity's box 64 wide and as long as the bridge). `ground_ahead`
+found no floor, `walk` waited 30 s and gave up: 13 of round 0's 92 replays hit that 30 s stall,
+6 of them in bridge levels. Now `glados_bridges` lists `projected_wall_entity` boxes and
+`bridge_rise` stands in where the trace finds nothing, so the player hops on. 00036 went from a
+30 s stall and a death to playing out of the exit (10 ok, 2 recovered). Deployed stairs are
+probably invisible the same way (00112 of round 0 waited 30 s mid-climb), so `act_climb` doesn't
+look for a floor; not yet seen in the game.
+
+**Smaller harness fixes.** A dropped sphere rolls a cell over (00035: 108 units off its cell):
+the cube check gives spheres 128 units of slack (`cube_slack`) and pickup looks 192 out on the
+same floor. A cube the route expects can be on its way (a dropper's next one after goo): the
+check waits up to 8 s (`CUBE_WAIT`) before calling it missing.
+
+**Model questions for the user (not changed):**
+
+- **A portal on a floor button's tile.** The solver lets portals go on the floor face under a
+  button; in the game the button is in the way. 00032 of round 1: four shots at (6,4,0), all
+  stopped by the button (screenshot in out/school-play/e1-r01/play/...00032); 00065 of round 0:
+  the player stood on the sphere button 26 up, over the portal, and never fell in. 165 of the
+  812 buffer levels have a plan that fires at a button's floor tile.
+- **Refire shots along the wall the player falls beside.** The solver checks the refire shot
+  from the region walked in from; in the game it is shot mid-fall beside the wall portal, and a
+  face on that same wall is edge-on (the 4 misses above). 13 of the 56 loop levels need one.
+- **Out of a portal at most 1,000.** Whatever the speed in (987 to 1,653 measured, 00024,
+  00080, 00117 of round 0), the player comes out of a portal at 1,000 a second (at 905 in, 906
+  out). src/flings.rs caps at 2,000 (`MAX_SPEED`), so every dive or loop from more than about
+  6.5 voxels flies further in the solver than in the game: 00024's loop falls 17, goes in at
+  1,650 and lands 1,000 out at the floor of the room, not up on the ledge the plan has.
+- **A bridge fired out from under the player.** 00036 of round 1, step 5: standing on the bridge
+  that comes out of the blue portal, the plan fires blue elsewhere; the bridge goes and the
+  player falls into the goo (both tries). The solver keeps them in region D, whose only floor is
+  that bridge.
+
+**Left for later.** 22 staged levels fail the route's start check: route.rs places dropper cubes
+unlike the solver (a dropper's cube caught by a funnel: the route drops it, the solver has it in
+a funnel region). 00095 of round 0: the route walks the player under deployed stairs (a stairs
+cell question). The round-1 batch: resume it with `play.py --plans
+out/school-play/e1-r01/plans.jsonl --launch --fast --out out/school-play/e1-r01/play`.

@@ -19,7 +19,8 @@ level needs 5+ moves and random play rarely solving it). They are ranked: solvab
 state changes and at most 1 trick first, then uncertain (too big for the solver, like most
 rated levels), then the other solvable ones; within that, more item families and wires first,
 and one level per item set. --game checks the picks in Portal 2's editor first (it launches the
-game, and never touches one that is running).
+game, and never touches one that is running). --constrained samples the models' levels with
+`glados-score grammar` (run.py passes it since 2026-11-01).
 
 Files, in <out> (default out/abtest/NAME; run.py uses runs/RUN/playtest):
 - key.json: which side each file is. Don't open it before playing.
@@ -62,7 +63,7 @@ def playable(r):
     return True
 
 
-def model_side(checkpoint, n, pool, temperature, glados, out, seed):
+def model_side(checkpoint, n, pool, temperature, glados, out, seed, constrained=False):
     import torch
     import sample
 
@@ -70,15 +71,17 @@ def model_side(checkpoint, n, pool, temperature, glados, out, seed):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, vocab, _ = sample.load_checkpoint(checkpoint, device)
     toks = rated.prompt(vocab)
-    print(f"{checkpoint}: sampling {pool} x {' '.join(toks)} at temperature {temperature}", flush=True)
-    lines = sample.generate(model, vocab, pool, toks, (), temperature, None, 32)
+    how = ", constrained" if constrained else ""
+    print(f"{checkpoint}: sampling {pool} x {' '.join(toks)} at temperature {temperature}{how}", flush=True)
+    lines = sample.generate(model, vocab, pool, toks, (), temperature, None, 32, constrained=constrained,
+                            glados=glados)
     del model
     torch.cuda.empty_cache()
     rows = rated.assess(lines, glados, p2c_dir=out / "p2c")
     good = sorted((r for r in rows if playable(r)), key=rank)
     print(f"  {len(good)} of {pool} playable; outcomes {dict(Counter(r['outcome'] for r in rows))}", flush=True)
     return good, {"source": str(checkpoint), "prompt": toks, "temperature": temperature, "pool": pool,
-                  "playable": len(good)}
+                  "constrained": constrained, "playable": len(good)}
 
 
 def workshop_side(n, glados, out, seed):
@@ -127,7 +130,7 @@ def pick(a):
         if src == "workshop":
             rows, info = workshop_side(a.n, a.glados, d, seed)
         else:
-            rows, info = model_side(src, a.n, a.pool, a.temperature, a.glados, d, seed)
+            rows, info = model_side(src, a.n, a.pool, a.temperature, a.glados, d, seed, a.constrained)
         chosen = diverse(rows, a.n * 3 if a.game else a.n, d)
         sides[label] = (chosen, info)
     game = "unchecked"
@@ -245,6 +248,8 @@ def main():
     p.add_argument("--pool", type=int, default=192, help="levels sampled per model")
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--game", action="store_true", help="check the picks in Portal 2's editor first")
+    p.add_argument("--constrained", action="store_true",
+                   help="models sample only tokens `glados-score grammar` allows (src/grammar.rs)")
     p.add_argument("--glados", default=str(sample.DEFAULT_GLADOS))
     p.add_argument("--out", default=None)
     p.add_argument("--dest", default=None, help="stage here instead of the Puzzle Maker folder (tests)")

@@ -63,6 +63,7 @@ FIELDS = [
     "ingame_checked",
     "game_valid_of_passed",
     "game_valid_of_solvable",
+    "decoding",
     "notes",
 ]
 GOBLIN_CSV = ROOT / "train" / "goblin-runs.csv"
@@ -270,6 +271,7 @@ def measure(run):
             row["eval_parsed"] = pct(v["parsed"])
             row["eval_solvable"] = pct(v["solvable"])
             row["eval_invalid"] = pct(v["verdicts"].get("invalid", 0) / v["n"])
+            row["decoding"] = "constrained" if e.get("constrained") else "free"
             if e.get("rated"):  # train/rated.py: per 1,000 samples, and points
                 row["rated_yield"] = f"{e['rated']['yield_per_1000']:.0f}"
                 row["rated_strong"] = f"{e['rated']['strong_per_1000']:.0f}"
