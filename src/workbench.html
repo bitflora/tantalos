@@ -1095,7 +1095,12 @@ function copyText(text) {
 
 // ---- 2.5D drawing (the same projection as `glados view`) -------------------
 const C = {
-  wall:"#4a515b", goo:"#1f6b52", white:"rgba(226,236,246,0.45)",
+  // Surfaces: portalable (white) panels light and warm, black panels dark and blue-grey, lit
+  // from above with the corners shaded; the near walls cut down to a low lip unless shown
+  // (train/preview.py draws the editor thumbnails the same way).
+  wall:[74,81,91], wallX:[64,71,80], wallWhite:[196,196,188], wallWhiteX:[172,172,165],
+  goo:"#1f6b52", gooEdge:"rgba(90,190,150,0.8)", white:"rgba(226,236,246,0.45)",
+  lip:0.3, lipTop:"rgba(210,214,220,0.6)", shadow:"rgba(0,0,0,0.32)",
   glass:"rgba(150,215,230,0.32)", grating:"rgba(182,196,206,0.32)",
   fizzler:"rgba(110,165,255,0.38)", laserfield:"rgba(255,105,215,0.32)",
   paint:{ bounce:"#2f6bff", speed:"#ff8c14", portal:"#e6e6e6", water:"#6ec8ff" },
@@ -1111,7 +1116,7 @@ const LEGEND = [
   ["door", ITEM.entry], ["exit", ITEM.exit], ["cube dropper", ITEM.cubedropper],
   ["button", ITEM.button], ["turret", ITEM.turret], ["laser", ITEM.laser],
   ["gel", C.paint.bounce], ["fizzler", "#7ab0ff"], ["laser field", "#ff6ad5"],
-  ["panel", ITEM.panel], ["white face", "#dfe7ef"],
+  ["panel", ITEM.panel], ["portalable", "rgb(196,196,188)"], ["black", "rgb(74,81,91)"],
 ];
 const AX = { "+x":[1,0], "-x":[-1,0], "+y":[0,1], "-y":[0,-1], "+z":[0,0], "-z":[0,0] };
 
@@ -1191,9 +1196,23 @@ function dot(x, y, z, r, fill, stroke) {
   c.fillStyle = fill; c.fill();
   if (stroke) { c.strokeStyle = stroke; c.lineWidth = 1.5; c.stroke(); }
 }
-function floorColour(z, sz) {
-  const v = 34 + Math.round(70 * (z / Math.max(1, sz - 1)));
-  return `rgb(${v},${v+5},${v+12})`;
+function floorColour(z, sz, white) {  // as [r, g, b]
+  const t = z / Math.max(1, sz - 1);
+  const [lo, hi] = white ? [[146,146,140], [234,232,222]] : [[34,39,46], [104,109,116]];
+  return lo.map((a, i) => Math.round(a + (hi[i] - a) * t));
+}
+const rgb = (c, f = 1) => `rgb(${c.map(v => Math.max(0, Math.min(255, Math.round(v * f)))).join(",")})`;
+function wallQuad(x, y, z, d, h) {  // a wall face cut h high
+  return faceQuad(x, y, z, d).map(([px, py, pz]) => [px, py, pz > z ? z + h : pz]);
+}
+function disc(x, y, z, r, fill, stroke) {  // a flat circle lying at height z
+  const pts = [];
+  for (let i = 0; i < 24; i++) { const a = i * Math.PI / 12; pts.push([x + r * Math.cos(a), y + r * Math.sin(a), z]); }
+  poly(pts, fill, stroke);
+}
+function groundUnder(x, y, z) {
+  while (z > 0 && !isSolid(x, y, z - 1)) z--;
+  return z;
 }
 function itemColour(it) {
   if (it.k === "door") return ITEM[it.t] || "#fff";
@@ -1257,39 +1276,51 @@ function buildBase() {
   const ops = [];
   const depthOf = (x, y, z) => { const [rx, ry] = rotXY(x, y); return rx + ry; };
 
+  const top = Math.max(1, sz - 1);
   for (let z = 0; z < sz; z++) for (let y = 0; y < sy; y++) for (let x = 0; x < sx; x++) {
     if (isSolid(x, y, z)) continue;
     const cx = x + 0.5, cy = y + 0.5;
     const dep = depthOf(cx, cy);
     const goo = gooSet.has(key(x, y, z));
-    if (goo || isSolid(x, y, z - 1)) {
-      const col = goo ? C.goo : floorColour(z, sz);
-      ops.push({ d:dep, r:0, f:() => poly(faceQuad(x, y, z, "-z"), col, "rgba(0,0,0,0.15)") });
+    const floored = goo || isSolid(x, y, z - 1);
+    const sides = ["+x","-x","+y","-y"].filter(d => isSolid(x + AX[d][0], y + AX[d][1], z));
+    if (goo) {
+      ops.push({ d:dep, r:0, f:() => poly(faceQuad(x, y, z, "-z"), C.goo, C.gooEdge) });
+    } else if (floored) {
+      // Corners and edges of the room collect less light (ambient occlusion).
+      const col = floorColour(z, sz, whiteSet.has(key(x, y, z) + ",-z")), f = 1 - 0.07 * sides.length;
+      ops.push({ d:dep, r:0, f:() => poly(faceQuad(x, y, z, "-z"), rgb(col, f), rgb(col, f * 0.82)) });
     }
-    for (const d of ["+x","-x","+y","-y"]) {
-      if (!isSolid(x + AX[d][0], y + AX[d][1], z)) continue;
-      if (!state.view.nearWalls && nearFace(d) > 0.01) continue;
-      ops.push({ d:dep, r:1, f:() => poly(faceQuad(x, y, z, d), C.wall, "rgba(0,0,0,0.25)") });
+    const lift = 0.88 + 0.24 * z / top;  // light from above: higher surfaces brighter
+    for (const d of sides) {
+      const white = whiteSet.has(key(x, y, z) + "," + d), across = AX[d][0] !== 0;
+      const base = white ? (across ? C.wallWhite : C.wallWhiteX) : (across ? C.wall : C.wallX);
+      if (!state.view.nearWalls && nearFace(d) > 0.01) {  // cut away, leaving a low lip at the floor
+        if (floored) ops.push({ d:dep + 0.5, r:5, f:() => {
+          const q = wallQuad(x, y, z, d, C.lip);
+          poly(q, rgb(base, 1.08), rgb(base, 0.75));
+          const [a, b] = [tf.toScreen(...q[2]), tf.toScreen(...q[3])], c = drawingCtx;
+          c.strokeStyle = C.lipTop; c.lineWidth = 1;
+          c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.stroke();
+        }});
+        continue;
+      }
+      const f = lift * (floored ? 0.9 : 1);
+      ops.push({ d:dep, r:1, f:() => poly(faceQuad(x, y, z, d), rgb(base, f), rgb(base, f * 0.8)) });
     }
     if (isSolid(x, y, z + 1) && whiteSet.has(key(x, y, z) + ",+z")) {
       ops.push({ d:dep, r:4, f:() => dot(cx, cy, z + 1, 4, C.white, "rgba(255,255,255,0.6)") });
     }
   }
-  for (const wf of state.geom.white) {
-    if (wf[3] === "+z" || wf[3] === "-z") continue;
-    const [x, y, z] = wf;
-    ops.push({ d:depthOf(x + 0.5, y + 0.5), r:2,
-      f:() => poly(faceQuad(x, y, z, wf[3]), C.white) });
-  }
   for (const b of state.geom.barriers) for (const f of b.faces) {
     const col = b.kind === "glass" ? C.glass : C.grating;
     ops.push({ d:depthOf(f[0] + 0.5, f[1] + 0.5), r:2,
-      f:() => poly(faceQuad(f[0], f[1], f[2], f[3]), col) });
+      f:() => poly(faceQuad(f[0], f[1], f[2], f[3]), col, col.replace(/[\d.]+\)$/, "0.6)")) });
   }
   for (const hz of state.geom.hazards) for (const f of hz.faces) {
     const col = hz.kind === "fizzler" ? C.fizzler : C.laserfield;
     ops.push({ d:depthOf(f[0] + 0.5, f[1] + 0.5), r:2,
-      f:() => poly(faceQuad(f[0], f[1], f[2], f[3]), col) });
+      f:() => poly(faceQuad(f[0], f[1], f[2], f[3]), col, col.replace(/[\d.]+\)$/, "0.6)")) });
   }
   for (const p of state.geom.paint) {
     const col = C.paint[p.kind] || "#888";
@@ -1303,9 +1334,27 @@ function buildBase() {
   const idxCell = {};
   for (const it of state.geom.items) {
     if (it.i != null) idxCell[it.i] = it.p;
-    const p = it.p, col = itemColour(it);
-    ops.push({ d:depthOf(p[0] + .5, p[1] + .5), r:3, f:() => {
-      dot(p[0] + .5, p[1] + .5, p[2] + .4, it.k === "turret" ? 7 : 5, col, "rgba(0,0,0,0.7)");
+    const p = it.p, col = itemColour(it), [x, y, z] = p;
+    if ((it.k === "button" || it.k === "plate") && (it.d || "+z") === "+z" && isSolid(x, y, z - 1)) {
+      ops.push({ d:depthOf(x + .5, y + .5), r:3, f:() => {  // lies on the floor: a disc
+        disc(x + .5, y + .5, z + .03, 0.36, col, "rgba(0,0,0,0.55)");
+        disc(x + .5, y + .5, z + .05, 0.2, "rgba(0,0,0,0.2)");
+      }});
+      continue;
+    }
+    const g = groundUnder(x, y, z);
+    ops.push({ d:depthOf(x + .5, y + .5), r:3, f:() => {
+      disc(x + .5, y + .5, g + .02, 0.3, C.shadow);
+      const c = drawingCtx, r = it.k === "turret" ? 7 : 5;
+      const [sx2, sy2] = tf.toScreen(x + .5, y + .5, z + .4);
+      if (z - g >= 1) {  // high up: a thin stalk down to its shadow shows how high
+        const [gx, gy] = tf.toScreen(x + .5, y + .5, g + .02);
+        c.strokeStyle = "rgba(0,0,0,0.35)"; c.lineWidth = 1;
+        c.beginPath(); c.moveTo(sx2, sy2); c.lineTo(gx, gy); c.stroke();
+      }
+      dot(x + .5, y + .5, z + .4, r, col, "rgba(0,0,0,0.7)");
+      c.beginPath(); c.arc(sx2 - r * .4, sy2 - r * .4, Math.max(1, r / 3), 0, 2 * Math.PI);
+      c.fillStyle = "rgba(255,255,255,0.45)"; c.fill();
     }});
   }
   for (const [a, b] of state.geom.links) {

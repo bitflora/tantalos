@@ -9,12 +9,13 @@ use glados::level::Level;
 use glados::metrics::{assess, Assessment};
 use glados::regions::RegionGraph;
 use glados::solver::{judge, Judged, Judgement, Problem, DEFAULT_MAX_STATES};
-use glados::{dataset, fixtures, portals, render, tokens};
+use glados::{dataset, fixtures, portals, render, tokens, view};
 
 const USAGE: &str = "usage:
   glados-p2c info <file.p2c>...     summary, region graph and ASCII map
   glados-p2c solve <file.p2c>...    solvable / unsolvable / uncertain, shortest plan, metrics
   glados-p2c tokens <file.p2c>...   the level as a token sequence (format: src/tokens.rs)
+  glados-p2c geometry <file.p2c>... the geometry the level views draw, one JSON line per file
   glados-p2c vocab                  every token the format uses, one per line
   glados-p2c editor <file.p2c|dir>...
                                     items the Puzzle Maker would mark invalid, one JSON line per file
@@ -28,6 +29,7 @@ fn main() -> ExitCode {
             Some("info") if args.len() > 1 => files().try_for_each(info),
             Some("solve") if args.len() > 1 => files().try_for_each(solve),
             Some("tokens") if args.len() > 1 => files().try_for_each(print_tokens),
+            Some("geometry") if args.len() > 1 => files().try_for_each(geometry),
             Some("vocab") => {
                 println!("{}", tokens::vocab().join("\n"));
                 Ok(())
@@ -42,6 +44,12 @@ fn main() -> ExitCode {
             _ => return None,
         })
     })
+}
+
+fn geometry(path: &Path) -> Result<()> {
+    let (_, puzzle) = load(path)?;
+    println!("{}", view::geometry_json(&Level::from_puzzle(&puzzle)));
+    Ok(())
 }
 
 fn info(path: &Path) -> Result<()> {
