@@ -86,7 +86,11 @@ past 32 in levels with over 32 panels) or is over 969 tokens (143). Since 2026-1
 `data/v5b/workshop-x20.jsonl`, outside it (name it with `--data` to train on it again). ws5 test is
 never augmented. Since 2026-11-06 it is built from `data/ws6/train.jsonl` (42,819 levels: 339k
 versions, 679k lines; 161 bunny-hop/glitch levels skipped); the ws5-based file is
-`data/v5b/workshop-ws5-aug-x2.jsonl`, and ws6 test is never augmented either.
+`data/v5b/workshop-ws5-aug-x2.jsonl`, and ws6 test is never augmented either. Since 2026-11-11
+it is built from `data/ws7/train.jsonl` (ws6 plus the 2012 download: 99,702 levels, 791k
+versions, 1.58M lines, about 65% of the default data; 283 bunny-hop/glitch levels skipped); the
+ws6-based file is `data/v5b/workshop-ws6-aug-x2.jsonl`. ws7 test (12,389 levels, holding every
+ws5 and ws6 test level) is never augmented.
 
 `--check` on 600 ws5 levels: 99.1% of versions got the original's verdict, plan length and
 editor flags at first; the rest showed the solver depending on orientation (bridge routes,

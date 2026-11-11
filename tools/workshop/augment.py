@@ -1,6 +1,6 @@
 """Workshop training levels as their 8 mirrored/turned versions, instead of 20 copies of each.
 
-    python tools/workshop/augment.py                 # data/ws6/train.jsonl -> data/v5b/levels-workshop-aug-x2.jsonl
+    python tools/workshop/augment.py                 # data/ws7/train.jsonl -> data/v5b/levels-workshop-aug-x2.jsonl
     python tools/workshop/augment.py --copies 3
 
 data/v5b/workshop-x20.jsonl (levels-workshop-x20.jsonl until 2026-10-26) repeats every ws5 train
@@ -27,6 +27,10 @@ Since 2026-11-06 the source is data/ws6/train.jsonl (the 2026-11-02 download: 42
 them in ws5's test set); the ws5-based file is data/v5b/workshop-ws5-aug-x2.jsonl, out of the
 default pattern. data/ws6/test.jsonl is held out too and never augmented.
 
+Since 2026-11-11 the source is data/ws7/train.jsonl (ws6 plus the 2012 download; none of its levels
+in ws5's or ws6's test sets); the ws6-based file is data/v5b/workshop-ws6-aug-x2.jsonl, out of the
+default pattern. data/ws7/test.jsonl (a superset of ws5's and ws6's) is never augmented.
+
 Levels listed in tools/workshop/excluded-tricks.jsonl (their Workshop text says they need bunny
 hopping or a glitch) are left out.
 """
@@ -46,13 +50,13 @@ EXCLUDED = ROOT / "tools" / "workshop" / "excluded-tricks.jsonl"
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--src", default=str(ROOT / "data" / "ws6" / "train.jsonl"))
+    ap.add_argument("--src", default=str(ROOT / "data" / "ws7" / "train.jsonl"))
     ap.add_argument("--copies", type=int, default=2, help="times each version is written")
     ap.add_argument("--out", default=None, help="default data/v5b/levels-workshop-aug-xN.jsonl")
     a = ap.parse_args()
     out = Path(a.out) if a.out else ROOT / "data" / "v5b" / f"levels-workshop-aug-x{a.copies}.jsonl"
     src = Path(a.src)
-    for held in ("ws5", "ws6"):
+    for held in ("ws5", "ws6", "ws7"):
         if src.resolve() == (ROOT / "data" / held / "test.jsonl").resolve():
             sys.exit(f"data/{held}/test.jsonl is a held-out set: don't train on its versions")
     records = [json.loads(l) for l in open(src, encoding="utf-8") if l.strip()]

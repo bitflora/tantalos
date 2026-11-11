@@ -79,7 +79,7 @@ for good and records it.
 
 - Defaults (data/v5b, learning rates, sizes) are already right: add no other options unless
   the user names them. The default data pattern is `data/v5b/levels-*.jsonl`. Its Workshop
-  file, `levels-workshop-aug-x2.jsonl`, is built from `data/ws6/train.jsonl`, with eight
+  file, `levels-workshop-aug-x2.jsonl`, is built from `data/ws7/train.jsonl`, with eight
   mirrored/turned versions repeated twice. Alternative Workshop files outside that pattern
   require an explicit user request; name all input files with `--data` when overriding it.
   Anything after `--` goes to train.py. Use `--no-ingame` only if the user says not to

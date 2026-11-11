@@ -48,8 +48,8 @@ Everything lands in runs/NAME: status.json (what it's doing now), run.log (each 
 train.log, evaluate.log, ingame.log, pick.log, eval/report.md.
 
 Settings: data/v5b (all levels-*.jsonl: generated, mutants, and the Workshop levels as their
-8 mirrored/turned versions x2 since 2026-10-26, levels-workshop-aug-x2.jsonl, from data/ws6 since
-2026-11-06 (the ws5 one is workshop-ws5-aug-x2.jsonl, outside the pattern); the old x20 copies
+8 mirrored/turned versions x2 since 2026-10-26, levels-workshop-aug-x2.jsonl, from data/ws7 since
+2026-11-11 (the ws5 and ws6 ones are workshop-ws5/ws6-aug-x2.jsonl, outside the pattern); the old x20 copies
 are workshop-x20.jsonl, outside the pattern) unless --data; block 1024, batch 16. A fresh run uses
 lr 1e-3 down to 1e-4; one continuing another (--from) uses 2e-4 down to 2e-5, as the warm runs
 in runs.csv did. Anything after `--` goes to train.py as is.
