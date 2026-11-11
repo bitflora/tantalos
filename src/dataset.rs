@@ -337,7 +337,7 @@ fn label_full(
         model = Model::new_angled(&level, Mode::Conservative).expect("same problems");
         space = model.explore_to_verdict(budget);
     }
-    let angled = model.beams.angled;
+    let angled = model.extended;
     let strict = match space.verdict() {
         Verdict::Solved(plan) => {
             if portals_only && space.solvable_without_portals() {

@@ -14,6 +14,12 @@
 //! - `Mode::Conservative` trusts a fling only if speeds 10% either side land in the same
 //!   region; `Mode::Liberal` takes every landing from 70% to 110% of the speed, with up to
 //!   0.3 voxel of air control sideways.
+//! - Floor portal to floor portal keeps horizontal speed (play-tested 2026-11-11, "Very easy
+//!   challenge", "Fall with cube"): jumping off a ledge into a floor portal at up to walking
+//!   speed, the player comes up out of an upward portal at the fall's speed plus that much
+//!   sideways, along an axis or at a 1:2 slope (the portals' turn is the player's choice). `carried`
+//!   gives these trials; conservative rules trust a direction and speed only if 10% of walking
+//!   speed either side, and the fall's speed 10% either side, all land the same way.
 
 use crate::geom::{step, Cell, Dir};
 use crate::level::Level;
@@ -168,5 +174,81 @@ pub fn landings(
             let v: [f64; 3] = std::array::from_fn(|a| e[a] * speed * f);
             fly(level, p, v)
         })
+        .collect()
+}
+
+/// Trials of an upward fling (out of a floor portal, `dir` = `NegZ`, not tilted) at `speed`
+/// carrying horizontal speed into the portal and out again, up to `carry` (voxels per second),
+/// in groups: conservative rules trust a group's landing only if all its trials agree, liberal
+/// rules take every landing. Empty for any other face.
+pub fn carried(
+    level: &Level,
+    cell: Cell,
+    dir: Dir,
+    speed: f64,
+    carry: f64,
+    liberal: bool,
+) -> Vec<Vec<Option<(Cell, u64)>>> {
+    if dir != Dir::NegZ || carry <= 0.0 {
+        return Vec::new();
+    }
+    let p0 = exit_point(cell, dir);
+    let dirs = carry_dirs();
+    let fly_at = |u: (f64, f64), h: f64, f: f64| {
+        fly(level, p0, [u.0 * h * carry, u.1 * h * carry, speed * f])
+    };
+    let mut out = Vec::new();
+    for u in dirs {
+        if liberal {
+            let mut group = Vec::new();
+            for h in [0.25, 0.5, 0.75, 1.0] {
+                for f in [0.7, 0.85, 1.0, 1.1] {
+                    group.push(fly_at(u, h, f));
+                }
+            }
+            out.push(group);
+        } else {
+            for h in [0.3, 0.5, 0.7, 0.9] {
+                let mut group = Vec::new();
+                for dh in [-0.1, 0.0, 0.1] {
+                    for f in [0.9, 1.0, 1.1] {
+                        group.push(fly_at(u, h + dh, f));
+                    }
+                }
+                out.push(group);
+            }
+        }
+    }
+    out
+}
+
+/// The ways a carried fling can go sideways (`carried`). Along the axes, and at 1:2 slopes
+/// rather than 45°: from a cell's middle those never pass exactly through a voxel corner, where
+/// `fly`'s x-before-y crossing would make the landing depend on which way the level is turned.
+pub fn carry_dirs() -> [(f64, f64); 12] {
+    let (a, b) = (2.0 / 5f64.sqrt(), 1.0 / 5f64.sqrt());
+    [
+        (1.0, 0.0),
+        (-1.0, 0.0),
+        (0.0, 1.0),
+        (0.0, -1.0),
+        (a, b),
+        (a, -b),
+        (-a, b),
+        (-a, -b),
+        (b, a),
+        (b, -a),
+        (-b, a),
+        (-b, -a),
+    ]
+}
+
+/// The middle trials of `carried`'s groups at the fall's own speed: sideways velocities
+/// (voxels per second), for replaying one (`route`).
+pub fn carry_aims(carry: f64, liberal: bool) -> Vec<[f64; 2]> {
+    let hs: &[f64] = if liberal { &[0.25, 0.5, 0.75, 1.0] } else { &[0.3, 0.5, 0.7, 0.9] };
+    carry_dirs()
+        .into_iter()
+        .flat_map(|u| hs.iter().map(move |h| [u.0 * h * carry, u.1 * h * carry]))
         .collect()
 }

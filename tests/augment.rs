@@ -257,9 +257,16 @@ fn bridge_routes_and_doors_dont_depend_on_orientation() {
         for s in Sym::ALL {
             let (q, _) = variant(&p, s).unwrap_or_else(|e| panic!("{what} {}: {e}", s.name()));
             let level = Level::from_puzzle(&q);
-            let j = judge(&level, BUDGET).unwrap_or_else(|e| panic!("{what} {}: {e:?}", s.name()));
-            let m = &j.conservative;
-            let mut got = format!("{} regions, {} classes", m.graph.regions.len(), m.portals.classes.len());
+            // The plain model and the extended one (`judge` picks either, by search order near
+            // the budget): both built the same in every orientation.
+            let m = Model::new(&level, Mode::Conservative).unwrap_or_else(|e| panic!("{what} {}: {e:?}", s.name()));
+            let x = Model::new_angled(&level, Mode::Conservative).unwrap();
+            let mut got = format!(
+                "{} regions, {} classes, extended {}",
+                m.graph.regions.len(),
+                m.portals.classes.len(),
+                x.portals.classes.len()
+            );
             if verdict {
                 got += &format!(", {}", outcome(&q));
                 let (_, plan) = label_with_plan(&q, BUDGET, 1, false);

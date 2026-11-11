@@ -188,6 +188,8 @@ pub enum Act {
         face: Face,
         exit: Face,
         landing: Cell,
+        /// Sideways speed carried through (units per second), if not straight out.
+        carry: Option<[f64; 2]>,
     },
     /// Step onto the floor portal on `face` (the walk's end), come out of `out` and fall
     /// back into it; with `refire`, fire that colour at its face on the way down (from the
@@ -199,6 +201,8 @@ pub enum Act {
         refire: Option<(Color, Face, [f64; 3])>,
         exit: Face,
         landing: Cell,
+        /// Sideways speed carried through (units per second), if not straight out.
+        carry: Option<[f64; 2]>,
     },
     /// Walk out through the exit door in `cell`, against its `normal`.
     Exit {
@@ -266,10 +270,16 @@ pub struct Attempt {
     pub after: Here,
 }
 
-/// Grounds the conservative plan of `level` (searching at most `budget` states).
+/// Grounds the conservative plan of `level` (searching at most `budget` states; with the
+/// extended model, `Model::new_angled`, if the plain one doesn't solve it).
 pub fn route(level: &Level, budget: usize) -> Result<Route, String> {
-    let model = Model::new(level, Mode::Conservative).map_err(|p| format!("{p:?}"))?;
-    let plan = match model.solve(budget).verdict {
+    let mut model = Model::new(level, Mode::Conservative).map_err(|p| format!("{p:?}"))?;
+    let mut verdict = model.solve(budget).verdict;
+    if !matches!(verdict, Verdict::Solved(_)) && model.could_angle() {
+        model = Model::new_angled(level, Mode::Conservative).map_err(|p| format!("{p:?}"))?;
+        verdict = model.solve(budget).verdict;
+    }
+    let plan = match verdict {
         Verdict::Solved(plan) => plan,
         Verdict::Unsolvable => return Err("not solvable under conservative rules".into()),
         Verdict::Unknown => return Err("the state budget ran out".into()),
@@ -488,20 +498,34 @@ impl<'a> Grounder<'a> {
         }
     }
 
-    /// Out of a portal on `out` at the speed of a fall of `height`, as the solver's nominal
-    /// trial has it: the face really flown out of, where it comes to rest and the fields on
-    /// the way.
-    fn fling(&self, out: Face, dev: u64, height: i32) -> Option<(Face, Cell, u64)> {
+    /// Out of a portal on `out` at the speed of a fall of `height`: the solver's nominal trial,
+    /// then (out of an upward portal) each middle trial of a carried fling
+    /// (`flings::carry_aims`): the face really flown out of, where it comes to rest, the fields
+    /// on the way and the sideways speed carried (units per second).
+    fn flings(&self, out: Face, dev: u64, height: i32) -> Vec<(Face, Cell, u64, Option<[f64; 2]>)> {
         let (exit, tilt) = match self.deployed_panel(out, dev) {
             Some((t, 90)) => (self.live_face(out, dev), Some((t, 0))),
             Some(t) => (out, Some(t)),
             None => (out, None),
         };
-        let e = flings::exit_vector(exit.1, tilt.filter(|t| t.1 != 0));
+        let tilt = tilt.filter(|t| t.1 != 0);
+        let e = flings::exit_vector(exit.1, tilt);
         let speed = flings::dive_speed(height);
+        let p = flings::exit_point(exit.0, exit.1);
+        let mut out = Vec::new();
         let v: [f64; 3] = std::array::from_fn(|a| e[a] * speed);
-        let (landing, hz) = flings::fly(self.level, flings::exit_point(exit.0, exit.1), v)?;
-        Some((exit, landing, hz))
+        if let Some((landing, hz)) = flings::fly(self.level, p, v) {
+            out.push((exit, landing, hz, None));
+        }
+        if tilt.is_none() && exit.1 == Dir::NegZ {
+            let carry = self.model.rules.walk_speed / 128.0;
+            for [x, y] in flings::carry_aims(carry, false) {
+                if let Some((landing, hz)) = flings::fly(self.level, p, [x, y, speed]) {
+                    out.push((exit, landing, hz, Some([x * 128.0, y * 128.0])));
+                }
+            }
+        }
+        out
     }
 
     /// What follows by itself after a step, as the solver's `settle` has it in `next`: portals
@@ -1255,11 +1279,13 @@ impl<'a> Grounder<'a> {
                 let other = [Color::Orange, Color::Blue][k];
                 let stops = model.shot_stops_in(s, None);
                 // Each way out: (refire, the face flown out of, landing, fields), best shot first.
-                let mut ways: Vec<(f64, Option<(Color, Face, [f64; 3])>, Face, Cell, u64)> = Vec::new();
+                type Way = (f64, Option<(Color, Face, [f64; 3])>, Face, Cell, u64, Option<[f64; 2]>);
+                let mut ways: Vec<Way> = Vec::new();
                 match refire {
                     None => {
-                        let (exit, landing, hz) = self.fling(out, dev, height)?;
-                        ways.push((0.0, None, exit, landing, hz));
+                        for (exit, landing, hz, carry) in self.flings(out, dev, height) {
+                            ways.push((0.0, None, exit, landing, hz, carry));
+                        }
                     }
                     Some(c) => {
                         for &f in &model.portals.classes[c].faces {
@@ -1280,10 +1306,9 @@ impl<'a> Grounder<'a> {
                                 .then_some((eye, d2 / cos.powi(2)))
                             });
                             let Some((eye, score)) = seen else { continue };
-                            let Some((exit, landing, hz)) = self.fling(f, dev, height) else {
-                                continue;
-                            };
-                            ways.push((score, Some((other, f, eye)), exit, landing, hz));
+                            for (exit, landing, hz, carry) in self.flings(f, dev, height) {
+                                ways.push((score, Some((other, f, eye)), exit, landing, hz, carry));
+                            }
                         }
                         ways.sort_by(|a, b| a.0.total_cmp(&b.0));
                     }
@@ -1292,7 +1317,7 @@ impl<'a> Grounder<'a> {
                     if c != face.0 {
                         return None;
                     }
-                    ways.iter().find_map(|&(_, re, exit, landing, hz)| {
+                    ways.iter().find_map(|&(_, re, exit, landing, hz, carry)| {
                         if self.region(landing) != Some(to) {
                             return None;
                         }
@@ -1310,6 +1335,7 @@ impl<'a> Grounder<'a> {
                             refire: re,
                             exit,
                             landing,
+                            carry,
                         };
                         self.fits(after, next).map(|after| (act, after))
                     })
@@ -1324,10 +1350,10 @@ impl<'a> Grounder<'a> {
             Action::Dive { color, height, to } => {
                 let k = color as usize;
                 let (face, out) = (h.portals[k]?, h.portals[1 - k]?);
-                let (exit, landing, hz) = self.fling(out, dev, height)?;
-                if self.region(landing) != Some(to) {
-                    return None;
-                }
+                let (exit, landing, hz, carry) = self
+                    .flings(out, dev, height)
+                    .into_iter()
+                    .find(|&(_, l, _, _)| self.region(l) == Some(to))?;
                 self.find(h, s, |c| {
                     Dir::HORIZONTAL.into_iter().find_map(|d| {
                         let mut cur = c;
@@ -1356,6 +1382,7 @@ impl<'a> Grounder<'a> {
                                 face,
                                 exit,
                                 landing,
+                                carry,
                             };
                             return self.fits(after, next).map(|after| (act, after));
                         }
@@ -2082,13 +2109,15 @@ fn act_json(act: &Act) -> String {
             face,
             exit,
             landing,
+            carry,
         } => format!(
-            "\"action\":\"dive\",\"edge\":{},\"dir\":\"{}\",\"out\":{out},\"face\":{},\"exit\":{},\"landing\":{}",
+            "\"action\":\"dive\",\"edge\":{},\"dir\":\"{}\",\"out\":{out},\"face\":{},\"exit\":{},\"landing\":{}{}",
             cell_json(*edge),
             dir_name(*dir),
             face_json(*face),
             face_json(*exit),
-            cell_json(*landing)
+            cell_json(*landing),
+            carry_json(*carry)
         ),
         Act::Loop {
             face,
@@ -2096,8 +2125,9 @@ fn act_json(act: &Act) -> String {
             refire,
             exit,
             landing,
+            carry,
         } => format!(
-            "\"action\":\"loop\",\"face\":{},\"out\":{},{}\"exit\":{},\"landing\":{}",
+            "\"action\":\"loop\",\"face\":{},\"out\":{},{}\"exit\":{},\"landing\":{}{}",
             face_json(*face),
             face_json(*out),
             refire.map_or(String::new(), |(c, f, eye)| format!(
@@ -2107,7 +2137,8 @@ fn act_json(act: &Act) -> String {
                 point_json(eye)
             )),
             face_json(*exit),
-            cell_json(*landing)
+            cell_json(*landing),
+            carry_json(*carry)
         ),
         Act::Exit { cell, normal } => format!(
             "\"action\":\"exit\",\"cell\":{},\"normal\":\"{}\"",
@@ -2209,4 +2240,10 @@ impl Route {
         }
         out
     }
+}
+
+/// `,"carry":[x,y]` (units per second) for a carried fling, else nothing. The play harness
+/// doesn't fly these yet.
+fn carry_json(carry: Option<[f64; 2]>) -> String {
+    carry.map_or(String::new(), |[x, y]| format!(",\"carry\":[{x:.0},{y:.0}]"))
 }

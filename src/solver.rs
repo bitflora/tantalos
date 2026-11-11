@@ -565,6 +565,11 @@ pub struct Model {
     /// the level or a floor button with no cube it accepts (the player standing on it can't
     /// also be at the exit). Every search says unsolvable at once. Holds why.
     pub exit_dead: Option<String>,
+    /// The bigger model `new_angled` builds for levels the plain one doesn't solve: angled
+    /// laser spots (with a reflection cube) and carried flings (`flings::carried`).
+    pub extended: bool,
+    /// The level has a drop into a floor portal, so carried flings could help.
+    could_carry: bool,
     /// Per region: where a cube dropped off each of its ledges lands.
     tosses: Vec<Vec<Landings>>,
     walk: WalkGraph,
@@ -842,8 +847,8 @@ pub struct Judged {
     pub liberal: Model,
 }
 
-/// Solves `level` in both modes, with angled laser spots if the plain model doesn't solve it
-/// (as `dataset::label` does).
+/// Solves `level` in both modes, with the extended model (angled laser spots, carried flings)
+/// if the plain one doesn't solve it (as `dataset::label` does).
 pub fn judge(level: &Level, budget: usize) -> Result<Judged, Vec<Problem>> {
     let mut conservative = Model::new(level, Mode::Conservative)?;
     let mut verdict = conservative.solve(budget).verdict;
@@ -851,7 +856,7 @@ pub fn judge(level: &Level, budget: usize) -> Result<Judged, Vec<Problem>> {
         conservative = Model::new_angled(level, Mode::Conservative)?;
         verdict = conservative.solve(budget).verdict;
     }
-    let liberal = if conservative.beams.angled {
+    let liberal = if conservative.extended {
         Model::new_angled(level, Mode::Liberal)?
     } else {
         Model::new(level, Mode::Liberal)?
@@ -876,16 +881,17 @@ impl Model {
         Model::build(level, mode, false)
     }
 
-    /// `new`, with angled spots for reflection cubes (`lasers`): a bigger search, for levels
-    /// the plain model doesn't solve.
+    /// `new`, extended with angled spots for reflection cubes (`lasers`) and horizontal speed
+    /// carried through floor portals (`flings::carried`): a bigger search, for levels the plain
+    /// model doesn't solve.
     pub fn new_angled(level: &Level, mode: Mode) -> Result<Model, Vec<Problem>> {
         Model::build(level, mode, true)
     }
 
-    /// Whether `new_angled` would differ: the level has a reflection cube and an emitter, and
-    /// this model has no angled spots.
+    /// Whether `new_angled` would differ: this is the plain model, and the level has a
+    /// reflection cube and an emitter, or a drop into a floor portal.
     pub fn could_angle(&self) -> bool {
-        self.beams.could_angle && !self.beams.angled
+        !self.extended && (self.beams.could_angle || self.could_carry)
     }
 
     fn build(level: &Level, mode: Mode, angled: bool) -> Result<Model, Vec<Problem>> {
@@ -1041,7 +1047,7 @@ impl Model {
             .of_kind(&ItemKind::Cube)
             .filter(|c| c.cube_kind() == CubeKind::Reflection)
             .count();
-        let beams = Beams::build(level, reflectors, angled);
+        let beams = Beams::build(level, reflectors, angled && reflectors > 0);
 
         // Switches: one per device bit that follows a wire, and per laser emitter.
         let mut switches: Vec<Switch> = Vec::new();
@@ -1619,6 +1625,7 @@ impl Model {
         fling_heights.extend(level.portal_surfaces().into_iter().flat_map(|w| loop_falls(level, w).into_iter().map(|(_, h)| h)));
         fling_heights.sort();
         fling_heights.dedup();
+        let could_carry = !fling_heights.is_empty();
         let mut flips = Vec::new();
         let mut panel_faces = HashMap::new();
         for (i, pn) in level.panels.iter().enumerate() {
@@ -1663,6 +1670,8 @@ impl Model {
             dives,
             fling_heights,
             liberal: mode == Mode::Liberal,
+            // Only in the retry model: carried flings make the search much bigger.
+            carry: if angled { rules.walk_speed / VOXEL } else { 0.0 },
         };
 
         // Moves off painted floors.
@@ -2053,6 +2062,8 @@ impl Model {
             hazard_enabled: vec![true; hazards.len()],
             exit_inverted,
             exit_dead,
+            extended: angled,
+            could_carry,
             exit_cell: exit_door.cell,
             graph,
             portals,

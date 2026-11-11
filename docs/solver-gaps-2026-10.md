@@ -600,3 +600,57 @@ Tests: `tests/augment.rs` (`bridge_routes_and_doors_dont_depend_on_orientation`,
 
 Every fix changes labels: re-run `fetch.py build` scoring, rebuild `data/ws*`, and treat EVAL
 as not comparable across it, as with the editor-rule rounds.
+
+## ws7 triage and movement play-tests (2026-11-11)
+
+The October relaxation triage (`relax.py`, `relax2.py`) re-run on data/ws7 train (seed 42, 100
+unsolvable and 100 uncertain levels, 50k, editor rules off, the solver of 749ff06). ws7 is 22.1%
+solvable (train), 48.3% uncertain, 29.5% unsolvable. Levels made solvable by **one** relaxation
+alone:
+
+| alone | unsolvable sample | uncertain sample |
+|---|---:|---:|
+| all surfaces white | 35 | 5 |
+| exit open | 18 | 14 |
+| turrets removed | 1 | 13 |
+| several together | 19 | 34 |
+| none of them | 24 | 34 |
+| solvable as stored (stale label) | 3 | 1 |
+
+Exit inputs on the unsolvable sample: buttons 13, lasers 7, pedestals 4. The movement group is
+larger than in ws5 (31 → 35+). Scratch outputs were in the session scratchpad, not kept.
+
+Five of the smallest white-only levels were staged as `tantalos-ws7-unsolv-00001..05`
+(`out/unsolv-ws7-2026-11-11/`). What the play-tester found:
+
+- **165749473 "Very easy challenge"** (no items): portal onto the pillar, then a floor portal by
+  the pillar and one on the floor beside the exit walkway (two voxels up, one cell over). Jump
+  off the pillar into the first; the momentum out of the second carries you onto the walkway.
+- **144541858 "Fall with cube"**: the start pillar is the tallest; jumping off it into a floor
+  portal sends you out of a floor portal by each lower pillar high and far enough to land on
+  it, once per pillar. "Jumping off the highest pillar gives just enough momentum."
+- **Fixed** for both: a floor portal to a floor portal keeps horizontal speed, so out of an
+  upward portal the player also moves sideways at up to walking speed (140 u/s conservative,
+  190 liberal), in 12 directions: the axes and 1:2 slopes, since 45° paths from a cell's middle cross voxel corners exactly and made landings depend on orientation (`flings::carried`, used for every untilted floor face in
+  `portals::behavior`; conservative trusts a direction and speed when ±10% of walking speed and
+  ±10% of the fall's speed land the same way). Both conservative-solvable (3 and 20 actions).
+  Routed: `route.rs` tries the straight-up fling, then each middle trial, and writes the
+  sideways speed as `"carry":[x,y]` (u/s) on the dive or loop leg; `train/play.py` doesn't fly
+  it yet. Test: `tests/playtested.rs` `horizontal_speed_carried_floor_to_floor`.
+- **Only as a retry.** Always on, carried flings cost a lot (400 ws7 train levels: 150
+  unsolvable, 150 uncertain, 100 solvable; 50k): +6 of the 300 unsolved, but 4 of the 100
+  solvable went uncertain (bigger search; all 4 solve at 250k), and scoring took 74 s against
+  35 s. So they are part of the extended model (`Model::new_angled`, with angled laser spots),
+  which every caller already builds only when the plain model doesn't solve a level;
+  `could_angle` now also says yes for a level with a drop into a floor portal, `Model::extended`
+  marks the extended model, and `route::route` retries with it too. Same sample: +6, none lost,
+  61 s; 10 levels go unsolvable → uncertain (the plain model's "unsolvable" no longer counts as
+  proof and the retry runs out). Tried and dropped: 4 axis directions × 2 speeds always on
+  (40 s, +3/−2) and carried flings for liberal rules only (+0; the liberal search runs out).
+- **72277120 "Aerial Practice"**, **88050718 "MIRON MUNALUTKU"**: not solved by the tester; zero
+  stars, possibly unsolvable (Aerial Practice's faith plate may also have lost its fling in
+  conversion). Not modelled.
+- **94797527 "cube tricks"**: likely cube stacking to jump off; zero stars. Not worth modelling.
+
+Lesson (the user's): pick gap work from **highly rated** levels; zero-star ones are often
+unsolvable or tricks. Use `stage_unsolv.py --order rating` or sort samples by stars.

@@ -258,3 +258,37 @@ fn conversion_gel_sent_on_through_painted_walls() {
     let model = Model::new(&level(&off), Mode::Liberal).unwrap();
     assert_eq!(model.solve(BUDGET).verdict, Verdict::Unsolvable);
 }
+
+/// 165749473 "Very easy challenge": the exit walkway is two voxels up, one cell beside the
+/// floor. Jump off the pillar into a floor portal by it; out of a floor portal beside the
+/// walkway, the horizontal speed carried through takes the player onto it.
+const VERY_EASY_CHALLENGE: &str = "size 9 10 4 open 0 0 0 5 5 3 7 0 0 7 9 3 6 1 0 7 4 3 5 6 0 5 9 3 6 5 2 7 9 3 2 6 2 2 6 2 6 0 3 7 9 3 8 2 3 8 3 3 white +x 5 0 0 5 4 3 white -y 6 1 0 8 4 2 6 0 3 6 9 3 white -z 6 1 0 6 1 3 6 4 0 6 9 1 6 0 3 8 1 3 entry 1 0 0 +y exit 6 9 2 -y";
+
+/// 144541858 "Fall with cube": jumping off the tallest pillar into a floor portal, the player
+/// comes up out of one by each lower pillar fast enough, and with enough sideways speed, to
+/// land on top; the cube is fetched from one pillar and carried to the button on another.
+const FALL_WITH_CUBE: &str = "size 14 14 16 open 3 0 0 10 12 15 0 3 0 13 9 15 0 0 6 10 12 15 11 10 6 13 12 15 11 0 12 13 12 15 6 13 15 7 13 15 white +z 10 0 15 13 2 15 11 3 15 13 3 15 black -z 6 3 0 7 8 15 5 4 0 8 7 15 4 5 0 9 6 15 0 0 6 13 13 15 entry 13 0 12 +y exit 0 12 6 -y dropper 12 11 15 standard button 1 1 6 weighted > exit pedestal 13 2 12 3 > dropper 0";
+
+#[test]
+fn horizontal_speed_carried_floor_to_floor() {
+    for tokens in [VERY_EASY_CHALLENGE, FALL_WITH_CUBE] {
+        // Not by the plain model: carried flings are only in the extended one.
+        let l = level(tokens);
+        let plain = Model::new(&l, Mode::Conservative).unwrap();
+        assert!(!matches!(plain.solve(BUDGET).verdict, Verdict::Solved(_)));
+        assert!(plain.could_angle());
+        let model = Model::new_angled(&l, Mode::Conservative).unwrap();
+        let Verdict::Solved(plan) = model.solve(BUDGET).verdict else {
+            panic!("not solved:
+{tokens}");
+        };
+        let r = route(&l, BUDGET).unwrap();
+        let text = encode(&r);
+        let c = check(&model, &decode(&text).unwrap());
+        assert!(c.solved, "{text}: {:?}", c.problem);
+        assert!(
+            plan.iter().any(|a| matches!(a, Action::Dive { .. } | Action::Loop { .. })),
+            "{plan:?}"
+        );
+    }
+}

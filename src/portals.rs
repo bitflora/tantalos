@@ -245,6 +245,9 @@ pub struct Extras {
     pub fling_heights: Vec<i32>,
     /// Liberal fling landings (`flings::trials`).
     pub liberal: bool,
+    /// Horizontal speed a diver can carry into a floor portal and out of an upward one
+    /// (`flings::carried`), voxels per second: the mode's walking speed.
+    pub carry: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -286,20 +289,29 @@ fn behavior(
             let speed = flings::dive_speed(h);
             let trials = flings::landings(level, c, d, e, speed, extras.liberal);
             let mut out: Landings = Vec::new();
-            let regions: Vec<Option<Landing>> = trials
-                .iter()
-                .map(|t| t.and_then(|(cell, hz)| Landing::at(level, graph, cell, hz)))
-                .collect();
-            if extras.liberal {
-                for l in regions.into_iter().flatten() {
-                    if !out.iter().any(|&(_, o)| o == l) {
-                        out.push((Cond::ALWAYS, l));
+            // Groups of trials; conservative rules want a whole group to land the same way.
+            let mut groups = vec![trials];
+            if tilt.is_none() {
+                groups.extend(flings::carried(level, c, d, speed, extras.carry, extras.liberal));
+            }
+            for group in groups {
+                let regions: Vec<Option<Landing>> = group
+                    .iter()
+                    .map(|t| t.and_then(|(cell, hz)| Landing::at(level, graph, cell, hz)))
+                    .collect();
+                if extras.liberal {
+                    for l in regions.into_iter().flatten() {
+                        if !out.iter().any(|&(_, o)| o == l) {
+                            out.push((Cond::ALWAYS, l));
+                        }
                     }
-                }
-            } else if let Some(&Some(first)) = regions.first() {
-                // Conservative: every trial lands the same way.
-                if regions.iter().all(|r| r.is_some_and(|l| l.region == first.region)) {
-                    out.push((Cond::ALWAYS, first));
+                } else if let Some(&Some(first)) = regions.first() {
+                    // Conservative: every trial lands the same way.
+                    if regions.iter().all(|r| r.is_some_and(|l| l.region == first.region))
+                        && !out.iter().any(|&(_, o)| o == first)
+                    {
+                        out.push((Cond::ALWAYS, first));
+                    }
                 }
             }
             // Landing where walking in lands adds nothing a drop and a walk-in can't do.
