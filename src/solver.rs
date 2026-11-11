@@ -3004,13 +3004,18 @@ impl Model {
     /// portal falls through, and pouring droppers paint where their streams land.
     fn settle(&self, lay: &Layout, s: &mut [u32]) {
         if self.dynamic {
+            let redrop = |s: &[u32]| lay.redrop.map_or(0, |r| s[r]);
+            let mut settled = false;
             for _ in 0..4 {
-                let redrop = |s: &[u32]| lay.redrop.map_or(0, |r| s[r]);
                 let before = (s[1], s[2], s[LIT], dev_of(s), redrop(s));
                 self.settle_devices(lay, s);
                 if before == (s[1], s[2], s[LIT], dev_of(s), redrop(s)) {
+                    settled = true;
                     break;
                 }
+            }
+            if !settled {
+                self.settle_slowly(lay, s);
             }
         }
         if let (Some(a), Some(b)) = (portal(s, 0), portal(s, 1)) {
@@ -3032,6 +3037,32 @@ impl Model {
                 },
             };
             lay.paint_masks(s, masks, self.gels[g].kind);
+        }
+    }
+
+    /// `settle`'s device rounds, for a state the first few rounds didn't settle: on until
+    /// nothing changes, or the rounds come back to a state seen before. That is a ring of
+    /// lasers and receivers that keeps switching itself (a catcher turning off the laser that
+    /// lights it, through a chain of others): in the game it flickers. The solver takes one
+    /// phase of the cycle, the same whichever phase it started from, so that a settled state
+    /// stays settled (the search skips settling after quiet actions, and `successors`, which
+    /// replays plans, does not): the smallest. Which phase the player meets is a guess either
+    /// way; with this one, `settle` gives the same state again when it starts from its own
+    /// result.
+    fn settle_slowly(&self, lay: &Layout, s: &mut [u32]) {
+        const MAX_ROUNDS: usize = 256;
+        let mut seen: Vec<Vec<u32>> = Vec::new();
+        for _ in 0..MAX_ROUNDS {
+            if let Some(i) = seen.iter().position(|t| t[..] == s[..]) {
+                let pick = seen[i..].iter().min().expect("a cycle has a state");
+                s.copy_from_slice(pick);
+                return;
+            }
+            seen.push(s.to_vec());
+            self.settle_devices(lay, s);
+            if seen.last().is_some_and(|t| t[..] == s[..]) {
+                return;
+            }
         }
     }
 

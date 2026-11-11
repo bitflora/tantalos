@@ -18,6 +18,8 @@ const USAGE: &str = "usage:
                                 --p2c-all every one that parsed. --editor-rules off: don't
                                 call levels invalid for our model of the editor's rules
                                 (for levels the game's editor accepted, e.g. the Workshop).
+                                A level the solver panics on gets verdict \"error\"
+                                (\"problem\" says why) and the rest are still scored.
                                 --plan: add each solvable level's plan as plan tokens
                                 (\"plan\", src/plan.rs), or why it has none (\"plan_error\").
                                 --plan-only: just the plan and min_len, for levels already
@@ -268,10 +270,32 @@ fn run_score(args: &[String]) -> Result<()> {
                             None,
                         ));
                     }
-                    let (label, plan) = if with_plan {
-                        dataset::label_with_plan(&p, budget, i as u64, editor_rules)
-                    } else {
-                        (dataset::label_with(&p, budget, i as u64, editor_rules), None)
+                    // A level that panics the solver gets an "error" verdict (the panic is on
+                    // stderr) instead of taking every other level of the batch down with it.
+                    let scored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if with_plan {
+                            dataset::label_with_plan(&p, budget, i as u64, editor_rules)
+                        } else {
+                            (dataset::label_with(&p, budget, i as u64, editor_rules), None)
+                        }
+                    }));
+                    let (label, plan) = match scored {
+                        Ok(scored) => scored,
+                        Err(panic) => {
+                            let why = panic
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| panic.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "panicked".to_string());
+                            return Ok((
+                                i,
+                                format!(
+                                    "{{\"line\":{i},\"n_tokens\":{n},\"canonical\":{canonical},{tokens}\"verdict\":\"error\",\"problem\":{}}}",
+                                    dataset::json_str(&format!("solver panicked: {why}"))
+                                ),
+                                None,
+                            ));
+                        }
                     };
                     let plan = match plan {
                         Some(Ok(t)) => format!(",\"plan\":{}", dataset::json_str(&t)),
