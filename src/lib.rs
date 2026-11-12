@@ -46,3 +46,6 @@ pub mod tokens;
 pub mod turrets;
 pub mod view;
 pub mod workbench;
+pub mod witness;
+pub mod interactions;
+pub mod structural;
