@@ -245,3 +245,14 @@ run `abtest.py score`, report, commit `train/playtests.jsonl`.
   work in progress), copied to `data/v6/workshop-aug-x2.jsonl`.
 - data/v6: 285,730 Workshop + 78,900 generated = 364,630 lines, Workshop **78.4%**. The dry run
   lists exactly the two v6 files and `--holdout ...data\ws5\test.jsonl`.
+
+### Task 6 — not started from this session (2026-11-13)
+
+- The question ("data/v6 is ready. Start a fresh 10-hour run on it now?") was asked at the end of
+  the 2026-10-25 session but never answered: the server restarted and the question was dismissed.
+  No run was started.
+- The run has since been made by later work: `runs/v6-fresh-12h` (2026-10-26, fresh 12h on
+  data/v6, yield 127), followed by `v6-cont-8h`, `v6-ws6-12h` and `v7-fresh-16h`. So this task's
+  intent is met; a fresh 10-hour run now would duplicate it and use stale data (data/v6 has grown
+  to 364,630 lines since, and the Workshop corpus has moved on to ws6/ws7).
+- Task 7's verdicts were likewise recorded by later work (`train/playtests.jsonl`, commit 4f8e6b6).
