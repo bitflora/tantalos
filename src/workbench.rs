@@ -654,7 +654,115 @@ fn load_generated_levels(g: &Generated) -> Result<Vec<Record>, String> {
             }
         }
     }
-    Ok(merged.into_values().collect())
+    let mut records: Vec<Record> = merged.into_values().collect();
+    ab_rank(&mut records);
+    Ok(records)
+}
+
+/// train/rated.py's FAMILIES: item family -> the token words that put one in the level.
+const AB_FAMILIES: &[(&str, &[&str])] = &[
+    ("cubes+buttons", &["dropper", "button", "cube"]),
+    ("pedestal", &["pedestal"]),
+    ("fields", &["fizzler", "laserfield"]),
+    ("lasers", &["laser", "catcher", "relay"]),
+    ("bridge", &["bridge"]),
+    ("funnel", &["funnel"]),
+    ("plate", &["plate"]),
+    ("gel", &["gel"]),
+    ("angled panel", &["panel", "glasspanel"]),
+    ("flip", &["flip"]),
+    ("moving", &["piston", "rail", "stairs"]),
+    ("turret", &["turret"]),
+    ("glass/grating", &["glass", "grating"]),
+    ("goo", &["goo"]),
+];
+
+/// rated.describe: (item families, wires, item words) of a token line. An item word counts
+/// when a number follows it and it isn't a wire target (`> panel 2`).
+fn ab_describe(tokens: &str) -> (Vec<&'static str>, usize, Vec<String>) {
+    let level: Vec<&str> = tokens.split_whitespace().collect();
+    let is_item = |w: &str| {
+        w == "entry" || w == "exit" || AB_FAMILIES.iter().any(|(_, ws)| w != "goo" && ws.contains(&w))
+    };
+    let mut words = Vec::new();
+    for (i, t) in level.iter().enumerate() {
+        let number_next = level
+            .get(i + 1)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        if is_item(t) && number_next && (i == 0 || level[i - 1] != ">") {
+            words.push(t.to_string());
+        }
+    }
+    let has_goo = level.contains(&"goo");
+    let families = AB_FAMILIES
+        .iter()
+        .filter(|(f, ws)| ws.iter().any(|w| words.iter().any(|x| x == w)) || (*f == "goo" && has_goo))
+        .map(|(f, _)| *f)
+        .collect();
+    let wires = level.iter().filter(|t| **t == ">").count();
+    (families, wires, words)
+}
+
+/// The play-test picks of train/abtest.py, on the rated-style samples (the ones with an
+/// `outcome`; the plain eval samples have no novelty check, so they never qualify):
+/// - `ab_playable`: valid, novel, not solver-unsolvable, and if solvable then 5+ moves and
+///   random play solving it under 10% of the time; not rejected by the Portal 2 editor check.
+/// - `ab_tier`: 0 strong (solvable, 2+ state changes, at most 1 trick), 1 uncertain, 2 other solvable.
+/// - `ab_rank`: 1-based order of the playable levels: tier, then more item families + wires/2.
+/// - `ab_pick`: the first level of its item set in that order (abtest picks one per item set;
+///   the set here counts each item word, close to abtest's preview.summary).
+fn ab_rank(records: &mut [Record]) {
+    let unquote = |v: &str| v.trim().trim_matches('"').to_string();
+    let num = |v: Option<&String>| v.and_then(|v| v.trim().parse::<f64>().ok());
+    let mut ranked: Vec<(usize, u8, f64, String)> = Vec::new();
+    for (i, r) in records.iter_mut().enumerate() {
+        let (families, wires, words) = ab_describe(&r.tokens);
+        r.fields.insert("ab_families".into(), families.len().to_string());
+        r.fields.insert("ab_wires".into(), wires.to_string());
+        let Some(outcome) = r.fields.get("outcome").map(|v| unquote(v)) else {
+            r.fields.insert("ab_playable".into(), "false".into());
+            continue;
+        };
+        let novel = r.fields.get("novel").is_some_and(|v| v.trim() == "true");
+        let min_len = num(r.fields.get("min_len")).unwrap_or(0.0);
+        let random = r
+            .fields
+            .get("metrics")
+            .and_then(|m| field(&object_fields(m), "random_success").and_then(|v| v.trim().parse::<f64>().ok()))
+            .unwrap_or(1.0);
+        let game_rejected = r
+            .fields
+            .get("game")
+            .is_some_and(|g| field(&object_fields(g), "verdict").is_some_and(|v| unquote(v) != "valid"));
+        let playable = matches!(outcome.as_str(), "solvable" | "uncertain")
+            && novel
+            && !game_rejected
+            && (outcome != "solvable" || (min_len >= 5.0 && random < 0.1));
+        r.fields.insert("ab_playable".into(), playable.to_string());
+        if !playable {
+            continue;
+        }
+        let state = num(r.fields.get("state"));
+        let tricks = num(r.fields.get("tricks"));
+        let strong = outcome == "solvable" && state.is_some_and(|s| s >= 2.0) && tricks.is_some_and(|t| t <= 1.0);
+        let tier: u8 = if strong { 0 } else if outcome == "uncertain" { 1 } else { 2 };
+        r.fields.insert("ab_tier".into(), tier.to_string());
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for w in words.into_iter().filter(|w| w != "entry" && w != "exit") {
+            *counts.entry(w).or_default() += 1;
+        }
+        let set = counts.iter().map(|(w, n)| format!("{n} {w}")).collect::<Vec<_>>().join(", ");
+        ranked.push((i, tier, -(families.len() as f64 + wires as f64 / 2.0), set));
+    }
+    // A stable sort, like abtest's.
+    ranked.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.partial_cmp(&b.2).unwrap()));
+    let mut seen = std::collections::HashSet::new();
+    for (n, (i, _, _, set)) in ranked.into_iter().enumerate() {
+        let r = &mut records[i];
+        r.fields.insert("ab_rank".into(), (n + 1).to_string());
+        r.fields.insert("ab_pick".into(), seen.insert(set.clone()).to_string());
+        r.fields.insert("ab_set".into(), json_str(&set));
+    }
 }
 
 /// The compact record the page gets: everything in the file except the tokens, plus which

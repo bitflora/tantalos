@@ -230,6 +230,11 @@
           <option value="invalid">game: rejected</option>
           <option value="none">not game-checked</option>
         </select>
+        <select id="f-ab" class="gen-only wide" title="The play-test picks of train/abtest.py: rated-style samples that are valid, novel, not unsolvable, not trivial and not rejected by Portal 2">
+          <option value="">any level</option>
+          <option value="playable">A/B playable</option>
+          <option value="pick">A/B picks (one per item set)</option>
+        </select>
         <select id="f-mine" title="My rating">
           <option value="">any of my ratings</option>
           <option value="1">my 1★ and up</option>
@@ -244,6 +249,7 @@
           <option value="subscribers" class="ws-only">sort: most subscribers</option>
           <option value="favourited" class="ws-only">sort: most favourited</option>
           <option value="newest" class="ws-only">sort: newest Workshop upload</option>
+          <option value="ab" class="gen-only">sort: A/B rank (strong, uncertain, solvable; most families + wires)</option>
           <option value="line" class="gen-only">sort: file order</option>
           <option value="smallest">sort: smallest level</option>
           <option value="largest">sort: largest level</option>
@@ -357,6 +363,13 @@ function splitBadge(l) {
 function gameOf(l) {
   return (l.game && typeof l.game === "object" && l.game.verdict) || "";
 }
+const AB_TIERS = ["strong", "uncertain", "solvable"];
+function abBadge(l) {
+  if (!l.ab_rank) return "";
+  const tier = AB_TIERS[l.ab_tier] || "?";
+  const what = l.ab_pick ? "A/B pick" : "A/B playable, repeats an item set";
+  return `<span class="badge ${l.ab_pick ? "b-train" : ""}" title="${what}: ${tier}, ${l.ab_families} families, ${l.ab_wires} wires">#${l.ab_rank} ${tier}</span>`;
+}
 function gameBadge(l) {
   const g = gameOf(l);
   if (!g) return "";
@@ -460,7 +473,7 @@ function applyConfig(config) {
     $("#welcome-store").textContent = state.config.annotations || "";
     $("#welcome-human").textContent = state.config.human_unsolvable || "";
     $("#export").setAttribute("download", "generated-annotations.jsonl");
-    if (!configApplied) $("#sort").value = "verdict";
+    if (!configApplied) $("#sort").value = "ab";
   }
   configApplied = true;
 }
@@ -505,6 +518,7 @@ function applyFilters() {
   const source = $("#f-source").value;
   const hv = $("#f-hv").value;
   const game = $("#f-game").value;
+  const ab = $("#f-ab").value;
 
   state.filtered = state.levels.filter(l => {
     if (q && !l.search.includes(q)) return false;
@@ -518,6 +532,8 @@ function applyFilters() {
       if (game === "valid" && g !== "valid") return false;
       if (game === "invalid" && (!g || g === "valid")) return false;
       if (game === "none" && g) return false;
+      if (ab === "playable" && l.ab_playable !== true) return false;
+      if (ab === "pick" && l.ab_pick !== true) return false;
     }
     if (verdict === "published") {
       if (l.dataset_verdict !== "published") return false;
@@ -563,6 +579,9 @@ function applyFilters() {
       || (gen ? (gameOf(a) === "valid" ? 0 : 1) - (gameOf(b) === "valid" ? 0 : 1) : 0)
       || (Number(b.stars||0)-Number(a.stars||0)) || byVotes(a,b)
       || compare(a,b,"source") || Number(a.line||0) - Number(b.line||0));
+  } else if (sort === "ab") {
+    state.filtered.sort((a,b) => Number(a.ab_rank||1e9) - Number(b.ab_rank||1e9)
+      || compare(a,b,"source") || Number(a.line||0) - Number(b.line||0));
   } else if (sort === "line") {
     state.filtered.sort((a,b) => compare(a,b,"source") || Number(a.line||0) - Number(b.line||0));
   } else if (sort === "mine") {
@@ -591,7 +610,7 @@ function renderList() {
     if (GEN()) {
       return `<li data-id="${esc(l.id)}" class="${state.selected === l.id ? "active" : ""}">
       <div class="top"><span class="title">${esc(l.title || l.id)}</span>${verdictBadge(l)}</div>
-      <div class="sub">${gameBadge(l)}${annotationBadges(l)}</div>
+      <div class="sub">${abBadge(l)}${gameBadge(l)}${annotationBadges(l)}</div>
       <div class="sub"><span>${num(l.n_tokens || 0)} tokens</span>
         ${l.min_len !== undefined && l.min_len !== null ? `<span>${num(l.min_len)} steps</span>` : ""}
         <span>${(l.sources || []).map(esc).join(", ")}</span></div>
@@ -739,6 +758,8 @@ function renderDetail(l) {
             ${fact("Asked for", l.setting ? `<code>${esc(l.setting)}</code>` : "—")}
             ${fact("Rated-style outcome", value(l.outcome))}
             ${fact("Game check", gameOf(l) ? gameBadge(l) : "not checked")}
+            ${fact("A/B pick rules", l.ab_rank ? `#${l.ab_rank} ${esc(AB_TIERS[l.ab_tier] || "?")}${l.ab_pick ? ", first of its item set" : ", item set already ranked higher"} · ${esc(l.ab_set || "")}` : l.outcome ? "not playable" : "— (not a rated-style sample)")}
+            ${fact("Families · wires", `${value(l.ab_families)} · ${value(l.ab_wires)}`)}
             ${fact("Novel", l.novel === true ? "yes" : l.novel === false ? "no (near a training level)" : "—")}
             ${fact("Nearest Workshop", l.nearest_ws === undefined || l.nearest_ws === null ? "—" : Number(l.nearest_ws).toFixed(3))}
             ${fact("Tricks", l.tricks ? esc(JSON.stringify(l.tricks)) : "—")}` : `
@@ -1405,7 +1426,7 @@ function renderLegend() {
 // ---- wiring ---------------------------------------------------------------
 function wire() {
   $("#search").addEventListener("input", () => { state.shown = LIMIT; applyFilters(); });
-  for (const id of ["#f-verdict","#f-split","#f-stars","#f-mine","#f-source","#f-hv","#f-game","#sort"]) {
+  for (const id of ["#f-verdict","#f-split","#f-stars","#f-mine","#f-source","#f-hv","#f-game","#f-ab","#sort"]) {
     $(id).addEventListener("change", () => { state.shown = LIMIT; applyFilters(); });
   }
   for (const id of ["#f-staged","#f-human","#f-excluded","#f-notes","#f-annotated","#f-testonly"]) {
