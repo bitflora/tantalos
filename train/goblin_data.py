@@ -3,6 +3,7 @@
     .venv/Scripts/python train/goblin_data.py                    # select, plan, assemble
     .venv/Scripts/python train/goblin_data.py --limit 2000 --out data/goblin-try
     .venv/Scripts/python train/goblin_data.py --only ws ws-test  # plan only these parts now
+    .venv/Scripts/python train/goblin_data.py --only ws7         # add the 2012 Workshop download
     .venv/Scripts/python train/goblin_data.py --deep             # and ws-deep (overnight)
     .venv/Scripts/python train/goblin_data.py --assemble         # just the last step again
 
@@ -33,6 +34,8 @@ The parts:
     ws6       data/ws6 train levels (the 2026-11-02 download) that ws5 lacks and our solver solves,
               500k; they join ws. data/ws6/test stays out of training; the held-out sets still
               come from ws5
+    ws7       new data/ws7 train levels absent from ws5 and ws6 and outside all Workshop test
+              splits; solve with the current model at 500k, including previously unsolved levels
     mut      Workshop mutants (data/v5b/levels-mutants*.jsonl): at most MAX_PER_PARENT per
               parent, near-copies dropped; mutants of ws5 test levels make test-mut
     gen       generated levels (data/v5b/levels-[1-5].jsonl): every one that changes the room's
@@ -81,7 +84,9 @@ from annotations import excluded_ids  # noqa: E402
 AUGMENT = ROOT / "target" / "release" / "tantalos-data.exe"
 TRICKS = ROOT / "tools" / "workshop" / "excluded-tricks.jsonl"
 WS_TRAIN, WS_TEST = "data/ws5/train.jsonl", "data/ws5/test.jsonl"
-WS6_TRAIN = "data/ws6/train.jsonl"
+WS6_TRAIN, WS6_TEST = "data/ws6/train.jsonl", "data/ws6/test.jsonl"
+WS7_TRAIN, WS7_TEST = "data/ws7/train.jsonl", "data/ws7/test.jsonl"
+WS7_EXCLUDE_SPLITS = (WS_TRAIN, WS_TEST, WS6_TRAIN, WS6_TEST, WS7_TEST)
 MUTANTS = ["data/v5b/levels-mutants*.jsonl"]
 GENERATED = ["data/v5b/levels-[1-5].jsonl"]
 HARVEST = ["data/goblin/harvest/*.jsonl"]
@@ -109,6 +114,7 @@ PARTS = [
     Part("ws-test", [WS_TEST], ("solvable",), False, "ws", 500_000, 0, test=True),
     Part("ws-deep", [WS_TRAIN], ("uncertain",), False, "ws", 1_000_000, 4),
     Part("ws6", [WS6_TRAIN], ("solvable",), False, "ws", 500_000, 4),
+    Part("ws7", [WS7_TRAIN], ("solvable", "uncertain", "unsolvable"), False, "ws", 500_000, 4),
     Part("mut", MUTANTS, ("solvable",), False, "mut", 50_000, 2),
     Part("gen", GENERATED, ("solvable",), True, "gen", 50_000, 2),
     Part("v6", HARVEST, ("solvable",), True, "v6", 50_000, 2),
@@ -168,13 +174,20 @@ def tricks_ids():
 
 def select(part, args, rng):
     """The records of `part` to plan, as a list (step 1)."""
-    if part.name in ("ws", "ws-test", "ws-deep", "ws6"):
+    if part.name in ("ws", "ws-test", "ws-deep", "ws6", "ws7"):
         skip = tricks_ids() if part.name != "ws-test" else excluded_ids()
         if part.name == "ws6":
             skip = skip | {str(r.get("workshop_id")) for r in read([WS_TRAIN, WS_TEST])}
+        if part.name == "ws7":
+            missing = [path for path in WS7_EXCLUDE_SPLITS if not (ROOT / path).is_file()]
+            if missing:
+                sys.exit(f"ws7: missing Workshop splits: {', '.join(missing)}")
+            skip.update(str(r["workshop_id"]) for r in read(WS7_EXCLUDE_SPLITS) if r.get("workshop_id"))
         out = []
         for r in read(part.files):
             verdict = r.get("solver_verdict") if part.name == "ws-deep" else r.get("verdict")
+            if part.name == "ws7" and verdict == "published":
+                verdict = r.get("solver_verdict")
             if verdict in part.verdicts and str(r.get("workshop_id")) not in skip:
                 out.append(r)
         return out[: args.limit] if args.limit else out
@@ -401,8 +414,8 @@ def assemble(out, args, rng):
     sets = defaultdict(list)
     train = defaultdict(list)  # by src: rows still to augment
     counts = Counter()
-    for r in load_part(out, "ws") + load_part(out, "ws-deep") + load_part(out, "ws6"):
-        train["ws"].append(r)
+    for name in ("ws", "ws-deep", "ws6", "ws7"):
+        train["ws"].extend(load_part(out, name))
     for r in load_part(out, "ws-test"):
         r.pop("source_tokens", None)
         sets["test-ws"].append(r)
@@ -524,6 +537,10 @@ def main():
         if part.name == "ws-deep" and not args.deep and not (args.only and "ws-deep" in args.only):
             continue
         if args.only and part.name not in args.only:
+            continue
+        if part.name == "ws7" and not (ROOT / WS7_TRAIN).is_file():
+            if args.only:
+                sys.exit(f"ws7: missing {WS7_TRAIN}")
             continue
         if part.name == "v6" and not any(glob.glob(str(ROOT / p)) for p in part.files):
             print("v6: no harvested levels yet (data/goblin/harvest/), skipped")
