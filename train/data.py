@@ -497,7 +497,11 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
                     continue
                 r = json.loads(line)
                 split = "val" if zlib.crc32(f"{seed} {identity(r)}".encode()) < cut else "train"
-                level = vocab.encode(r["tokens"].split())
+                try:
+                    level = vocab.encode(r["tokens"].split())
+                except KeyError:  # a token outside the vocabulary (e.g. a sampled level larger than any trained on)
+                    skipped += 1
+                    continue
                 if max_prefix + len(level) + 1 > block_size:
                     skipped += 1
                     continue

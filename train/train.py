@@ -196,7 +196,7 @@ def main():
     else:
         train, val, skipped = load(args.data, vocab, args.block, seed=args.seed)
         print(
-            f"data: {len(train)} train, {len(val)} val, {skipped} too long for block {args.block}; "
+            f"data: {len(train)} train, {len(val)} val, {skipped} skipped (too long for block {args.block} or unknown token); "
             f"vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s"
         )
     holdout = None
