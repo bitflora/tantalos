@@ -78,6 +78,22 @@ fn a_vertical_plate_keeps_its_target_on_the_plate() {
     assert!(!problems.iter().any(|m| m.contains("target")), "{problems:?}");
 }
 
+/// A plate throwing straight up past the ceiling over it keeps its full height: the editor
+/// gets the CatapultHeight for the target cell and the tokens read back unchanged, while the
+/// solver stops the throw at the ceiling (Workshop "Catapulted Into Space", whose throw was
+/// clamped to the ceiling and played unsolvable, 2026-11-12).
+#[test]
+fn a_vertical_plate_past_the_ceiling_keeps_its_height() {
+    let tokens = "size 6 6 8 open 0 0 1 5 5 3 entry 0 2 1 +x exit 5 2 1 -x plate 2 2 1 +z 2 2 6 +z";
+    let p = decode(tokens).unwrap();
+    let level = Level::from_puzzle(&p);
+    let plate = level.items.iter().find(|i| i.kind == ItemKind::FaithPlate).unwrap();
+    assert_eq!(plate.props.get_f64s::<1>("CatapultHeight"), Some([10.0]));
+    assert_eq!(level.plates[0].target.1, [2, 2, 3]);
+    assert_eq!(level.plates[0].written, [2, 2, 6]);
+    assert_eq!(encode(&p).unwrap().join(" "), tokens);
+}
+
 #[test]
 fn light_bridge_spans_the_goo() {
     let on = plan(&fixtures::light_bridge(false));

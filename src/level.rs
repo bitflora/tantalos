@@ -412,6 +412,10 @@ pub struct Plate {
     pub target: (i32, Cell, Dir),
     /// Whether a simple arc from the plate to the target misses solid voxels (`clear_arc`).
     pub clear: bool,
+    /// The cell the tokens name as the target: `target.1`, except for a plate throwing straight
+    /// up past the ceiling over it, where it is the cell the throw would reach (`target.1` is
+    /// then the top of the open column, where the solver lands the throw).
+    pub written: Cell,
 }
 
 /// How many voxels up a floor plate throwing straight up with `CatapultHeight` `h` reaches:
@@ -829,11 +833,19 @@ impl Level {
                         c[2] += vertical_reach(h);
                         c
                     });
-                    let (tc, tn) = match apex {
-                        Some(c) if vertical && n == Dir::PosZ && c != it.cell && !self.solid(c) => {
-                            (c, Dir::PosZ)
+                    // A throw past the ceiling over the plate stops there, as far as the solver
+                    // goes (a player drifting off the column on the way up can climb on; the
+                    // tokens keep the full height in `written`).
+                    let top = apex.filter(|c| vertical && n == Dir::PosZ && c[2] > it.cell[2]).map(|c| {
+                        let mut top = it.cell;
+                        while top[2] < c[2] && !self.solid([top[0], top[1], top[2] + 1]) {
+                            top[2] += 1;
                         }
-                        _ => (t.cell, tn),
+                        (top, c)
+                    });
+                    let (tc, tn, written) = match top {
+                        Some((top, c)) if top != it.cell => (top, Dir::PosZ, c),
+                        _ => (t.cell, tn, t.cell),
                     };
                     let clear = self.clear_arc(it.cell, tc);
                     self.plates.push(Plate {
@@ -842,6 +854,7 @@ impl Level {
                         normal: n,
                         target: (t.index, tc, tn),
                         clear,
+                        written,
                     });
                 }
                 ItemKind::LightBridge | ItemKind::Funnel => {

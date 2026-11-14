@@ -578,7 +578,7 @@ fn later_items(level: &Level, loose: &[(crate::geom::Cell, CubeKind)]) -> Result
         let mut t = vec!["plate".to_string()];
         t.extend(cell_tokens(pl.cell));
         t.push(dir(pl.normal));
-        t.extend(cell_tokens(pl.target.1));
+        t.extend(cell_tokens(pl.written));
         t.push(dir(pl.target.2));
         plates.push((t, pl.item, false));
     }

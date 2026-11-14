@@ -738,19 +738,18 @@ def convert(bsp):
         if c not in open_cells and is_open(c) and c not in later["embedded"]:
             flood(c)
     open_cells -= later["embedded"]
-    # Faith plate targets: in an open cell. A plate throwing straight up throws no higher than
-    # the open column over it; one with no room over it is no use, and left out.
+    # Faith plate targets: in an open cell. A plate throwing straight up keeps the height its
+    # speed throws to, even past the ceiling over it: a player drifting off the plate's column on
+    # the way up climbs on (5-star "Catapulted Into Space", 2861419908, was unsolvable when the
+    # throw stopped at the ceiling). The level grows to hold that cell; the solver stops the
+    # throw at the ceiling (level.rs). One with no room over it is no use, and left out.
     keep = []
     for word, fields, sender in later["items"]:
         if word == "plate":
             c, t = fields[0], fields[2]
             if (t, c) in later["vertical"]:
-                top = c
-                while add(top, UP) in open_cells and top[2] < t[2]:
-                    top = add(top, UP)
-                if top == c:
+                if add(c, UP) not in open_cells or t[2] <= c[2]:
                     continue
-                fields = [c, fields[1], top, fields[3]]
             elif t not in open_cells:
                 near = [add(t, d) for d in DIRS if add(t, d) in open_cells]
                 if not near:
@@ -871,6 +870,16 @@ def convert(bsp):
     size = [hi[a] - base[a] + 1 for a in range(3)]
     if max(size) > MAX_NUM:
         raise Unsupported(f"chamber {size} is bigger than {MAX_NUM}")
+    # Straight-up plates' targets past the ceiling: the level grows up to hold them, as far as
+    # coordinates go (a target clamped there still throws higher than the chamber).
+    top = base[2] + MAX_NUM - 1
+    for i, (word, fields, sender) in enumerate(later["items"]):
+        if word == "plate" and (fields[2], fields[0]) in later["vertical"]:
+            t = fields[2]
+            if t[2] > top:
+                t = (t[0], t[1], top)
+                later["items"][i] = (word, [fields[0], fields[1], t, fields[3]], sender)
+            size[2] = max(size[2], t[2] - base[2] + 1)
 
     def loc(c):
         return [str(c[a] - base[a]) for a in range(3)]
