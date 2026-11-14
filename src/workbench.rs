@@ -765,14 +765,30 @@ fn ab_rank(records: &mut [Record]) {
     }
 }
 
+/// `metrics::MECHANICS` bits that change the room's state, and the tricks: train/rated.py's
+/// STATE and TRICKS.
+const STATE_BITS: u64 = 1 << 2 | 1 << 3 | 1 << 7 | 1 << 14 | 1 << 15 | 1 << 16 | 1 << 18 | 1 << 19 | 1 << 20 | 1 << 21 | 1 << 22;
+const TRICK_BITS: u64 = 1 << 4 | 1 << 5 | 1 << 6 | 1 << 9 | 1 << 10 | 1 << 11 | 1 << 12 | 1 << 13;
+
+/// (state-changing mechanics, tricks) a solved level's solution uses, from its metrics'
+/// `mechanic_bits` (rated.mechanics); None without metrics.
+fn mechanic_counts(metrics: Option<&String>) -> Option<(u32, u32)> {
+    let bits: u64 = field(&object_fields(metrics?), "mechanic_bits")?.trim().parse().ok()?;
+    Some(((bits & STATE_BITS).count_ones(), (bits & TRICK_BITS).count_ones()))
+}
+
 /// The compact record the page gets: everything in the file except the tokens, plus which
-/// sources carried it and the ws5 split it is in.
+/// sources carried it, the ws5 split it is in, and `state_changes`/`trick_count` when the
+/// solver solved it.
 fn record_json(r: &Record) -> String {
     let mut parts: Vec<String> = r
         .fields
         .iter()
         .map(|(k, v)| format!("{}:{v}", json_str(k)))
         .collect();
+    if let Some((state, tricks)) = mechanic_counts(r.fields.get("metrics")) {
+        parts.push(format!("\"state_changes\":{state},\"trick_count\":{tricks}"));
+    }
     parts.push(format!(
         "\"sources\":[{}]",
         r.sources

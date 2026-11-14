@@ -235,6 +235,25 @@
           <option value="playable">A/B playable</option>
           <option value="pick">A/B picks (one per item set)</option>
         </select>
+        <select id="f-steps" title="Solution length: moves in the solver's shortest solution">
+          <option value="">any solution length</option>
+          <option value="1-10">1–10 steps</option>
+          <option value="11-25">11–25 steps</option>
+          <option value="26-50">26–50 steps</option>
+          <option value="51-100">51–100 steps</option>
+          <option value="101-">101+ steps</option>
+          <option value="none">no solution length</option>
+        </select>
+        <select id="f-state" title="State changes: state-changing mechanics the shortest solution uses (buttons, powered/redirected lasers, panels, bridges, funnels, plates, fizzlers, stairs, platforms)">
+          <option value="">any state changes</option>
+          <option value="0-0">0 state changes</option>
+          <option value="1-1">1 state change</option>
+          <option value="2-">2+ state changes</option>
+          <option value="3-">3+ state changes</option>
+          <option value="4-">4+ state changes</option>
+          <option value="strong">strong (2+ state, ≤1 trick)</option>
+          <option value="none">no solver metrics</option>
+        </select>
         <select id="f-mine" title="My rating">
           <option value="">any of my ratings</option>
           <option value="1">my 1★ and up</option>
@@ -253,6 +272,9 @@
           <option value="line" class="gen-only">sort: file order</option>
           <option value="smallest">sort: smallest level</option>
           <option value="largest">sort: largest level</option>
+          <option value="shortsol">sort: shortest solution</option>
+          <option value="longsol">sort: longest solution</option>
+          <option value="state">sort: most state changes (then longest solution)</option>
           <option value="title">sort: title</option>
           <option value="verdict">sort: solver verdict</option>
           <option value="mine">sort: my rating</option>
@@ -500,6 +522,17 @@ function compare(a, b, key) {
   if (bv === null || bv === undefined) return -1;
   return av < bv ? -1 : 1;
 }
+// The solver's shortest solution length and the state-changing mechanics it uses, or null.
+const numOrNull = v => (v === null || v === undefined || v === "") ? null : Number(v);
+const solLen = l => numOrNull(l.min_len);
+const stateOf = l => numOrNull(l.state_changes ?? l.state);
+function solutionBadge(l) {
+  const len = solLen(l), sc = stateOf(l);
+  const parts = [];
+  if (len !== null) parts.push(`<span>${num(len)} steps</span>`);
+  if (sc !== null) parts.push(`<span title="state-changing mechanics${l.trick_count != null ? `; ${l.trick_count} trick(s)` : ""}">${sc} state</span>`);
+  return parts.join("");
+}
 const VERDICT_ORDER = { solvable:0, uncertain:1, unsolvable:2, invalid:3, unsupported:4, published:5 };
 
 function applyFilters() {
@@ -519,6 +552,13 @@ function applyFilters() {
   const hv = $("#f-hv").value;
   const game = $("#f-game").value;
   const ab = $("#f-ab").value;
+  const steps = $("#f-steps").value;
+  const stc = $("#f-state").value;
+  // "lo-hi" or "lo-" against a value that may be missing.
+  const inRange = (v, range) => {
+    const [lo, hi] = range.split("-");
+    return v !== null && v >= Number(lo) && (hi === "" || v <= Number(hi));
+  };
 
   state.filtered = state.levels.filter(l => {
     if (q && !l.search.includes(q)) return false;
@@ -542,6 +582,11 @@ function applyFilters() {
     if (split === "test" && l.split !== "test") return false;
     if (split === "train" && l.split !== "train") return false;
     if (testonly && l.split !== "test") return false;
+    const len = solLen(l), sc = stateOf(l);
+    if (steps === "none" ? len !== null : steps && !inRange(len, steps)) return false;
+    if (stc === "none" ? sc !== null
+        : stc === "strong" ? !(sc !== null && sc >= 2 && l.trick_count <= 1)
+        : stc && !inRange(sc, stc)) return false;
     const s = Number(l.stars || 0);
     if (stars === "rated" && s < 1) return false;
     if (stars === "unrated" && s > 0) return false;
@@ -574,6 +619,17 @@ function applyFilters() {
     state.filtered.sort((a,b) => Number(a.n_tokens||1e9) - Number(b.n_tokens||1e9));
   } else if (sort === "largest") {
     state.filtered.sort((a,b) => Number(b.n_tokens||0) - Number(a.n_tokens||0));
+  } else if (sort === "shortsol" || sort === "longsol") {
+    // Levels without a solution length go last either way.
+    const dir = sort === "shortsol" ? 1 : -1;
+    state.filtered.sort((a,b) => {
+      const x = solLen(a), y = solLen(b);
+      if (x === null || y === null) return (x === null) - (y === null);
+      return dir * (x - y);
+    });
+  } else if (sort === "state") {
+    state.filtered.sort((a,b) => ((stateOf(b) ?? -1) - (stateOf(a) ?? -1))
+      || ((solLen(b) ?? -1) - (solLen(a) ?? -1)));
   } else if (sort === "verdict") {
     state.filtered.sort((a,b) => (VERDICT_ORDER[a.solver] ?? 9) - (VERDICT_ORDER[b.solver] ?? 9)
       || (gen ? (gameOf(a) === "valid" ? 0 : 1) - (gameOf(b) === "valid" ? 0 : 1) : 0)
@@ -612,7 +668,7 @@ function renderList() {
       <div class="top"><span class="title">${esc(l.title || l.id)}</span>${verdictBadge(l)}</div>
       <div class="sub">${abBadge(l)}${gameBadge(l)}${annotationBadges(l)}</div>
       <div class="sub"><span>${num(l.n_tokens || 0)} tokens</span>
-        ${l.min_len !== undefined && l.min_len !== null ? `<span>${num(l.min_len)} steps</span>` : ""}
+        ${solutionBadge(l)}
         <span>${(l.sources || []).map(esc).join(", ")}</span></div>
     </li>`;
     }
@@ -623,7 +679,7 @@ function renderList() {
         <span>${votes}</span>
         ${splitBadge(l)}${annotationBadges(l)}
       </div>
-      <div class="sub"><span>#${esc(l.id)}</span><span>${big(l.subscribers)} subs</span>${mine}</div>
+      <div class="sub"><span>#${esc(l.id)}</span><span>${big(l.subscribers)} subs</span>${solutionBadge(l)}${mine}</div>
     </li>`;
   }).join("");
   $("#shown").textContent = state.filtered.length
@@ -1426,7 +1482,7 @@ function renderLegend() {
 // ---- wiring ---------------------------------------------------------------
 function wire() {
   $("#search").addEventListener("input", () => { state.shown = LIMIT; applyFilters(); });
-  for (const id of ["#f-verdict","#f-split","#f-stars","#f-mine","#f-source","#f-hv","#f-game","#f-ab","#sort"]) {
+  for (const id of ["#f-verdict","#f-split","#f-stars","#f-mine","#f-source","#f-hv","#f-game","#f-ab","#f-steps","#f-state","#sort"]) {
     $(id).addEventListener("change", () => { state.shown = LIMIT; applyFilters(); });
   }
   for (const id of ["#f-staged","#f-human","#f-excluded","#f-notes","#f-annotated","#f-testonly"]) {
