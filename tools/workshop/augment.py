@@ -31,6 +31,9 @@ Since 2026-11-11 the source is data/ws7/train.jsonl (ws6 plus the 2012 download;
 in ws5's or ws6's test sets); the ws6-based file is data/v5b/workshop-ws6-aug-x2.jsonl, out of the
 default pattern. data/ws7/test.jsonl (a superset of ws5's and ws6's) is never augmented.
 
+`--min-stars N` keeps only levels rated N stars or more (the 2026-11-14 fine-tune file
+data/v5b/ft-ws45-aug-x2.jsonl is `--min-stars 4`; train/ft_data.py builds the rest of that set).
+
 Levels listed in tools/workshop/excluded-tricks.jsonl (their Workshop text says they need bunny
 hopping or a glitch) are left out.
 """
@@ -53,6 +56,7 @@ def main():
     ap.add_argument("--src", default=str(ROOT / "data" / "ws7" / "train.jsonl"))
     ap.add_argument("--copies", type=int, default=2, help="times each version is written")
     ap.add_argument("--out", default=None, help="default data/v5b/levels-workshop-aug-xN.jsonl")
+    ap.add_argument("--min-stars", type=int, default=None, help="keep only levels with this many stars or more")
     a = ap.parse_args()
     out = Path(a.out) if a.out else ROOT / "data" / "v5b" / f"levels-workshop-aug-x{a.copies}.jsonl"
     src = Path(a.src)
@@ -60,6 +64,12 @@ def main():
         if src.resolve() == (ROOT / "data" / held / "test.jsonl").resolve():
             sys.exit(f"data/{held}/test.jsonl is a held-out set: don't train on its versions")
     records = [json.loads(l) for l in open(src, encoding="utf-8") if l.strip()]
+    if a.min_stars is not None:
+        records = [r for r in records if (r.get("stars") or 0) >= a.min_stars]
+        src = out.with_suffix(".src.tmp")
+        with open(src, "w", encoding="utf-8", newline="\n") as f:
+            f.writelines(json.dumps(r) + "\n" for r in records)
+        print(f"{len(records)} levels with {a.min_stars}+ stars")
     excluded = set()
     if EXCLUDED.exists():
         excluded = {json.loads(l)["id"] for l in open(EXCLUDED, encoding="utf-8") if l.strip()}
@@ -85,6 +95,8 @@ def main():
             counts["versions"] += 1
             per_level[v["line"]] += 1
     tmp.replace(out)
+    if a.min_stars is not None:
+        src.unlink()
     spread = Counter(per_level.values())
     print(f"{len(records)} levels -> {counts['versions']} versions x {a.copies} = "
           f"{counts['versions'] * a.copies} lines in {out}")
