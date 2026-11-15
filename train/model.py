@@ -2,6 +2,11 @@
 
 Level tokens are a few hundred words of a ~170-word language, so a ~10M parameter model is
 plenty to start with and fits a 4 GB GPU with room to spare.
+
+Other architectures (docs/architecture-plan-2026-11-15.md) sit behind `Config.arch` and
+`build_model`; checkpoints made before it have no `arch` and load as "gpt". Every one is a
+`Decoder`: it shares the sampling code (generate, generate_refill, generate_many), which only
+needs `forward(idx, targets, caches, start, positions, mask)`, `self.blocks` and `self.cfg`.
 """
 
 import math
@@ -25,6 +30,40 @@ class Config:
     # LayerNorm on each head's queries and keys before attention, against the late loss spikes
     # of long runs (2026-10-20). Off for checkpoints made before it, so they load unchanged.
     qk_norm: bool = False
+    # Which architecture (ARCHS below): "gpt" is the original; "modern" is RMSNorm, SwiGLU,
+    # RoPE, no biases, no dropout (arm 1 of the 2026-11-15 bake-off).
+    arch: str = "gpt"
+
+
+def attend(q, k, v, cache, mask, dropout_p):
+    """Attention for one layer (q, k, v: batch x heads x tokens x head size), keeping keys and
+    values in `cache` for generation (see Block.forward). Returns batch x heads x tokens x size."""
+    b, h, t, d = q.shape
+    if cache is not None and "at" in cache:
+        # generate_refill: one new token per row, each written at its own row's position
+        # into a cache allocated beforehand; attention only up to cache["len"].
+        rows = torch.arange(b, device=q.device)
+        cache["k"][rows, :, cache["at"]] = k[:, :, 0]
+        cache["v"][rows, :, cache["at"]] = v[:, :, 0]
+        k, v = cache["k"][:, :, : cache["len"]], cache["v"][:, :, : cache["len"]]
+    elif cache is not None:
+        n = cache.get("n", 0)
+        if n == 0:
+            shape = (b, h, cache["size"], d)
+            cache["k"], cache["v"] = k.new_empty(shape), v.new_empty(shape)
+        cache["k"][:, :, n : n + t] = k
+        cache["v"][:, :, n : n + t] = v
+        cache["n"] = n = n + t
+        k, v = cache["k"][:, :, :n], cache["v"][:, :, :n]
+    # New tokens after a cached prefix come one at a time and may see everything before.
+    return F.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        attn_mask=mask,
+        is_causal=mask is None and q.size(2) == k.size(2),
+        dropout_p=dropout_p,
+    )
 
 
 class Block(nn.Module):
@@ -59,50 +98,15 @@ class Block(nn.Module):
         q, k, v = (z.view(b, t, self.n_head, c // self.n_head).transpose(1, 2) for z in (q, k, v))
         if hasattr(self, "q_norm"):
             q, k = self.q_norm(q), self.k_norm(k)
-        if cache is not None and "at" in cache:
-            # generate_refill: one new token per row, each written at its own row's position
-            # into a cache allocated beforehand; attention only up to cache["len"].
-            rows = torch.arange(b, device=x.device)
-            cache["k"][rows, :, cache["at"]] = k[:, :, 0]
-            cache["v"][rows, :, cache["at"]] = v[:, :, 0]
-            k, v = cache["k"][:, :, : cache["len"]], cache["v"][:, :, : cache["len"]]
-        elif cache is not None:
-            n = cache.get("n", 0)
-            if n == 0:
-                shape = (b, self.n_head, cache["size"], c // self.n_head)
-                cache["k"], cache["v"] = k.new_empty(shape), v.new_empty(shape)
-            cache["k"][:, :, n : n + t] = k
-            cache["v"][:, :, n : n + t] = v
-            cache["n"] = n = n + t
-            k, v = cache["k"][:, :, :n], cache["v"][:, :, :n]
-        # New tokens after a cached prefix come one at a time and may see everything before.
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=mask,
-            is_causal=mask is None and q.size(2) == k.size(2),
-            dropout_p=self.dropout if self.training else 0.0,
-        )
+        y = attend(q, k, v, cache, mask, self.dropout if self.training else 0.0)
         x = x + self.resid_drop(self.proj(y.transpose(1, 2).reshape(b, t, c)))
         return x + self.mlp(self.ln2(x))
 
 
-class GPT(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.tok = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.pos = nn.Embedding(cfg.block_size, cfg.n_embd)
-        self.drop = nn.Dropout(cfg.dropout)
-        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layer))
-        self.ln_f = nn.LayerNorm(cfg.n_embd)
-        self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
-        self.head.weight = self.tok.weight  # weight tying
-        self.apply(self._init)
-        for name, p in self.named_parameters():
-            if name.endswith("proj.weight") or name.endswith("mlp.2.weight"):
-                nn.init.normal_(p, std=0.02 / math.sqrt(2 * cfg.n_layer))
+class Decoder(nn.Module):
+    """What every architecture shares: initialisation, the optimizer and the sampling code.
+    A subclass builds `self.cfg`, `self.blocks` (each taking `cache`; see `attend`) and
+    `forward(idx, targets=None, caches=None, start=0, positions=None, mask=None)`."""
 
     @staticmethod
     def _init(m):
@@ -113,27 +117,17 @@ class GPT(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, std=0.02)
 
-    def n_params(self):
-        return sum(p.numel() for p in self.parameters()) - self.pos.weight.numel()
+    def _init_weights(self, residual=("proj.weight", "mlp.2.weight")):
+        """Normal(0.02) everywhere, the projections into the residual stream scaled down by
+        depth (GPT-2)."""
+        self.apply(self._init)
+        for name, p in self.named_parameters():
+            if name.endswith(residual):
+                nn.init.normal_(p, std=0.02 / math.sqrt(2 * self.cfg.n_layer))
 
-    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
-        """`caches` (one dict per layer) and `start` (position of idx's first token) are for
-        generation: feed the prompt once, then one new token per call. A padded batch gives
-        each row's `positions` (batch x tokens) and the attention `mask` instead (Block)."""
-        t = idx.shape[1]
-        if positions is None:
-            assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
-            positions = torch.arange(start, start + t, device=idx.device)
-        x = self.drop(self.tok(idx) + self.pos(positions))
-        for i, block in enumerate(self.blocks):
-            x = block(x, caches[i] if caches is not None else None, mask)
-        logits = self.head(self.ln_f(x))
-        if targets is None:
-            return logits, None
-        loss = F.cross_entropy(
-            logits.float().view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100
-        )
-        return logits, loss
+    def n_params(self):
+        pos = getattr(self, "pos", None)
+        return sum(p.numel() for p in self.parameters()) - (pos.weight.numel() if pos is not None else 0)
 
     def optimizer(self, lr, weight_decay, betas=(0.9, 0.95)):
         """AdamW; no decay on biases, norms and embeddings' 1-D params."""
@@ -455,3 +449,130 @@ class GPT(nn.Module):
             seq = seq[: int(last[r]) + 1]
             outs.append(seq[: seq.index(stop)] if stop in seq else seq)
         return outs
+
+
+
+class GPT(Decoder):
+    """The original: GPT-2 style, pre-norm LayerNorm, GELU MLP, learned positions."""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.tok = nn.Embedding(cfg.vocab_size, cfg.n_embd)
+        self.pos = nn.Embedding(cfg.block_size, cfg.n_embd)
+        self.drop = nn.Dropout(cfg.dropout)
+        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layer))
+        self.ln_f = nn.LayerNorm(cfg.n_embd)
+        self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
+        self.head.weight = self.tok.weight  # weight tying
+        self._init_weights()
+
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
+        """`caches` (one dict per layer) and `start` (position of idx's first token) are for
+        generation: feed the prompt once, then one new token per call. A padded batch gives
+        each row's `positions` (batch x tokens) and the attention `mask` instead (Block)."""
+        t = idx.shape[1]
+        if positions is None:
+            assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
+            positions = torch.arange(start, start + t, device=idx.device)
+        x = self.drop(self.tok(idx) + self.pos(positions))
+        for i, block in enumerate(self.blocks):
+            x = block(x, caches[i] if caches is not None else None, mask)
+        logits = self.head(self.ln_f(x))
+        if targets is None:
+            return logits, None
+        loss = F.cross_entropy(
+            logits.float().view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100
+        )
+        return logits, loss
+
+
+def rope(x, cos, sin):
+    """Rotary position embedding of x (batch x heads x tokens x head size) by the angles
+    whose cos and sin are given (broadcasting to batch x 1 x tokens x half the head size)."""
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half].float(), x[..., half:].float()
+    return torch.cat((x1 * cos - x2 * sin, x1 * sin + x2 * cos), dim=-1).to(x.dtype)
+
+
+class ModernBlock(nn.Module):
+    """Pre-norm block with RMSNorm, QK-norm, RoPE and a SwiGLU MLP; no biases, no dropout."""
+
+    def __init__(self, cfg):
+        super().__init__()
+        d, hd = cfg.n_embd, cfg.n_embd // cfg.n_head
+        self.n_head = cfg.n_head
+        self.norm1 = nn.RMSNorm(d)
+        self.qkv = nn.Linear(d, 3 * d, bias=False)
+        self.q_norm = nn.RMSNorm(hd)
+        self.k_norm = nn.RMSNorm(hd)
+        self.proj = nn.Linear(d, d, bias=False)
+        self.norm2 = nn.RMSNorm(d)
+        hidden = mlp_hidden(d)
+        self.gate_up = nn.Linear(d, 2 * hidden, bias=False)
+        self.down = nn.Linear(hidden, d, bias=False)
+
+    def forward(self, x, cache=None, mask=None, angles=None):
+        b, t, c = x.shape
+        q, k, v = self.qkv(self.norm1(x)).split(c, dim=2)
+        q, k, v = (z.view(b, t, self.n_head, c // self.n_head).transpose(1, 2) for z in (q, k, v))
+        cos, sin = angles
+        q, k = rope(self.q_norm(q), cos, sin), rope(self.k_norm(k), cos, sin)
+        y = attend(q, k, v, cache, mask, 0.0)
+        x = x + self.proj(y.transpose(1, 2).reshape(b, t, c))
+        gate, up = self.gate_up(self.norm2(x)).chunk(2, dim=-1)
+        return x + self.down(F.silu(gate) * up)
+
+
+def mlp_hidden(d):
+    """SwiGLU width with the parameters of a 4d GELU MLP (3 matrices of d x h = 2 of d x 4d),
+    rounded up to a multiple of 64."""
+    return -(-8 * d // 3 // 64) * 64
+
+
+class Modern(Decoder):
+    """Arm 1 of the 2026-11-15 bake-off: today's GPT with a current backbone. RMSNorm, SwiGLU,
+    RoPE (no learned positions, so no block-size limit in the weights), no biases, no
+    dropout (`cfg.dropout` is ignored), QK-norm always. Tied embeddings as GPT."""
+
+    def __init__(self, cfg):
+        super().__init__()
+        assert cfg.n_embd % cfg.n_head == 0 and (cfg.n_embd // cfg.n_head) % 2 == 0
+        self.cfg = cfg
+        self.tok = nn.Embedding(cfg.vocab_size, cfg.n_embd)
+        self.blocks = nn.ModuleList(ModernBlock(cfg) for _ in range(cfg.n_layer))
+        self.norm = nn.RMSNorm(cfg.n_embd)
+        self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
+        self.head.weight = self.tok.weight
+        hd = cfg.n_embd // cfg.n_head
+        self.register_buffer("inv_freq", 1.0 / (10000 ** (torch.arange(0, hd, 2).float() / hd)), persistent=False)
+        self._init_weights(residual=("proj.weight", "down.weight"))
+
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
+        t = idx.shape[1]
+        if positions is None:
+            assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
+            positions = torch.arange(start, start + t, device=idx.device)
+        ang = positions.float()[..., None] * self.inv_freq  # (tokens or batch x tokens) x half
+        ang = ang[None, None] if ang.dim() == 2 else ang[:, None]
+        angles = (ang.cos(), ang.sin())
+        x = self.tok(idx)
+        for i, block in enumerate(self.blocks):
+            x = block(x, caches[i] if caches is not None else None, mask, angles)
+        logits = self.head(self.norm(x))
+        if targets is None:
+            return logits, None
+        loss = F.cross_entropy(
+            logits.float().view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100
+        )
+        return logits, loss
+
+
+ARCHS = {"gpt": GPT, "modern": Modern}
+
+
+def build_model(cfg):
+    """The model `cfg.arch` names (a checkpoint's config from before `arch` is a GPT)."""
+    if cfg.arch not in ARCHS:
+        raise ValueError(f"unknown architecture {cfg.arch!r} (known: {', '.join(ARCHS)})")
+    return ARCHS[cfg.arch](cfg)

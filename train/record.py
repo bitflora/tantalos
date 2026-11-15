@@ -219,6 +219,8 @@ def measure(run):
             row["data"] += f" (away loss, weight {args.get('away_weight')})"
     if cfg:
         row["model"] = f"{cfg['n_layer']}x{cfg['n_head']}x{cfg['n_embd']}"
+        if cfg.get("arch", "gpt") != "gpt":
+            row["model"] = f"{cfg['arch']} {row['model']}"
         row["block"] = cfg["block_size"]
 
     entries = []

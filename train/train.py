@@ -53,7 +53,7 @@ PAUSED_EXIT = 3  # exit code when a PAUSE file stopped training (run.py looks fo
 import goblin_eval  # noqa: E402
 from data import COND_TOKENS, Away, Vocab, load, load_goblin  # noqa: E402
 from record import GOBLIN, task_name  # noqa: E402
-from model import GPT, Config  # noqa: E402
+from model import ARCHS, Config, build_model  # noqa: E402
 
 
 def main():
@@ -74,6 +74,9 @@ def main():
     ap.add_argument("--heads", type=int, default=6)
     ap.add_argument("--embd", type=int, default=384)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--arch", default=None, choices=sorted(ARCHS),
+                    help="model architecture (train/model.py ARCHS; docs/architecture-plan-2026-11-15.md). "
+                         "Default: the --init checkpoint's, else gpt; with --init it must match")
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument(
         "--bucket",
@@ -224,8 +227,14 @@ def main():
     number_of = torch.full((len(vocab),), -1, dtype=torch.long)
     number_of[numbers] = torch.arange(len(numbers))
 
-    cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout, qk_norm=True)
     init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
+    init_arch = init["model_config"].get("arch", "gpt") if init else None
+    if args.arch and init_arch and init_arch != args.arch:
+        sys.exit(f"{args.init} is a {init_arch!r} model, not {args.arch!r} (weights don't carry over "
+                 "between architectures)")
+    arch = args.arch or init_arch or "gpt"
+    cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout, qk_norm=True,
+                 arch=arch)
     if init:
         # The model's shape comes from the checkpoint; --layers/--heads/--embd are ignored. Its
         # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
@@ -239,7 +248,7 @@ def main():
         if init["model_config"]["block_size"] > args.block:
             sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block at least that")
         cfg = Config(**{**init["model_config"], "vocab_size": len(vocab), "block_size": args.block})
-    model = GPT(cfg).to(device)
+    model = build_model(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)
     step, best = 0, float("inf")
     done_before = 0.0  # seconds of training in the sessions before this one (--resume)
@@ -255,8 +264,10 @@ def main():
         kept = [(i, row[t]) for i, t in enumerate(vocab.itos) if t in row]
         own["tok.weight"][[i for i, _ in kept]] = state["tok.weight"][[j for _, j in kept]]
         own["head.weight"] = own["tok.weight"]
-        n = state["pos.weight"].shape[0]
-        own["pos.weight"][:n] = state["pos.weight"]
+        n = args.block
+        if "pos.weight" in state:  # learned positions (GPT); RoPE has none
+            n = state["pos.weight"].shape[0]
+            own["pos.weight"][:n] = state["pos.weight"]
         model.load_state_dict(own)
         new = len(vocab) - len(kept)
         print(f"weights from {args.init}" + (f" ({new} new tokens, block {n} -> {args.block})"
@@ -272,7 +283,7 @@ def main():
         # Otherwise a run continuing another draws the very batches that run drew first. (The
         # validation split stays: it is seeded separately, by --seed alone.)
         random.seed(f"{args.seed} {args.init} {step}")
-    print(f"model: {model.n_params() / 1e6:.1f}M parameters on {device} ({dtype})")
+    print(f"model: {cfg.arch}, {model.n_params() / 1e6:.1f}M parameters on {device} ({dtype})")
 
     def lr_at(s):
         if s < args.warmup:

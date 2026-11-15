@@ -20,7 +20,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from data import ANY, BOS, EOS, SEP, GROUPS, Vocab, groups_in, slots  # noqa: E402
-from model import GPT, Config  # noqa: E402
+from model import Config, build_model  # noqa: E402
 from seeding import resolve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,7 +31,7 @@ DEFAULT_TANTALOS = ROOT / "target" / "release" / f"tantalos-score{EXE}"
 
 def load_checkpoint(path, device):
     ck = torch.load(path, map_location=device, weights_only=False)
-    model = GPT(Config(**ck["model_config"])).to(device)
+    model = build_model(Config(**ck["model_config"])).to(device)
     model.load_state_dict(ck["model"])
     model.eval()
     return model, Vocab(ck["vocab"]), ck
