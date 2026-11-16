@@ -25,8 +25,12 @@ level and writes its plan (src/plan.rs):
 with the loss on the plan and <eos> only, and no conditions.
 """
 
+import hashlib
 import json
+import os
+import pickle
 import random
+import tempfile
 import zlib
 from array import array
 from pathlib import Path
@@ -50,6 +54,8 @@ FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo", "tur
 # flip panels, stairs, pistons, rails, and cubes placed without a dropper.
 LATER_FEATURES = ["laser", "receiver", "plate", "bridge", "funnel", "panel", "flip", "stairs",
                   "piston", "rail", "loosecube"]
+ITEM_WORDS = {"laser", "catcher", "relay", "plate", "bridge", "funnel", "panel",
+              "glasspanel", "flip", "stairs", "piston", "rail"}
 # Floor area (width x depth): small, medium, large, extra large.
 SIZE_BUCKETS = [("s", 49), ("m", 100), ("l", 144), ("xl", 10**9)]
 # Difficulty: the solution's chain depth (steps that each need an earlier one; tantalos metrics).
@@ -117,6 +123,7 @@ GROUPS = {
 # "Not specified", and the value of a group that doesn't apply (plan length of an unsolvable level).
 ANY = {group: f"<{group}:?>" for group in GROUPS}
 COND_TOKENS = [t for group, tokens in GROUPS.items() for t in tokens + [ANY[group]]]
+COND_GROUP = {t: group for group, tokens in GROUPS.items() for t in tokens + [ANY[group]]}
 
 
 def columns(level):
@@ -178,7 +185,10 @@ def box_shapes(level):
 
 def conditions(record):
     """Condition tokens for one dataset record, one per group that applies."""
-    level = record["tokens"].split()
+    return _conditions(record, record["tokens"].split())
+
+
+def _conditions(record, level):
     verdict = record["verdict"]
     if record.get("assumed"):  # ws3 before `published`: made-up plan length and chain depth
         verdict = "published"
@@ -223,16 +233,16 @@ def conditions(record):
     if len(level) > 3 and level[0] == "size" and level[1].isdigit() and level[2].isdigit():
         area = int(level[1]) * int(level[2])
         out.append(GROUPS["size"][next(i for i, (_, hi) in enumerate(SIZE_BUCKETS) if area <= hi)])
-    words = {
-        "laser": ["laser"], "receiver": ["catcher", "relay"], "plate": ["plate"],
-        "bridge": ["bridge"], "funnel": ["funnel"], "panel": ["panel", "glasspanel"],
-        "flip": ["flip"], "stairs": ["stairs"], "piston": ["piston"], "rail": ["rail"],
-    }
+    # Items used only as wire targets (e.g. `> laser 0`) don't count.
+    items = {t for i, t in enumerate(level) if t in ITEM_WORDS and (i == 0 or level[i - 1] != ">")}
+    if items.intersection(("catcher", "relay")):
+        items.add("receiver")
+    if "glasspanel" in items:
+        items.add("panel")
+    if loose:
+        items.add("loosecube")
     for f in LATER_FEATURES:
-        # Items, not wire targets (`> laser 0`).
-        present = loose > 0 if f == "loosecube" else any(
-            t in words[f] and (i == 0 or level[i - 1] != ">") for i, t in enumerate(level))
-        out.append(GROUPS[f][int(present)])
+        out.append(GROUPS[f][int(f in items)])
     workshop = "workshop_id" in record
     out.append(GROUPS["src"][int(workshop)])
     if workshop and (record.get("stars") == 5 or record.get("subscribers") is not None):
@@ -387,7 +397,7 @@ def slots(conds, groups=None):
     or the group's `?`."""
     out = {g: ANY[g] for g in (groups or GROUPS)}
     for t in conds:
-        group = next((g for g, tokens in GROUPS.items() if t in tokens or t == ANY[g]), None)
+        group = COND_GROUP.get(t)
         if group is None:
             raise ValueError(f"{t} isn't a condition")
         if group not in out:
@@ -430,7 +440,7 @@ class Levels:
     def __init__(self, level_ids, offsets, conds, any_ids, sources=None):
         self.level_ids = level_ids  # int16, all levels end to end
         self.offsets = offsets  # int64, len N + 1
-        self.conds = conds  # list of lists of ids, one per group
+        self.conds = np.asarray(conds) if conds is not None else None  # one id per group
         self.any_ids = any_ids  # each group's `?`
         self.sources = sources  # `source(record)` of each, or None
 
@@ -446,7 +456,7 @@ class Levels:
         drawn uniformly from [0, `drop`] for this sequence, so both full and sparse prompts
         are common."""
         p = random.uniform(0, drop)
-        conds = [c if random.random() >= p else a for c, a in zip(self.conds[i], self.any_ids)]
+        conds = [c if random.random() >= p else a for c, a in zip(self.conds[i].tolist(), self.any_ids)]
         level = self.level_ids[self.offsets[i] : self.offsets[i + 1]].tolist()
         ids = [BOS] + conds + [SEP] + level + [EOS]
         learn = [False] * (len(conds) + 2) + [True] * (len(level) + 1)
@@ -487,48 +497,114 @@ def source(record):
     return "mutant" if record.get("mutated_from") is not None else "gen"
 
 
-def load(paths, vocab, block_size, val_share=0.05, seed=0):
-    """Train and validation `Levels` from JSONL files, streamed. Records whose sequence
-    wouldn't fit in `block_size` are skipped. A record goes to validation when the hash of its
-    `identity` (with the seed) falls in the first `val_share` of the range, so a puzzle's copies
-    stay together and the split doesn't depend on file order."""
+LEVEL_SOURCES = ("gen", "mutant", "ws")
+SOURCE_IDS = {name: i for i, name in enumerate(LEVEL_SOURCES)}
+LEVEL_CACHE = Path(__file__).resolve().parent.parent / "data" / ".level-cache"
+
+
+def _level_buffers():
+    return [(array("h"), array("q", [0]), array("h"), array("B")) for _ in range(2)]
+
+
+def _read_level_file(path, vocab, block_size, cut, seed):
     max_prefix = 2 + len(GROUPS)
-    cut = int(val_share * 2**32)
     skipped = 0
-    splits = {
-        "train": (array("h"), array("q", [0]), [], []),
-        "val": (array("h"), array("q", [0]), [], []),
-    }
-    for p in paths:
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                r = json.loads(line)
-                split = "val" if zlib.crc32(f"{seed} {identity(r)}".encode()) < cut else "train"
-                try:
-                    level = vocab.encode(r["tokens"].split())
-                except KeyError:  # a token outside the vocabulary (e.g. a sampled level larger than any trained on)
-                    skipped += 1
-                    continue
-                if max_prefix + len(level) + 1 > block_size:
-                    skipped += 1
-                    continue
-                ids, offsets, conds, sources = splits[split]
-                ids.extend(level)
-                offsets.append(len(ids))
-                conds.append(vocab.encode(slots(conditions(r))))
-                sources.append(source(r))
-    out = {}
-    for name, (ids, offsets, conds, sources) in splits.items():
-        out[name] = Levels(
-            torch.frombuffer(ids, dtype=torch.int16) if ids else torch.zeros(0, dtype=torch.int16),
-            torch.frombuffer(offsets, dtype=torch.int64),
-            conds,
-            vocab.encode(ANY.values()),
-            sources,
-        )
-    return out["train"], out["val"], skipped
+    splits = _level_buffers()
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            tokens = r["tokens"].split()
+            if max_prefix + len(tokens) + 1 > block_size:
+                skipped += 1
+                continue
+            try:
+                level = vocab.encode(tokens)
+            except KeyError:  # a token outside the vocabulary
+                skipped += 1
+                continue
+            split = zlib.crc32(f"{seed} {identity(r)}".encode()) < cut
+            ids, offsets, conds, sources = splits[split]
+            ids.extend(level)
+            offsets.append(len(ids))
+            conds.extend(vocab.encode(slots(_conditions(r, tokens))))
+            sources.append(SOURCE_IDS[source(r)])
+    return [tuple(_as_tensor(a, dtype) for a, dtype in zip(split, (
+        torch.int16, torch.int64, torch.int16, torch.uint8))) for split in splits], skipped
+
+
+def _as_tensor(buffer, dtype):
+    return torch.frombuffer(buffer, dtype=dtype) if buffer else torch.empty(0, dtype=dtype)
+
+
+def _file_stamp(path):
+    stat = path.stat()
+    return [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, stat.st_dev]
+
+
+def _cached_level_file(path, vocab, block_size, cut, seed, config):
+    path = Path(path).resolve()
+    stamp = _file_stamp(path)
+    key = hashlib.sha256(os.fsencode(path)).hexdigest()
+    cache = LEVEL_CACHE / f"{key}.pt"
+    try:
+        if cache.is_file():
+            saved_config, saved_stamp, splits, skipped = torch.load(
+                cache, map_location="cpu", weights_only=True, mmap=True)
+            if saved_config == config and saved_stamp == stamp and _file_stamp(path) == stamp:
+                return splits, skipped
+            del splits  # release the mapped file before replacing it on Windows
+    except (OSError, RuntimeError, ValueError, TypeError, EOFError, pickle.UnpicklingError):
+        pass
+
+    splits, skipped = _read_level_file(path, vocab, block_size, cut, seed)
+    if _file_stamp(path) != stamp:
+        return splits, skipped
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=cache.parent, delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            torch.save((config, stamp, splits, skipped), tmp)
+            tmp.replace(cache)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except (OSError, RuntimeError):
+        # Training can still use the encoded data if the cache is unwritable.
+        pass
+    return splits, skipped
+
+
+def load(paths, vocab, block_size, val_share=0.05, seed=0):
+    """Train and validation `Levels` in input order, with a reusable encoded cache per JSONL.
+
+    Records that don't fit are skipped. The seeded hash of each puzzle's identity determines
+    its split, keeping copies together even when they appear in different files.
+    """
+    cut = int(val_share * 2**32)
+    # Invalidate cached preprocessing when the encoder, vocabulary or split settings change.
+    config = [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), vocab.itos, block_size, cut, seed]
+    skipped = 0
+    combined = _level_buffers()
+    for path in paths:
+        splits, dropped = _cached_level_file(path, vocab, block_size, cut, seed, config)
+        skipped += dropped
+        for (ids, offsets, conds, sources), (lv, off, cond, src) in zip(combined, splits):
+            offsets.frombytes(memoryview(off[1:].numpy() + len(ids)).cast("B"))
+            ids.frombytes(memoryview(lv.numpy()).cast("B"))
+            conds.frombytes(memoryview(cond.numpy()).cast("B"))
+            sources.frombytes(memoryview(src.numpy()))
+        # Release the mapped file before a later input or process replaces its cache.
+        del splits, lv, off, cond, src
+    any_ids = vocab.encode(ANY.values())
+    train, val = [
+        Levels(_as_tensor(ids, torch.int16), _as_tensor(offsets, torch.int64),
+               np.frombuffer(conds, dtype=np.int16).reshape(-1, len(GROUPS)),
+               any_ids, [LEVEL_SOURCES[i] for i in sources])
+        for ids, offsets, conds, sources in combined
+    ]
+    return train, val, skipped
 
 
 # How often a level with plans that solve it another way (`alt_plans`, goblin_data.py) is
