@@ -348,6 +348,15 @@ def main():
         if path.name == "last.pt":
             (out / "last.json").write_text(json.dumps({"step": step, "trained_s": round(trained_s(), 1)}) + "\n")
 
+    # Loading the data (about 20 minutes for data/v5b) isn't training: the clock and --until
+    # start counting after it, so a resumed run (and the 15 minutes of training away) gets its
+    # whole time. Before 2026-11-15 each start or resume lost its loading time.
+    setup = time.time() - start
+    start += setup
+    if deadline:
+        deadline += setup
+        print(f"set up in {setup:.0f}s; training until {datetime.datetime.fromtimestamp(deadline):%Y-%m-%d %H:%M}")
+
     log = open(out / "log.jsonl", "a")
     model.train()
     train_batches = batches(train, args.batch, args.bucket, args.cond_drop, device)

@@ -292,7 +292,7 @@ in Notes.
 | Run | Arm | Params | Peak mem | Yield | Strong | Gap | Solv % | Failures | Away yield | A/B vs control | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | v7-fresh-16h | control (re-evaluated) | | | | | | | | | (vs Workshop, 2026-11-12) | pre-patch data, 16h |
-| arch-modern-12h | modern backbone | | | | | | | | | | |
+| arch-modern-12h | modern backbone | | | | | | | | | | trained in parts; its first 4 counted h held ~1.7 h of data loading (fixed in train.py 2026-11-15), so ~10.3 h of real training |
 | arch-spatial-12h | spatial embeddings | | | | | | | | | | |
 | arch-value | value heads (on v7) | | | | | | | | — | | |
 | arch-wire-12h | device-and-wire | | | | | | | | | | |
