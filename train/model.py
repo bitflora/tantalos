@@ -33,6 +33,8 @@ class Config:
     # Which architecture (ARCHS below): "gpt" is the original; "modern" is RMSNorm, SwiGLU,
     # RoPE, no biases, no dropout (arm 1 of the 2026-11-15 bake-off).
     arch: str = "gpt"
+    # The vocabulary (id -> token), for architectures that read the tokens themselves ("spatial").
+    itos: tuple = ()
 
 
 def attend(q, k, v, cache, mask, dropout_p):
@@ -140,6 +142,22 @@ class Decoder(nn.Module):
         fused = next(self.parameters()).is_cuda
         return torch.optim.AdamW(groups, lr=lr, betas=betas, fused=fused)
 
+    # Architectures that read the level's structure (Spatial) keep a parser per sampled row:
+    # `_rows(b)` gives them (None for the others), `_step` pairs each step's new tokens with
+    # their features. `featurize` (CPU ids -> features) is None for the others.
+    featurize = None
+
+    def _rows(self, b):
+        return None
+
+    def _step(self, nxt, tracked, rows=None):
+        """The input for one new token per row (nxt: rows x 1): the ids, with their features
+        if `tracked` (only `rows` move on)."""
+        if not tracked:
+            return nxt
+        feats = tracked.feed(nxt[:, 0].tolist(), rows)
+        return nxt, torch.tensor(feats, dtype=torch.long, device=nxt.device)[:, None, :]
+
     @torch.no_grad()
     def generate(self, prompts, max_new, stop, temperature=1.0, top_k=None):
         """Continue each prompt (list of id lists) until `stop` or `max_new` tokens.
@@ -162,6 +180,10 @@ class Decoder(nn.Module):
         for n, rows in by_len.items():
             steps = min(max_new, self.cfg.block_size - n)
             caches = [{"size": n + steps} for _ in self.blocks]
+            tracked = self._rows(len(rows))
+            for r, i in enumerate(rows):
+                if tracked:
+                    tracked.start(r, prompts[i])
             with amp:
                 logits, _ = self(torch.tensor([prompts[i] for i in rows], device=device), caches=caches)
             done = torch.zeros(len(rows), dtype=torch.bool, device=device)
@@ -182,7 +204,7 @@ class Decoder(nn.Module):
                 if done.all() or step == steps - 1:
                     break
                 with amp:
-                    logits, _ = self(nxt, caches=caches, start=n + step)
+                    logits, _ = self(self._step(nxt, tracked), caches=caches, start=n + step)
             gen = torch.cat(new, dim=1).tolist() if new else [[] for _ in rows]
             for r, i in enumerate(rows):
                 seq = gen[r]
@@ -209,6 +231,10 @@ class Decoder(nn.Module):
             first = [{"size": p} for _ in self.blocks]
             prompt_logits, _ = self(torch.tensor([prompt], device=device), caches=first)
         prompt_logits = prompt_logits[0, -1].float()
+        tracked = self._rows(b)
+        for r in range(b):
+            if tracked:
+                tracked.start(r, prompt)
         caches = []
         for c in first:
             shape = (b, c["k"].shape[1], size, c["k"].shape[3])
@@ -255,8 +281,12 @@ class Decoder(nn.Module):
             for c in caches:
                 c["at"], c["len"] = at, longest
             mask = (torch.arange(longest, device=device)[None, :] <= at[:, None])[:, None, None, :]
+            inp = self._step(nxt[:, None], tracked)
+            for r in fresh:  # its next token is its first, after the prompt
+                if tracked:
+                    tracked.start(r, prompt)
             with amp:
-                logits, _ = self(nxt[:, None], caches=caches, positions=at[:, None], mask=mask)
+                logits, _ = self(inp, caches=caches, positions=at[:, None], mask=mask)
             logits = logits[:, -1, :].float()
             if fresh:
                 logits[sorted(fresh)] = prompt_logits
@@ -310,6 +340,7 @@ class Decoder(nn.Module):
         plen = [0] * b
         logits = torch.zeros((b, self.cfg.vocab_size), device=device)
         started = 0
+        tracked = self._rows(b)
 
         def start(r):
             """Row r takes the next prompt, if any: its keys, values and logits."""
@@ -329,6 +360,8 @@ class Decoder(nn.Module):
                 c["k"][r, :, :p], c["v"][r, :, :p] = k[0], v[0]
             logits[r] = lg
             slots[r], outs[i], plen[r] = i, [], p
+            if tracked:
+                tracked.start(r, prompts[i])
 
         def ask():
             """The tokens each row may write next (CPU), or None if unconstrained."""
@@ -389,8 +422,9 @@ class Decoder(nn.Module):
                 for c in caches:
                     c["at"], c["len"] = at, longest
                 mask = (torch.arange(longest, device=device)[None, :] <= at[:, None])[:, None, None, :]
+                inp = self._step(nxt[:, None], tracked, {r for r in range(b) if going[r]})
                 with amp:
-                    new, _ = self(nxt[:, None], caches=caches, positions=at[:, None], mask=mask)
+                    new, _ = self(inp, caches=caches, positions=at[:, None], mask=mask)
                 keep = torch.tensor(going, device=device)[:, None]
                 logits = torch.where(keep, new[:, -1, :].float(), logits)
             allowed = asked.result() if asked is not None else None
@@ -418,7 +452,13 @@ class Decoder(nn.Module):
         causal = torch.ones((n, n), dtype=torch.bool, device=device).tril()
         # A pad looks only at itself, so no row of the softmax is empty.
         mask = (causal[None] & real[:, None, :n]) | torch.eye(n, dtype=torch.bool, device=device)[None]
-        logits, _ = self(ids, caches=caches, positions=pos, mask=mask[:, None])
+        tracked = self._rows(b)
+        inp = ids
+        if tracked:
+            for r, p in enumerate(prompts):
+                tracked.start(r, p)
+            inp = (ids, self.featurize(ids.cpu()).to(device))
+        logits, _ = self(inp, caches=caches, positions=pos, mask=mask[:, None])
         done = torch.zeros(b, dtype=torch.bool, device=device)
         # A row's last step: where it reaches max_new, or the end of the block.
         last = torch.clamp(self.cfg.block_size - lens, max=max_new) - 1
@@ -442,7 +482,8 @@ class Decoder(nn.Module):
             at = n + step
             # A row past its last step is done; its position is only kept inside the block.
             where = (lens + step).clamp(max=self.cfg.block_size - 1)[:, None]
-            logits, _ = self(nxt, caches=caches, positions=where, mask=real[:, None, None, : at + 1])
+            logits, _ = self(self._step(nxt, tracked), caches=caches, positions=where,
+                             mask=real[:, None, None, : at + 1])
         gen = torch.cat(new, dim=1).tolist() if new else [[] for _ in prompts]
         outs = []
         for r, seq in enumerate(gen):
@@ -568,7 +609,66 @@ class Modern(Decoder):
         return logits, loss
 
 
-ARCHS = {"gpt": GPT, "modern": Modern}
+class Spatial(GPT):
+    """Arm 2 of the 2026-11-15 bake-off: today's GPT, each token's input plus two embeddings of
+    the level's structure, from train/spatial.py: the field it fills (its role: `panel.x`,
+    `wire.index`, ...) and the cell it is about (summed x, y and z embeddings; NONE where a
+    coordinate isn't known). Both come from the tokens written so far only.
+
+    Input: ids, or (ids, features) with features batch x tokens x 4 (role, x, y, z). Plain ids
+    are parsed here (on the CPU, so it waits on the GPU) when they're whole sequences from
+    their start; a step after a cached prefix needs its features (the samplers keep a parser
+    per row: `_rows`). Training passes `featurize` to the batching so the parse happens before
+    the batch goes to the GPU."""
+
+    def __init__(self, cfg):
+        import spatial
+
+        if not cfg.itos:
+            raise ValueError("a spatial model needs the vocabulary in its config (Config.itos)")
+        super().__init__(cfg)
+        self.role = nn.Embedding(len(spatial.ROLES), cfg.n_embd)
+        self.cell = nn.ModuleList(nn.Embedding(spatial.COORDS, cfg.n_embd) for _ in range(3))
+        for e in [self.role, *self.cell]:
+            nn.init.normal_(e.weight, std=0.02)
+
+    def featurize(self, ids):
+        import spatial
+
+        return torch.tensor(spatial.features(ids.tolist(), self.cfg.itos), dtype=torch.long)
+
+    def _rows(self, b):
+        import spatial
+
+        return spatial.Rows(self.cfg.itos, b)
+
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
+        if isinstance(idx, tuple):
+            idx, feats = idx
+        elif start == 0 and positions is None:
+            feats = self.featurize(idx.cpu()).to(idx.device)
+        else:
+            raise ValueError("a spatial model's step after a cached prefix needs its features")
+        t = idx.shape[1]
+        if positions is None:
+            assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
+            positions = torch.arange(start, start + t, device=idx.device)
+        x = self.tok(idx) + self.pos(positions) + self.role(feats[..., 0])
+        for a in range(3):
+            x = x + self.cell[a](feats[..., a + 1])
+        x = self.drop(x)
+        for i, block in enumerate(self.blocks):
+            x = block(x, caches[i] if caches is not None else None, mask)
+        logits = self.head(self.ln_f(x))
+        if targets is None:
+            return logits, None
+        loss = F.cross_entropy(
+            logits.float().view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100
+        )
+        return logits, loss
+
+
+ARCHS = {"gpt": GPT, "modern": Modern, "spatial": Spatial}
 
 
 def build_model(cfg):

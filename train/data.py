@@ -316,6 +316,13 @@ def item_spans(level, game_items):
     return sorted(set(out))
 
 
+def inputs(x, device, featurize=None):
+    """A batch's input ids on `device`, with `featurize`'s features of them if given."""
+    if featurize is None:
+        return x.to(device, non_blocking=True)
+    return x.to(device, non_blocking=True), featurize(x).to(device, non_blocking=True)
+
+
 class Away:
     """Levels the game rejected, prompted with their own conditions but `<verdict:solvable>`
     (hidden at random like training prompts), with the positions whose tokens placed a
@@ -348,8 +355,8 @@ class Away:
     def __len__(self):
         return len(self.seqs)
 
-    def batch(self, size, drop, device):
-        """Inputs, the token to push away at each position (-100 = none), padded. The verdict
+    def batch(self, size, drop, device, featurize=None):
+        """Inputs (as `Levels.batch`), the token to push away at each position (-100 = none), padded. The verdict
         always stays; other conditions are hidden with a probability drawn from [0, `drop`]."""
         picks = [self.seqs[random.randrange(len(self.seqs))] for _ in range(size)]
         seqs = []
@@ -367,7 +374,7 @@ class Away:
             x[row, : len(ids) - 1] = torch.tensor(ids[:-1])
             for k in at:
                 y[row, k] = ids[k + 1]
-        return x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+        return inputs(x, device, featurize), y.to(device, non_blocking=True)
 
 
 def groups_in(vocab):
@@ -445,9 +452,11 @@ class Levels:
         learn = [False] * (len(conds) + 2) + [True] * (len(level) + 1)
         return ids, learn
 
-    def batch(self, idx, drop, device):
+    def batch(self, idx, drop, device, featurize=None):
         """Inputs, targets (-100 = ignored), padded to the longest sequence in the batch, and
-        the number of targets (counted here, so the caller needn't wait on the GPU for it)."""
+        the number of targets (counted here, so the caller needn't wait on the GPU for it).
+        With `featurize` (a model's, model.Spatial), the inputs are (ids, its features of them),
+        worked out here on the CPU."""
         seqs = [self.sequence(i, drop) for i in idx]
         width = max(len(ids) for ids, _ in seqs) - 1
         x = torch.full((len(seqs), width), PAD, dtype=torch.long)
@@ -459,7 +468,7 @@ class Levels:
             target[~torch.tensor(learn[1:])] = -100
             y[row, :n] = target
         targets = int((y != -100).sum())
-        return x.to(device, non_blocking=True), y.to(device, non_blocking=True), targets
+        return inputs(x, device, featurize), y.to(device, non_blocking=True), targets
 
 
 def identity(record):

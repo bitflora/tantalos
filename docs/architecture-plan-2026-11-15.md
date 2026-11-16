@@ -101,6 +101,17 @@ Both are computed from already-written tokens only, by a small Python state mach
 **Ready when:** the parser agrees with the grammar on 10k levels, and teacher forcing and
 incremental decoding give identical features at every prefix (a test).
 
+**Built (2026-11-16):** `train/spatial.py` (parser, 176 roles), `model.Spatial` (`--arch
+spatial`), features worked out in the batching on the CPU (~940k tok/s) and by a parser per
+row in every sampler. Readiness:
+- `tests/test_spatial.py --n 10000`: at every prefix of 10,000 levels (Workshop test and
+  generated, 2.37M tokens) the grammar's allowed tokens (editor rules off) are among the
+  parser's, and no real token is `junk`. 0 disagreements.
+- `tests/test_spatial.py`, `tests/test_arch.py`: incremental parsing equals whole-sequence
+  parsing; the cache equals a full pass; greedy samples from all three samplers are the
+  argmax of a full pass over the finished sequence, untrained and after overfitting 3 levels.
+Start: `run.py start arch-spatial-12h --hours 12 --note "..." -- --arch spatial`.
+
 ### Run 3: value heads, `arch-value`. Not a full training run
 Small MLP heads on **v7-fresh-16h's** frozen backbone, trained about 2 hours on prefixes cut
 at item boundaries. They predict the finished level's: solvable / unsolvable / uncertain, log

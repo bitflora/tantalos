@@ -234,7 +234,7 @@ def main():
                  "between architectures)")
     arch = args.arch or init_arch or "gpt"
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout, qk_norm=True,
-                 arch=arch)
+                 arch=arch, itos=tuple(vocab.itos) if arch == "spatial" else ())
     if init:
         # The model's shape comes from the checkpoint; --layers/--heads/--embd are ignored. Its
         # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
@@ -248,6 +248,8 @@ def main():
         if init["model_config"]["block_size"] > args.block:
             sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block at least that")
         cfg = Config(**{**init["model_config"], "vocab_size": len(vocab), "block_size": args.block})
+        if cfg.arch == "spatial":
+            cfg.itos = tuple(vocab.itos)
     model = build_model(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)
     step, best = 0, float("inf")
@@ -298,7 +300,7 @@ def main():
 
     def batch(levels, drop):
         idx = [random.randrange(len(levels)) for _ in range(args.batch)]
-        return levels.batch(idx, drop, device)
+        return levels.batch(idx, drop, device, model.featurize)
 
     # A batch's loss is the mean over its targets. Sorted batches of long levels hold far more
     # targets than batches of short ones, so scale each by its share of the average count:
@@ -323,7 +325,7 @@ def main():
         model.eval()
         total = count = 0
         for i in range(0, len(picks), args.batch):
-            x, y, n = levels.batch(picks[i : i + args.batch], 0.0, device)
+            x, y, n = levels.batch(picks[i : i + args.batch], 0.0, device, model.featurize)
             with amp:
                 total += model(x, y)[1].item() * n
             count += n
@@ -359,7 +361,7 @@ def main():
 
     log = open(out / "log.jsonl", "a")
     model.train()
-    train_batches = batches(train, args.batch, args.bucket, args.cond_drop, device)
+    train_batches = batches(train, args.batch, args.bucket, args.cond_drop, device, model.featurize)
     t0, tokens = time.time(), 0
     def finished():
         return time.time() >= deadline if deadline else step >= args.iters
@@ -375,7 +377,7 @@ def main():
             scaler.scale(loss * weight / args.accum).backward()
             tokens += targets
         if away is not None:
-            ax, ay = away.batch(args.away_batch, args.cond_drop, device)
+            ax, ay = away.batch(args.away_batch, args.cond_drop, device, model.featurize)
             with amp:
                 logits, _ = model(ax)
             mask = ay != -100
@@ -478,7 +480,7 @@ def main():
     record.safely(out)
 
 
-def batches(levels, size, bucket, drop, device):
+def batches(levels, size, bucket, drop, device, featurize=None):
     """Endless training batches: `bucket` batches' worth of random levels at a time, sorted by
     length and dealt out as batches in random order, so a batch's levels are of similar length
     and pad little. (In v3 data, targets fill 85% of a batch's positions this way, and 52% in
@@ -492,7 +494,7 @@ def batches(levels, size, bucket, drop, device):
         chunks = [idx[i : i + size] for i in range(0, n, size)]
         random.shuffle(chunks)
         for chunk in chunks:
-            yield levels.batch(chunk, drop, device)
+            yield levels.batch(chunk, drop, device, featurize)
 
 
 def until(text):

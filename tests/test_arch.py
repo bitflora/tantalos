@@ -39,13 +39,36 @@ def vocab():
 
 def tiny(arch, v, block=96, layers=2):
     torch.manual_seed(0)
-    return build_model(Config(len(v), block, layers, 2, 32, 0.0, qk_norm=True, arch=arch)).to(DEVICE).eval()
+    itos = tuple(v.itos) if arch == "spatial" else ()
+    return build_model(Config(len(v), block, layers, 2, 32, 0.0, qk_norm=True, arch=arch, itos=itos)).to(DEVICE).eval()
+
+
+def part(m, ids, a, b):
+    """Input positions a..b of `ids` as a model takes them after a cached prefix: with their
+    features (from the whole sequence) for a model that has them."""
+    if m.featurize is None:
+        return ids[:, a:b]
+    return ids[:, a:b], m.featurize(ids.cpu()).to(ids.device)[:, a:b]
 
 
 def sequences(v):
     """The levels as training sequences: the unconditioned prompt, the level, EOS."""
     p = sample.prompt(v, [], [])
     return p, [p + v.encode(level.split()) + [EOS] for level in LEVELS]
+
+
+def greedy_matches_full(test, m, prompts, n):
+    """Greedy samples of `m` from `prompts` (each sampler) are each token's argmax in one full
+    forward pass over the finished sequence."""
+    for name, outs in [("generate", m.generate(prompts, n, EOS, top_k=1)),
+                       ("many", m.generate_many(prompts, n, EOS, top_k=1, batch=2)),
+                       ("refill", m.generate_refill(prompts[0], 2, n, EOS, top_k=1, batch=2))]:
+        for p, out in zip(prompts if name != "refill" else [prompts[0]] * 2, outs):
+            ids = torch.tensor([p + out], device=DEVICE)
+            # In bfloat16 as the samplers run (an untrained net's logits nearly tie).
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
+                full = m(ids)[0][0, len(p) - 1 : -1].float().argmax(-1).tolist()
+            test.assertEqual(full, out, name)
 
 
 class Consistency(unittest.TestCase):
@@ -62,7 +85,7 @@ class Consistency(unittest.TestCase):
                     caches = [{"size": ids.shape[1]} for _ in m.blocks]
                     parts = [m(ids[:, :n], caches=caches)[0]]
                     for i in range(n, ids.shape[1]):
-                        parts.append(m(ids[:, i : i + 1], caches=caches, start=i)[0])
+                        parts.append(m(part(m, ids, i, i + 1), caches=caches, start=i)[0])
                 torch.testing.assert_close(torch.cat(parts, dim=1), full, atol=1e-4, rtol=1e-4)
 
     def test_padded_rows_match_alone(self):
@@ -88,6 +111,17 @@ class Consistency(unittest.TestCase):
                 refill = m.generate_refill(p, 3, 40, EOS, top_k=1, batch=2)
                 self.assertEqual(many, [one] * 3)
                 self.assertEqual(refill, [one] * 3)
+
+    def test_greedy_samples_match_full_forward(self):
+        """Each token a greedy sampler writes is the argmax of one full forward pass over the
+        finished sequence: whatever a step fed the net (a spatial model's features from its
+        row's parser) is what the whole sequence gives."""
+        v = vocab()
+        _, seqs = sequences(v)
+        prompts = [seqs[0][:9], seqs[1][:14], seqs[2][:9]]
+        for arch in ARCHS:
+            with self.subTest(arch=arch):
+                greedy_matches_full(self, tiny(arch, v), prompts, 30)
 
 
 class Checkpoints(unittest.TestCase):
@@ -139,6 +173,8 @@ class Overfit(unittest.TestCase):
                     loss.backward()
                     opt.step()
                 m.eval()
+                # Real levels now: every role and cell the parser gives comes up.
+                greedy_matches_full(self, m, [seqs[0][: len(p) + 40], seqs[1][: len(p) + 3], p], 200)
                 # The levels share one prompt, so which one comes is a guess (log 3 over ~20
                 # tokens: ~0.06 at best); untrained, the loss is ~5.
                 self.assertLess(loss.item(), 0.3, f"{arch} didn't learn {len(seqs)} levels")
