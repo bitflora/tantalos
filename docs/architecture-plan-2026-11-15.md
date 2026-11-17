@@ -335,9 +335,9 @@ in Notes.
 | Run | Arm | Params | Peak mem | Yield | Strong | Gap | Solv % | Failures | Away yield | A/B vs control | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | v7-fresh-16h | control (re-evaluated) | | | | | | | | | (vs Workshop, 2026-11-12) | pre-patch data, 16h |
-| arch-modern-12h | modern backbone | | | | | | | | | | trained in parts; its first 4 counted h held ~1.7 h of data loading (fixed in train.py 2026-11-15), so ~10.3 h of real training |
-| arch-spatial-12h | spatial embeddings | | | | | | | | | | |
-| arch-value | value heads (on v7) | | | | | | | | — | | |
+| arch-modern-12h | modern backbone | 10.8M | | 412 | 20 | 6.5 | 39.8 | | 408 | pending | trained in parts; its first 4 counted h held ~1.7 h of data loading (fixed in train.py 2026-11-15), so ~10.3 h of real training |
+| arch-spatial-12h | spatial embeddings | 10.9M | | 439 | 20 | 10.5 | 31.6 | | 502 | pending | paused once at 8.57 h; final model away/best.pt |
+| arch-value | value heads (on v7) | +0.67M heads | | 494 (plain 320) | 25 (plain 12) | 20.9 (plain 14.1) | | | — | pending | k=4, λ=0.25, seed 1, constrained, 512 each; sampling 3,914 s vs 894 s plain (4.4×). Guided levels are smaller (17 items vs 36, floor 70 vs 99), turrets 4% vs 28%, gel 0%; solvable 27% vs 14% but share of solved that are strong unchanged (16% vs 17%) |
 | arch-wire-12h | device-and-wire | | | | | | | | | | |
 | arch-plan-12h | planner + layout | | | | | | | | | | |
 | arch-state-12h | state encoder | | | | | | | | | | |
