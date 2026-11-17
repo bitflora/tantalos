@@ -128,6 +128,38 @@ already in the (patched) data.
 Code: 2–3 days. GPU: about 2h of head training plus evals, so it fits between other runs.
 **Ready when:** the heads beat a constant-prediction baseline on held-out prefixes.
 
+**Built (2026-11-16):** `train/value.py`, heads in `runs/arch-value/heads.pt` (report
+`heads.md`). Input: v7's final hidden state at the prefix's end, beside its mean over the level
+so far. Every prefix is read under the rated prompt, not the level's own conditions, whose
+verdict token would give the label away. Data: 102k levels from the default v5b files (Workshop
+40k), plus earlier runs' rated eval samples. Held out: a tenth of puzzles by `data.identity`,
+and v7's own 512 rated samples. That's 716k prefixes in all; extraction takes 7 minutes and
+training 2.
+- Readiness on held-out puzzles: every head beats the constant prediction.
+  - Verdict CE: 0.80 against 1.00.
+  - Log length MSE: 0.22 against 0.41.
+  - Strong BCE: 0.47 against 0.64, AUC 0.83.
+  - Families BCE: 0.37 against 0.62.
+- On v7's own samples, the distribution guiding sees, three of four beat it. Strong ranks better
+  than chance (AUC 0.65) but is overconfident: BCE 0.58 against 0.51.
+- First third of a level: weaker but still above the constant on held-out puzzles. On v7's
+  samples, the verdict head there is no better than the constant (1.12 against 1.10).
+- Guided sampling is `sample.generate(guide=..., k=...)`, behind `--guide HEADS --k K` in
+  `rated.py` and `evaluate.py`, and `--guide-a`/`--guide-b` in `abtest.py pick`.
+  - At each record boundary it draws k drafts of the next record.
+  - The net's first draft decides whether the level ends. When the heads could pick an ending
+    draft too, levels never ended.
+  - Otherwise it keeps the going draft with the highest P(solvable)·P(strong|solvable) −
+    0.25·P(unsolvable). With λ = 1 it favoured huge "uncertain" rooms.
+- Tests: `tests/test_value.py`.
+- Run:
+  ```
+  python train/rated.py runs/v7-fresh-16h/best.pt --constrained --temperature 0.7 --seed 1 --out runs/arch-value/rated-plain
+  python train/rated.py runs/v7-fresh-16h/best.pt --constrained --temperature 0.7 --seed 1 --guide runs/arch-value/heads.pt --k 4 --out runs/arch-value/rated-k4
+  ```
+  Same seed and same weights, so plain against guided is the comparison. The A/B is then
+  `abtest.py pick arch-value-ab runs/v7-fresh-16h/best.pt runs/v7-fresh-16h/best.pt --guide-a runs/arch-value/heads.pt --n 5 --constrained --game`.
+
 ### Run 4: device-and-wire Transformer, `arch-wire-12h` (from Codex's plan)
 The same chambers, in a typed form: geometry, then one record per device (type, cell, facing,
 attributes), then wires. Each wire endpoint is chosen by a **pointer** over the devices

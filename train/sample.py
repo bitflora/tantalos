@@ -107,13 +107,20 @@ class LegalLevels:
 
 
 def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, batch=32, refill=False,
-             constrained=False, tantalos=DEFAULT_TANTALOS):
+             constrained=False, tantalos=DEFAULT_TANTALOS, guide=None, k=4):
     """`n` token lines (prefix included). `refill` starts a new level in a batch row as soon as
     its last one ends (GPT.generate_refill): levels from the same distribution (greedy ones
     identical), 1.6 times as fast for v6-fresh-12h at batch 64 (2026-10-27), but other samples
     for a given seed than without it. `constrained` writes only tokens `tantalos-score grammar`
     allows (src/grammar.rs: levels that parse, wires to items that exist, items mounted on
-    something), refilling rows as `refill` does."""
+    something), refilling rows as `refill` does. `guide` (value heads' file, train/value.py) keeps
+    the best of `k` drafts of every record (bake-off run 3)."""
+    if guide is not None:
+        import value
+        assert not prefix, "guided sampling starts from an empty level"
+        heads = value.load_heads(guide, next(model.parameters()).device)
+        return value.generate(model, vocab, heads, n, conds, temperature, top_k, batch, k,
+                              constrained=constrained, tantalos=tantalos, log=lambda m: print(m, flush=True))
     p = prompt(vocab, list(conds), list(prefix))
     if constrained:
         grammar = Grammar(tantalos)

@@ -63,7 +63,7 @@ def playable(r):
     return True
 
 
-def model_side(checkpoint, n, pool, temperature, tantalos, out, seed, constrained=False):
+def model_side(checkpoint, n, pool, temperature, tantalos, out, seed, constrained=False, guide=None, k=4):
     import torch
     import sample
 
@@ -71,17 +71,17 @@ def model_side(checkpoint, n, pool, temperature, tantalos, out, seed, constraine
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, vocab, _ = sample.load_checkpoint(checkpoint, device)
     toks = rated.prompt(vocab)
-    how = ", constrained" if constrained else ""
+    how = (", constrained" if constrained else "") + (f", guided by {guide} (best of {k})" if guide else "")
     print(f"{checkpoint}: sampling {pool} x {' '.join(toks)} at temperature {temperature}{how}", flush=True)
     lines = sample.generate(model, vocab, pool, toks, (), temperature, None, 32, constrained=constrained,
-                            tantalos=tantalos)
+                            tantalos=tantalos, guide=guide, k=k)
     del model
     torch.cuda.empty_cache()
     rows = rated.assess(lines, tantalos, p2c_dir=out / "p2c")
     good = sorted((r for r in rows if playable(r)), key=rank)
     print(f"  {len(good)} of {pool} playable; outcomes {dict(Counter(r['outcome'] for r in rows))}", flush=True)
     return good, {"source": str(checkpoint), "prompt": toks, "temperature": temperature, "pool": pool,
-                  "constrained": constrained, "playable": len(good)}
+                  "constrained": constrained, "guide": guide, "k": k if guide else None, "playable": len(good)}
 
 
 def workshop_side(n, tantalos, out, seed):
@@ -130,7 +130,8 @@ def pick(a):
         if src == "workshop":
             rows, info = workshop_side(a.n, a.tantalos, d, seed)
         else:
-            rows, info = model_side(src, a.n, a.pool, a.temperature, a.tantalos, d, seed, a.constrained)
+            guide = a.guide_a if label == "A" else a.guide_b
+            rows, info = model_side(src, a.n, a.pool, a.temperature, a.tantalos, d, seed, a.constrained, guide, a.k)
         chosen = diverse(rows, a.n * 3 if a.game else a.n, d)
         sides[label] = (chosen, info)
     game = "unchecked"
@@ -250,6 +251,9 @@ def main():
     p.add_argument("--game", action="store_true", help="check the picks in Portal 2's editor first")
     p.add_argument("--constrained", action="store_true",
                    help="models sample only tokens `tantalos-score grammar` allows (src/grammar.rs)")
+    p.add_argument("--guide-a", default=None, help="value heads (train/value.py) guiding side A's sampling")
+    p.add_argument("--guide-b", default=None, help="the same for side B")
+    p.add_argument("--k", type=int, default=4, help="drafts per record when guided")
     p.add_argument("--tantalos", default=str(sample.DEFAULT_TANTALOS))
     p.add_argument("--out", default=None)
     p.add_argument("--dest", default=None, help="stage here instead of the Puzzle Maker folder (tests)")

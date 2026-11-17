@@ -225,17 +225,17 @@ def section(s, prompt_tokens, temperature):
 
 
 def run(model, vocab, n, tantalos, budget=50_000, temperature=1.0, top_k=None, batch=32, p2c_dir=None,
-        constrained=False):
+        constrained=False, guide=None, k=4):
     """Sample n levels with the rated prompt and assess them: (summary, rows, prompt).
     `constrained`: sample only tokens `tantalos-score grammar` allows (sample.generate)."""
     import sample
 
     toks = prompt(vocab)
     t = time.time()
-    how = ", constrained" if constrained else ""
+    how = (", constrained" if constrained else "") + (f", guided by {guide} (best of {k})" if guide else "")
     print(f"rated: sampling {n} x {' '.join(toks)} at temperature {temperature}{how}", flush=True)
     lines = sample.generate(model, vocab, n, toks, (), temperature, top_k, batch, constrained=constrained,
-                            tantalos=tantalos)
+                            tantalos=tantalos, guide=guide, k=k)
     print(f"rated: sampled in {time.time() - t:.0f}s; scoring", flush=True)
     t = time.time()
     rows = assess(lines, tantalos, budget, p2c_dir)
@@ -258,6 +258,8 @@ def main():
     ap.add_argument("--constrained", action="store_true",
                     help="sample only tokens `tantalos-score grammar` allows (src/grammar.rs)")
     ap.add_argument("--batch", type=int, default=32)
+    ap.add_argument("--guide", default=None, help="value heads (train/value.py): keep the best of --k drafts per record")
+    ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--out", default=None, help="directory (default <checkpoint dir>/rated)")
     ap.add_argument("--seed", type=int, default=None)
     a = ap.parse_args()
@@ -268,8 +270,9 @@ def main():
     out = Path(a.out) if a.out else Path(a.checkpoint).parent / "rated"
     out.mkdir(parents=True, exist_ok=True)
     s, rows, toks = run(model, vocab, a.n, a.tantalos, a.budget, a.temperature, a.top_k, a.batch,
-                        constrained=a.constrained)
-    s.update(prompt=toks, temperature=a.temperature, top_k=a.top_k, seed=seed, constrained=a.constrained)
+                        constrained=a.constrained, guide=a.guide, k=a.k)
+    s.update(prompt=toks, temperature=a.temperature, top_k=a.top_k, seed=seed, constrained=a.constrained,
+             guide=a.guide, k=a.k if a.guide else None)
     (out / "rated.json").write_text(json.dumps(s, indent=1))
     with open(out / "samples.jsonl", "w", encoding="utf-8") as f:
         f.writelines(json.dumps({k: v for k, v in r.items() if k != "desc"}) + "\n" for r in rows)

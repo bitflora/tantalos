@@ -190,7 +190,8 @@ def report(ev):
         "",
         f"Step {ev['step']}, val loss {ev['val_loss']:.4f}. Temperature {ev['temperature']}, "
         f"top-k {ev['top_k']}, solver budget {ev['budget']}, seed {ev['seed']}"
-        + (", constrained decoding (tantalos-score grammar)." if ev.get("constrained") else ", free decoding."),
+        + (", constrained decoding (tantalos-score grammar)." if ev.get("constrained") else ", free decoding.")
+        + (f" Guided by value heads `{ev['guide']}`, best of {ev['k']} per record." if ev.get("guide") else ""),
         "",
         f"## Validity ({v['n']} levels asked for `{SOLVABLE}`)",
         "",
@@ -309,6 +310,9 @@ def main():
     ap.add_argument("--constrained", action="store_true",
                     help="sample only tokens `tantalos-score grammar` allows (src/grammar.rs), here and in "
                     "the rated-style section; EVAL and yield then compare only with constrained runs")
+    ap.add_argument("--guide", default=None,
+                    help="value heads (train/value.py, bake-off run 3): keep the best of --k drafts per record")
+    ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--rated-n", type=int, default=512,
                     help="levels for the rated-style section (train/rated.py; 0: skip)")
     ap.add_argument("--rated-temperature", type=float, default=0.7,
@@ -339,7 +343,7 @@ def main():
         print(f"sampling {n:>4} x {' '.join(conds) or '(no conditions)'}", flush=True)
         t = time.time()
         got = sample.generate(model, vocab, n, conds, (), args.temperature, args.top_k, args.batch,
-                              constrained=args.constrained, tantalos=args.tantalos)
+                              constrained=args.constrained, tantalos=args.tantalos, guide=args.guide, k=args.k)
         if name == "baseline":
             baseline_gen_s = time.time() - t
         lines += got
@@ -434,7 +438,7 @@ def main():
     if args.rated_n:
         rated_summary, rated_rows, rated_prompt = rated.run(
             model, vocab, args.rated_n, args.tantalos, args.budget, args.rated_temperature,
-            constrained=args.constrained)
+            constrained=args.constrained, guide=args.guide, k=args.k)
         rated_summary.update(prompt=rated_prompt, temperature=args.rated_temperature)
         with open(out / "rated-samples.jsonl", "w", encoding="utf-8") as f:
             f.writelines(json.dumps({k: v for k, v in r.items() if k != "desc"}) + "\n" for r in rated_rows)
@@ -448,6 +452,8 @@ def main():
         "top_k": args.top_k,
         "budget": args.budget,
         "constrained": args.constrained,
+        "guide": args.guide,
+        "k": args.k if args.guide else None,
         "validity": validity,
         "conditioning": conditioning,
         "novelty": novelty,
