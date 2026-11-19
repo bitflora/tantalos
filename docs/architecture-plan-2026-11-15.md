@@ -305,6 +305,74 @@ Code: 4–5 days.
 **Ready when:** the `grid` output matches the grammar's state on 1k levels, and a smoke run
 fits in memory.
 
+**Built (2026-11-19).** The code is in `train/state.py`, `model.State` (`--arch state`) and
+`tantalos-score grid`; the tests are `tests/test_state.py` and the shared `tests/test_arch.py`
+checks.
+- **Grid.** Each cell holds three codes, at most 32 a side, x-major:
+  - `cell`: outside, solid, open or goo;
+  - `white`: 6 bits, one per side with a white surface;
+  - `item`: an item word and its facing, or a part (a glass box's cells, a plate's target, a
+    rail's far end); a later item overwrites.
+
+  Python builds the grid from the tokens. `tantalos-score grid` prints Rust's own geometry
+  (`Level`), and `train/state.py check` compares the two.
+  - Geometry (the grammar's state, the tokens before the first item): 0 of 1,000 levels differ.
+  - Whole levels: 118 of 1,000 differ, each by white faces Rust turns off under an item
+    mounted there (a door, for instance). The item channel marks those cells anyway.
+- **Deviation from the plan: no grid cache on disk.** The plan cached Rust-built grids. Grids
+  are built on the fly from the tokens instead, in the batching thread for training and per row
+  when sampling: 2.4M levels with 8 dense snapshots each would be far too big to store.
+- **Encoder.** 1.04M parameters, 0.2M of them the block embedding.
+  - Each voxel's input: its cell one-hot (solid, open or goo; outside is all zeros), its six
+    white-side bits, and a 16-wide item embedding placed only where an item stands.
+  - Then a 2×2×2 patch convolution (to 64 channels), a 3×3×3 convolution, a stride-2 one (to
+    128) and one more. That gives one memory token per 4×4×4 cells, at most 8×8×8.
+  - A learned embedding of each token's block, then a LayerNorm.
+  - Cells outside the chamber are zeroed after every layer, so a grid encodes the same whether
+    it's alone or padded in a batch (tested).
+  - The first version embedded every voxel's three codes. Its embedding backward (millions of
+    indices into a few rows), together with cross-attention dropout, made a step 5× slower than
+    the GPT's.
+- **Decoder.** Today's GPT with `--layers 5` (one fewer). After blocks 1, 3 and 4 it
+  cross-attends to the memory (no attention dropout), plus a learned "nothing" key every token
+  can always see. 11.83M parameters in all, against the GPT's 10.79M (positions not counted).
+- **Snapshots.**
+  - A snapshot is the grid of the tokens before an item's word.
+  - In training, each sequence gets up to **4** of them at random item boundaries, not the
+    plan's 8. On real length-bucketed batches (RTX 3050, batch 16), 8 snapshots ran at 20k
+    tokens/s and 4 at 36k, against the GPT's 56k. 4 buys 1.8× more training in the same hours. Each token from
+    a boundary on sees that snapshot until the next one; tokens before the first item see only
+    the "nothing" key.
+  - When sampling, a row's grid is rebuilt every time it writes an item word that isn't a wire
+    target, so it always sees every earlier item. So sampled grids are fresher than training's
+    (which can be up to several items stale); the grid never contradicts the tokens.
+  - Validation batches get 4 random snapshots like training ones. A whole sequence fed at once
+    (a prompt, the tests) gets every boundary, which is what the samplers give token by token
+    (`tests/test_arch.py`: greedy samples match a full pass).
+- **Unchanged:** constrained decoding (the level grammar), evaluation, `rated.py`, `abtest.py`
+  and training away. Value heads aren't supported.
+
+Readiness:
+- `train/state.py check --n 1000`: geometry grids match `tantalos-score grid` on all 1,000
+  levels.
+- `tests/test_state.py` checks:
+  - the geometry against Rust;
+  - item and part painting, with wire targets not counted as items;
+  - snapshot positions and `which`;
+  - that a sampled row's grid equals the snapshot;
+  - that tokens before a snapshot are bit-for-bit unchanged when that snapshot's grid changes,
+    while tokens after it change;
+  - that padding changes no memory.
+- `tests/test_arch.py` runs every shared check on the state model too: cache consistency, the
+  samplers agreeing, greedy samples matching a full pass, checkpoint reload, and a tiny model's
+  constrained samples parsing.
+- Smoke runs (batch 16, block 1024):
+  - 3,000 steps at 23–28k tokens/s, val loss 1.61 → 1.46;
+  - evaluation peaks at 3.2 GB of GPU memory;
+  - 8 constrained samples: 2 solvable, 1 uncertain.
+
+Start: `run.py start arch-state-12h --hours 12 --note "..." -- --arch state --layers 5`.
+
 ### Run 7: graph editor, `arch-edit-12h` (both plans; Codex's version)
 A small graph encoder reads a verified parent as devices, wires and spatial relations. An
 edit decoder proposes one edit per attempt: a rewire, an added prerequisite or a signal swap

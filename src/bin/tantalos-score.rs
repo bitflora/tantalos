@@ -57,6 +57,13 @@ const USAGE: &str = "usage:
                                   (end: the level may end here)
                                 --check FILE: whether each line's \"tokens\" (JSONL) is a whole
                                 legal level; one JSON line per input, {\"ok\":B[,\"error\":...]}
+  tantalos-score grid            the chamber's geometry as a voxel grid, for the state-encoder
+                                arm (train/state.py checks its own grid against it): one JSONL
+                                line in (\"tokens\": a level, whole or up to an item) per line out,
+                                {\"size\":[X,Y,Z],\"cells\":HEX} or {\"error\":...}. Two hex digits a
+                                cell, x-major (cell (x,y,z) at (x*Y+y)*Z+z): bit 0 solid, bit 1
+                                goo, bits 2-7 a portal surface on the cell's +x -x +y -y +z -z
+                                side (an open cell beside a solid one, that face white).
   tantalos-score route [--plan TOKENS [--mode conservative|liberal]] <file.p2c>
                                 the conservative plan made concrete for playing it in the game:
                                 where to stand, look, fire and walk (JSON lines, src/route.rs).
@@ -74,6 +81,7 @@ fn main() -> ExitCode {
         Some("route") => Some(run_route(&args[1..])),
         Some("env") => Some(run_env(&args[1..])),
         Some("grammar") => Some(run_grammar(&args[1..])),
+        Some("grid") => Some(run_grid(&args[1..])),
         _ => None,
     })
 }
@@ -586,5 +594,57 @@ fn run_check(args: &[String]) -> Result<()> {
         },
     )?;
     out.flush()?;
+    Ok(())
+}
+
+/// `grid`: per level line, its geometry as `Level` builds it (solid, goo, white surfaces).
+fn run_grid(args: &[String]) -> Result<()> {
+    use std::io::BufRead;
+    use tantalos::geom::Dir;
+    use tantalos::mutate::json_field;
+    if !args.is_empty() {
+        return Err(format!("grid takes no arguments
+{USAGE}").into());
+    }
+    const SIDES: [Dir; 6] = [Dir::PosX, Dir::NegX, Dir::PosY, Dir::NegY, Dir::PosZ, Dir::NegZ];
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for line in std::io::stdin().lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let toks = json_field(&line, "tokens").unwrap_or(line.clone());
+        match tokens::decode(&toks) {
+            Err(e) => writeln!(out, "{{\"error\":{}}}", dataset::json_str(&e))?,
+            Ok(p) => {
+                let level = Level::from_puzzle(&p);
+                let [sx, sy, sz] = level.size;
+                let mut hex = String::with_capacity((2 * sx * sy * sz) as usize);
+                for x in 0..sx {
+                    for y in 0..sy {
+                        for z in 0..sz {
+                            let c = [x, y, z];
+                            let mut v = 0u8;
+                            if level.solid(c) {
+                                v |= 1;
+                            } else {
+                                if level.goo(c) {
+                                    v |= 2;
+                                }
+                                for (k, d) in SIDES.into_iter().enumerate() {
+                                    if level.portal_surface(c, d) {
+                                        v |= 4 << k;
+                                    }
+                                }
+                            }
+                            hex.push_str(&format!("{v:02x}"));
+                        }
+                    }
+                }
+                writeln!(out, "{{\"size\":[{sx},{sy},{sz}],\"cells\":\"{hex}\"}}")?;
+            }
+        }
+        out.flush()?;
+    }
     Ok(())
 }

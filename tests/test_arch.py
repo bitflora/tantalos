@@ -40,7 +40,7 @@ def vocab():
 
 def tiny(arch, v, block=96, layers=2):
     torch.manual_seed(0)
-    itos = tuple(v.itos) if arch in ("spatial", "wire", "plan") else ()
+    itos = tuple(v.itos) if arch in ("spatial", "wire", "plan", "state") else ()
     pointers = wire.POINTERS if arch == "wire" else 0
     return build_model(Config(len(v) + pointers, block, layers, 2, 32, 0.0, qk_norm=True, arch=arch, itos=itos,
                               pointers=pointers)).to(DEVICE).eval()
@@ -51,7 +51,8 @@ def part(m, ids, a, b):
     features (from the whole sequence) for a model that has them."""
     if m.featurize is None:
         return ids[:, a:b]
-    return ids[:, a:b], m.featurize(ids.cpu()).to(ids.device)[:, a:b]
+    whole = m.featurize(ids.cpu(), None) if m.cfg.arch == "state" else m.featurize(ids.cpu())  # every snapshot
+    return ids[:, a:b], whole.to(ids.device)[:, a:b]
 
 
 def sequences(v, arch="gpt"):

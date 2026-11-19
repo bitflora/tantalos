@@ -248,7 +248,7 @@ def main():
     number_of = torch.full((len(vocab),), -1, dtype=torch.long)
     number_of[numbers] = torch.arange(len(numbers))
 
-    reads = arch in ("spatial", "wire", "plan")  # architectures that read the tokens themselves
+    reads = arch in ("spatial", "wire", "plan", "state")  # architectures that read the tokens themselves
     pointers = 0
     if arch == "wire":
         import wire
@@ -270,7 +270,7 @@ def main():
             sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block at least that")
         cfg = Config(**{**init["model_config"], "block_size": args.block})
         cfg.vocab_size = len(vocab) + cfg.pointers
-        if cfg.arch in ("spatial", "wire", "plan"):
+        if cfg.arch in ("spatial", "wire", "plan", "state"):
             cfg.itos = tuple(vocab.itos)
     model = build_model(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)

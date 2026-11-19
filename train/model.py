@@ -897,7 +897,223 @@ class Plan(GPT):
         return [self.cfg.itos[i] for i in ids[k + 1 :]], None
 
 
-ARCHS = {"gpt": GPT, "modern": Modern, "spatial": Spatial, "wire": Wire, "plan": Plan}
+class Cross(nn.Module):
+    """Cross-attention from the tokens to a memory (model.State: the grid encoder's), added to
+    the residual stream. `mask` (bool, batch x 1 x tokens x keys, or x 1 x keys): which keys each
+    token may see."""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.ln = nn.LayerNorm(cfg.n_embd)
+        self.q = nn.Linear(cfg.n_embd, cfg.n_embd)
+        self.kv = nn.Linear(cfg.n_embd, 2 * cfg.n_embd)
+        self.proj = nn.Linear(cfg.n_embd, cfg.n_embd)
+        self.n_head = cfg.n_head
+        self.resid_drop = nn.Dropout(cfg.dropout)
+
+    def forward(self, x, mem, mask):
+        b, t, c = x.shape
+        h = self.n_head
+        q = self.q(self.ln(x)).view(b, t, h, c // h).transpose(1, 2)
+        k, v = self.kv(mem).split(c, dim=2)
+        k, v = (z.view(b, -1, h, c // h).transpose(1, 2).to(q.dtype) for z in (k, v))
+        # No attention dropout: with a mask, its kernel took 13 ms a call on the 3050.
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        return x + self.resid_drop(self.proj(y.transpose(1, 2).reshape(b, t, c)))
+
+
+class GridEncoder(nn.Module):
+    """The chamber grid (train/state.py: cell, white sides, item per voxel) to memory tokens. A
+    voxel's input: its cell (solid, open, goo: one-hot; outside: none), its six white-side bits,
+    and its item's embedding (only where one stands: embedding every voxel was the slowest part
+    of a step). Then a 2 x 2 x 2 patch convolution, a 3D convolution, a strided one (a token per
+    4 x 4 x 4 cells) and one more, then a token's place (its 4-cell block, of 8 x 8 x 8) added.
+    Outside the chamber stays zero at every layer, so a grid comes out the same however it was
+    padded. Returns memory (N x M x n_embd) and which tokens hold some of the chamber (N x M)."""
+
+    def __init__(self, cfg, width=16):
+        import state
+
+        super().__init__()
+        self.item = nn.Embedding(state.CODES, width, padding_idx=0)
+        inputs = (state.CELLS - 1) + 6 + width
+        self.convs = nn.ModuleList([nn.Conv3d(inputs, 64, 2, stride=2), nn.Conv3d(64, 64, 3, padding=1),
+                                    nn.Conv3d(64, 128, 3, stride=2, padding=1), nn.Conv3d(128, 128, 3, padding=1)])
+        self.out = nn.Linear(128, cfg.n_embd)
+        self.place = nn.Embedding(8 * 8 * 8, cfg.n_embd)
+        self.ln = nn.LayerNorm(cfg.n_embd)
+
+    def forward(self, grids, sizes):
+        import state
+
+        dtype = torch.get_autocast_dtype("cuda") if grids.is_cuda and torch.is_autocast_enabled("cuda") else torch.float32
+        cell, white, item = grids[:, 0].long(), grids[:, 1], grids[:, 2]
+        n, x, y, z = cell.shape
+        parts = [F.one_hot(cell, state.CELLS)[..., 1:].to(dtype),
+                 ((white[..., None] >> torch.arange(6, device=grids.device, dtype=torch.uint8)) & 1).to(dtype)]
+        emb = torch.zeros((n, x, y, z, self.item.embedding_dim), dtype=dtype, device=grids.device)
+        at = item.nonzero(as_tuple=True)
+        emb[at] = self.item(item[at].long()).to(dtype)
+        h = torch.cat(parts + [emb], -1).permute(0, 4, 1, 2, 3)
+        scale = 1
+        for conv in self.convs:
+            h = F.gelu(conv(h))
+            scale *= conv.stride[0]
+            h = h * self._inside(sizes, scale, h.shape[2:])[:, None]
+        n, _, x, y, z = h.shape
+        inside = self._inside(sizes, scale, (x, y, z)).flatten(1)
+        cx, cy, cz = torch.meshgrid(*(torch.arange(k, device=h.device) for k in (x, y, z)), indexing="ij")
+        place = ((cx * 8 + cy) * 8 + cz).flatten()
+        mem = self.ln(self.out(h.flatten(2).transpose(1, 2)) + self.place(place)[None])
+        return mem, inside
+
+    @staticmethod
+    def _inside(sizes, scale, dims):
+        """N x X x Y x Z: the cells at this scale that hold some of the chamber."""
+        lim = (sizes + scale - 1) // scale
+        axes = [torch.arange(d, device=sizes.device) for d in dims]
+        return ((axes[0][None, :, None, None] < lim[:, 0, None, None, None])
+                & (axes[1][None, None, :, None] < lim[:, 1, None, None, None])
+                & (axes[2][None, None, None, :] < lim[:, 2, None, None, None]))
+
+
+class Memory:
+    """The grid memory of a sampled batch's rows for one step (model.State._step): `mem` (rows x
+    M x n_embd) and `valid` (rows x M; a row with no grid yet has none)."""
+
+    def __init__(self, mem, valid):
+        self.mem, self.valid = mem, valid
+
+
+def cross_layers(n):
+    """The blocks a State model cross-attends after: every other one, and the last."""
+    return [i for i in range(n) if i % 2 == 1 or i == n - 1]
+
+
+class State(GPT):
+    """Arm 6 of the 2026-11-15 bake-off: today's GPT (a layer fewer: `--layers 5`) that
+    cross-attends, after some blocks (`cross_layers`), to the chamber written so far: a voxel grid
+    (train/state.py) read by `GridEncoder`. Each token sees the grid of the latest snapshot at or
+    before it (an item boundary: the grid of everything before that item's word), and a learned
+    "nothing" key always.
+
+    Input: ids, or (ids, state.Grids) (training: `featurize`, up to state.SNAPSHOTS random
+    boundaries; whole sequences: every boundary), or (ids, Memory) for a sampled step (the
+    samplers keep each row's grid, `state.Rows`, rebuilt when it starts an item)."""
+
+    def __init__(self, cfg):
+        if not cfg.itos:
+            raise ValueError("a state model needs the vocabulary in its config (Config.itos)")
+        super().__init__(cfg)
+        self.encoder = GridEncoder(cfg)
+        self.cross = nn.ModuleDict({str(i): Cross(cfg) for i in cross_layers(cfg.n_layer)})
+        self.null = nn.Parameter(torch.zeros(1, 1, cfg.n_embd))
+        for m in (self.encoder.item, self.encoder.out, self.encoder.place, *self.cross.values()):
+            m.apply(self._init)
+        with torch.no_grad():
+            self.encoder.item.weight[0].zero_()
+        for c in self.cross.values():
+            nn.init.normal_(c.proj.weight, std=0.02 / math.sqrt(2 * cfg.n_layer))
+        nn.init.normal_(self.null, std=0.02)
+
+    def featurize(self, ids, limit=-1):
+        """Grids of a batch of ids (CPU), for training and validation batches: up to `limit`
+        (default state.SNAPSHOTS) random boundaries; None: every one (a whole sequence fed
+        at once, as the samplers would see it token by token)."""
+        import state
+
+        return state.features(ids, self.cfg.itos, state.SNAPSHOTS if limit == -1 else limit)
+
+    def _rows(self, b):
+        import state
+
+        rows = state.Rows(self.cfg.itos, b)
+        rows.mem = rows.valid = None
+        return rows
+
+    def _step(self, nxt, tracked, rows=None):
+        tracked.feed(nxt[:, 0].tolist(), rows)
+        self._refresh(tracked, nxt.device)
+        return nxt, Memory(tracked.mem, tracked.valid)
+
+    def _refresh(self, tracked, device):
+        """Encode the grids of the rows whose grid changed into the rows' memory."""
+        import state
+
+        fresh = tracked.take()
+        b = len(tracked.ids)
+        if tracked.mem is None:
+            tracked.mem = torch.zeros((b, 1, self.cfg.n_embd), device=device)
+            tracked.valid = torch.zeros((b, 1), dtype=torch.bool, device=device)
+        for r, g in fresh.items():
+            if g is None:
+                tracked.valid[r] = False
+        rows = [r for r, g in fresh.items() if g is not None]
+        if not rows:
+            return
+        grids, sizes = state.stack([fresh[r] for r in rows])
+        with torch.no_grad():
+            mem, valid = self.encoder(grids.to(device), sizes.to(device))
+        m = mem.shape[1]
+        if m > tracked.mem.shape[1]:
+            extra = m - tracked.mem.shape[1]
+            tracked.mem = torch.cat([tracked.mem, tracked.mem.new_zeros((b, extra, tracked.mem.shape[2]))], 1)
+            tracked.valid = torch.cat([tracked.valid, tracked.valid.new_zeros((b, extra))], 1)
+        idx = torch.tensor(rows, device=device)
+        tracked.mem[idx] = 0
+        tracked.valid[idx] = False
+        tracked.mem[idx, :m] = mem.float()
+        tracked.valid[idx, :m] = valid
+
+    def _memory(self, feats, b):
+        """Keys (b x K x n_embd, the "nothing" key first) and the mask of which each token sees."""
+        null = self.null.expand(b, 1, -1)
+        if isinstance(feats, Memory):
+            mem = torch.cat([null.to(feats.mem.dtype), feats.mem], 1)
+            valid = torch.cat([feats.valid.new_ones((b, 1)), feats.valid], 1)
+            return mem, valid[:, None, None, :]
+        if feats.grids.shape[0] == 0:
+            return null, None
+        enc, inside = self.encoder(feats.grids, feats.sizes)
+        s, m = feats.slots, enc.shape[1]
+        full = enc.new_zeros((b, s, m, enc.shape[2]))
+        full[feats.owner, feats.slot - 1] = enc
+        ok = inside.new_zeros((b, s, m))
+        ok[feats.owner, feats.slot - 1] = inside
+        mem = torch.cat([null.to(enc.dtype), full.view(b, s * m, -1)], 1)
+        slot = torch.cat([torch.zeros(1, dtype=torch.long, device=enc.device),
+                          torch.arange(1, s + 1, device=enc.device).repeat_interleave(m)])
+        valid = torch.cat([ok.new_ones((b, 1)), ok.view(b, s * m)], 1)
+        mask = ((slot[None, None, :] == feats.which[:, :, None]) & valid[:, None, :]) | (slot == 0)[None, None, :]
+        return mem, mask[:, None]
+
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
+        if isinstance(idx, tuple):
+            idx, feats = idx
+        elif start == 0 and positions is None:
+            feats = self.featurize(idx.cpu(), None).to(idx.device)
+        else:
+            raise ValueError("a state model's step after a cached prefix needs its grids")
+        b, t = idx.shape
+        if positions is None:
+            assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
+            positions = torch.arange(start, start + t, device=idx.device)
+        mem, cmask = self._memory(feats, b)
+        x = self.drop(self.tok(idx) + self.pos(positions))
+        for i, block in enumerate(self.blocks):
+            x = block(x, caches[i] if caches is not None else None, mask)
+            if str(i) in self.cross:
+                x = self.cross[str(i)](x, mem, cmask)
+        logits = self.head(self.ln_f(x))
+        if targets is None:
+            return logits, None
+        loss = F.cross_entropy(
+            logits.float().view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100
+        )
+        return logits, loss
+
+
+ARCHS = {"gpt": GPT, "modern": Modern, "spatial": Spatial, "wire": Wire, "plan": Plan, "state": State}
 
 
 def build_model(cfg):
