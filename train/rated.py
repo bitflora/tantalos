@@ -148,7 +148,9 @@ def assess(lines, tantalos, budget=50_000, p2c_dir=None):
         rows.append({"i": i, "line": b.get("line", i + 1), "sample": line, "outcome": outcome(a, b),
                      "tokens": b.get("tokens"), "min_len": b.get("min_len"), "metrics": b.get("metrics"),
                      "problem": a.get("problem") or b.get("problem"), "dead": b.get("dead"), "state": s, "tricks": t,
-                     "desc": describe(line)})
+                     "desc": describe(line), 'wire_count': line.split().count('>'),
+                     'compile_failure': line == '<wire-compile-failure>',
+                     'powered_solution': bool((b.get('metrics') or {}).get('mechanic_bits', 0) & (1 << 15))})
     probes = [r for r in rows if r["outcome"] not in ("unparsed",) and r["tokens"]]
     for r, near in zip(probes, nearest([str(WS_TRAIN)], [(-1, r["tokens"]) for r in probes])):
         r["copy"] = hash(r["tokens"]) in known
@@ -174,6 +176,9 @@ def summarize(rows, ref):
     p = profile(r["desc"] for r in ok)
     return {
         "n": len(rows),
+        "compile_failures": sum(r.get('compile_failure', False) for r in rows),
+        "wire_count": sum(r.get('wire_count', 0) for r in rows),
+        "powered_solutions": sum(r.get('powered_solution', False) for r in rows),
         "outcomes": {k: out[k] / n for k in ("unparsed", "broken", "editor", "solvable", "uncertain", "unsolvable")},
         "valid": len(ok) / n,
         "novel_of_valid": sum(bool(r.get("novel")) for r in ok) / max(len(ok), 1),
@@ -221,6 +226,10 @@ def section(s, prompt_tokens, temperature):
               f"| solved: tricks | {num(so['tricks'], '.2f')} | {num(rs['tricks'], '.2f')} |",
               f"| solved: 2+ state, <= 1 trick | {pct(so['strong']) if so['n'] else '-'} | {pct(rs['strong'])} |",
               ""]
+    if s.get('wire_generation'):
+        w = s['wire_generation']
+        lines += [f"Wire decoding: {s['decoding']}; {w['compile_failures']}/{w['attempts']} compilation failures; "
+                  f"{s['wire_count']} wires; {s['powered_solutions']}/{s['n']} attempts power a mechanism in the solution.", '']
     return lines
 
 
@@ -240,7 +249,11 @@ def run(model, vocab, n, tantalos, budget=50_000, temperature=1.0, top_k=None, b
     t = time.time()
     rows = assess(lines, tantalos, budget, p2c_dir)
     print(f"rated: scored and compared in {time.time() - t:.0f}s", flush=True)
-    return summarize(rows, reference()), rows, toks
+    summary = summarize(rows, reference())
+    if model.cfg.arch == 'wire':
+        summary['wire_generation'] = model.last_generation_stats
+        summary['decoding'] = 'body grammar + typed device pointers' if constrained else 'free body + typed device pointers'
+    return summary, rows, toks
 
 
 def main():

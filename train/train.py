@@ -184,7 +184,14 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=dtype == torch.float16)
 
     vocab_file = args.vocab or Path(args.data[0]).parent / "vocab.txt"
-    vocab = Vocab.build(vocab_file, args.task)
+    init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
+    init_arch = init["model_config"].get("arch", "gpt") if init else None
+    if args.arch and init_arch and init_arch != args.arch:
+        sys.exit(f"{args.init} is a {init_arch!r} model, not {args.arch!r}")
+    arch = args.arch or init_arch or "gpt"
+    if arch == 'wire' and args.task != 'levels':
+        sys.exit('wire architecture is for level generation, not Goblin')
+    vocab = Vocab.build(vocab_file, args.task, arch=arch)
     t0 = time.time()
     goblin = args.task == GOBLIN
     if goblin:
@@ -227,14 +234,8 @@ def main():
     number_of = torch.full((len(vocab),), -1, dtype=torch.long)
     number_of[numbers] = torch.arange(len(numbers))
 
-    init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
-    init_arch = init["model_config"].get("arch", "gpt") if init else None
-    if args.arch and init_arch and init_arch != args.arch:
-        sys.exit(f"{args.init} is a {init_arch!r} model, not {args.arch!r} (weights don't carry over "
-                 "between architectures)")
-    arch = args.arch or init_arch or "gpt"
     cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout, qk_norm=True,
-                 arch=arch, itos=tuple(vocab.itos) if arch == "spatial" else ())
+                 arch=arch, itos=tuple(vocab.itos) if arch in ("spatial", "wire") else ())
     if init:
         # The model's shape comes from the checkpoint; --layers/--heads/--embd are ignored. Its
         # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
@@ -248,7 +249,7 @@ def main():
         if init["model_config"]["block_size"] > args.block:
             sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block at least that")
         cfg = Config(**{**init["model_config"], "vocab_size": len(vocab), "block_size": args.block})
-        if cfg.arch == "spatial":
+        if cfg.arch in ("spatial", "wire"):
             cfg.itos = tuple(vocab.itos)
     model = build_model(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)

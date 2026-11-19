@@ -115,6 +115,21 @@ def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, 
     allows (src/grammar.rs: levels that parse, wires to items that exist, items mounted on
     something), refilling rows as `refill` does. `guide` (value heads' file, train/value.py) keeps
     the best of `k` drafts of every record (bake-off run 3)."""
+    if model.cfg.arch == 'wire':
+        if guide is not None:
+            raise ValueError('flat-level value heads cannot guide the wire representation')
+        if '>' in prefix:
+            raise ValueError('wire prefixes must stop before inline connections')
+        p = prompt(vocab, list(conds), list(prefix))
+        grammar = Grammar(tantalos) if constrained else None
+        try:
+            outs = model.generate_many([p] * n, model.cfg.block_size, EOS, temperature, top_k, batch,
+                                       LegalLevels(grammar, vocab, prefix) if grammar else None)
+        finally:
+            if grammar:
+                grammar.stop()
+        return ['<wire-compile-failure>' if o == [vocab.stoi['<pad>']] else
+                ' '.join(list(prefix) + vocab.decode(o)) for o in outs]
     if guide is not None:
         import value
         assert not prefix, "guided sampling starts from an empty level"

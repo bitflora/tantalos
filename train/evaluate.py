@@ -285,6 +285,13 @@ def report(ev):
         + (f" ({gs['levels']} generator levels)" if gs else "")
         + "; model speed includes scoring.",
     ]
+    if ev.get('wire'):
+        wire = ev['wire']
+        attempts = sum(s['attempts'] for s in wire['generation'])
+        failures = sum(s['compile_failures'] for s in wire['generation'])
+        lines += ['', '## Device-and-wire decoding', '',
+                  f"{wire['decoding']}. {failures}/{attempts} compilation failures (included above).",
+                  f"{wire['powered_solutions']}/{wire['attempts']} attempts have a solution that powers a mechanism."]
     return "\n".join(lines) + "\n"
 
 
@@ -338,12 +345,15 @@ def main():
                 settings.append((t, [t] if group == "verdict" else [SOLVABLE, t], args.n_cond))
 
     lines, owner = [], []
+    wire_generation = []
     t0 = time.time()
     for name, conds, n in settings:
         print(f"sampling {n:>4} x {' '.join(conds) or '(no conditions)'}", flush=True)
         t = time.time()
         got = sample.generate(model, vocab, n, conds, (), args.temperature, args.top_k, args.batch,
                               constrained=args.constrained, tantalos=args.tantalos, guide=args.guide, k=args.k)
+        if model.cfg.arch == 'wire':
+            wire_generation.append(dict(setting=name, **model.last_generation_stats))
         if name == "baseline":
             baseline_gen_s = time.time() - t
         lines += got
@@ -463,6 +473,13 @@ def main():
     }
     if rated_summary:
         ev["rated"] = rated_summary
+    if model.cfg.arch == 'wire':
+        ev['wire'] = dict(generation=wire_generation,
+                          decoding='body grammar + typed device pointers' if args.constrained else
+                                   'free body + typed device pointers',
+                          powered_solutions=sum(bool((r.get('metrics') or {}).get('mechanic_bits', 0) & (1 << 15))
+                                                for r in results),
+                          attempts=len(results))
     (out / "eval.json").write_text(json.dumps(ev, indent=2))
     text = report(ev)
     if rated_summary:

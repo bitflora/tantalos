@@ -356,6 +356,20 @@ class Away:
                     spans = item_spans(level, r.get("game_items", []))
                     if not spans or any(t not in vocab.stoi for t in level):
                         continue
+                    if '<wires>' in vocab.stoi:
+                        from wire import serialize
+                        retained, at = [], 0
+                        while at < len(level):
+                            if level[at] == '>':
+                                at += 2 if level[at + 1] == 'exit' else 3
+                            else:
+                                retained.append(at)
+                                at += 1
+                        remap = {old: new for new, old in enumerate(retained)}
+                        spans = [remap[s] for s in spans if s in remap]
+                        level = serialize(level)
+                    if not spans:
+                        continue
                     if 2 + len(self.groups) + len(level) > block_size:
                         continue
                     conds = [c for c in conditions(r) if not c.startswith("<verdict:")]
@@ -415,14 +429,18 @@ class Vocab:
         assert len(self.stoi) == len(self.itos), "duplicate tokens"
 
     @classmethod
-    def build(cls, level_vocab_file, task="levels"):
+    def build(cls, level_vocab_file, task="levels", arch="gpt"):
         """`levels`: special tokens, conditions, level words. `goblin` (or its old name `solve`):
         special tokens, level words, then the plan words the level format doesn't have; no
         conditions."""
         level = Path(level_vocab_file).read_text().split()
         if task in ("goblin", "solve"):
             return cls(SPECIAL + level + [w for w in PLAN_WORDS if w not in level])
-        return cls(SPECIAL + COND_TOKENS + level)
+        extra = []
+        if arch == 'wire':
+            from wire import EXTRA
+            extra = EXTRA
+        return cls(SPECIAL + COND_TOKENS + level + extra)
 
     def __len__(self):
         return len(self.itos)
@@ -516,11 +534,15 @@ def _read_level_file(path, vocab, block_size, cut, seed):
                 continue
             r = json.loads(line)
             tokens = r["tokens"].split()
-            if max_prefix + len(tokens) + 1 > block_size:
+            encoded = tokens
+            if '<wires>' in vocab.stoi:
+                from wire import serialize
+                encoded = serialize(tokens)
+            if max_prefix + len(encoded) + 1 > block_size:
                 skipped += 1
                 continue
             try:
-                level = vocab.encode(tokens)
+                level = vocab.encode(encoded)
             except KeyError:  # a token outside the vocabulary
                 skipped += 1
                 continue
@@ -585,6 +607,8 @@ def load(paths, vocab, block_size, val_share=0.05, seed=0):
     cut = int(val_share * 2**32)
     # Invalidate cached preprocessing when the encoder, vocabulary or split settings change.
     config = [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), vocab.itos, block_size, cut, seed]
+    if '<wires>' in vocab.stoi:
+        config.append(hashlib.sha256(Path(__file__).with_name('wire.py').read_bytes()).hexdigest())
     skipped = 0
     combined = _level_buffers()
     for path in paths:

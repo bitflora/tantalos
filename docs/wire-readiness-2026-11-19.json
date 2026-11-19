@@ -1,0 +1,116 @@
+{
+  "validated": "2026-11-19",
+  "torch": "2.14.1+cu130",
+  "manifest_data_hashes_match": true,
+  "audit": {
+    "rows": 2417554,
+    "failures": 0,
+    "files": [
+      {
+        "path": "data/v5b/levels-1.jsonl",
+        "rows": 67956,
+        "failures": 0,
+        "sha256": "dc070296d528ef8b4eb444f1031f4b9f934a6c3caade5a5bd2dac4ae69ababa9"
+      },
+      {
+        "path": "data/v5b/levels-2.jsonl",
+        "rows": 105980,
+        "failures": 0,
+        "sha256": "17244b4a850615ab786d5f48f4902ae920727282da45f6590a43745c64a5c248"
+      },
+      {
+        "path": "data/v5b/levels-3.jsonl",
+        "rows": 131843,
+        "failures": 0,
+        "sha256": "c11b89ef5eb6068015b162563eb7408142d50a731819b9895c17b23b7611e3c8"
+      },
+      {
+        "path": "data/v5b/levels-4.jsonl",
+        "rows": 109607,
+        "failures": 0,
+        "sha256": "1dc0a9646aef4fb6b8e51718bbf53c1ca654499597dcc1b08d6565c9f4134361"
+      },
+      {
+        "path": "data/v5b/levels-5.jsonl",
+        "rows": 96996,
+        "failures": 0,
+        "sha256": "66337d1a9a5d98c512c2b53c2ab2d963fcdad60871b677546bfea2741cb9b8a0"
+      },
+      {
+        "path": "data/v5b/levels-mutants-loops.jsonl",
+        "rows": 56723,
+        "failures": 0,
+        "sha256": "63e54be436afad78a8425bc5dee3db1c56f2c3d549e3282e4d440f671adf25b7"
+      },
+      {
+        "path": "data/v5b/levels-mutants-newrules.jsonl",
+        "rows": 57625,
+        "failures": 0,
+        "sha256": "eeda90499317dc60eb89caf90a568c2515054606c261741bad5c1e0c2f598a45"
+      },
+      {
+        "path": "data/v5b/levels-mutants-structural.jsonl",
+        "rows": 84,
+        "failures": 0,
+        "sha256": "0eaba39f1098a53aba7efef13791257d580756637a03a8e3fcddfd85121d63d1"
+      },
+      {
+        "path": "data/v5b/levels-mutants.jsonl",
+        "rows": 209166,
+        "failures": 0,
+        "sha256": "4a97ca54ea81c9f7687c0c52ac9ec5b008ffb97762746ec25445b6674988fff3"
+      },
+      {
+        "path": "data/v5b/levels-workshop-aug-x2.jsonl",
+        "rows": 1581574,
+        "failures": 0,
+        "sha256": "d4dbe327c154d22968d63857311b32d47d929139b98c9fbc785f21ab8f7f2e03"
+      }
+    ],
+    "max_devices": 154,
+    "flat_over_block": 228,
+    "wire_over_block": 5672,
+    "errors": []
+  },
+  "smoke": {
+    "levels": 32,
+    "loss": 0.05405395105481148,
+    "steps": 301,
+    "seconds": 8.10899999999674,
+    "device": "cuda",
+    "passed_overfit": true,
+    "checkpoint_reload": true,
+    "generation": {
+      "attempts": 32,
+      "compile_failures": 4,
+      "wires": 48,
+      "failure_reasons": {
+        "incomplete structured level": 4
+      }
+    },
+    "scored": 32,
+    "parsed": 28,
+    "greedy_generation": {
+      "attempts": 32,
+      "compile_failures": 0,
+      "wires": 32,
+      "failure_reasons": {}
+    },
+    "greedy_parsed": 32,
+    "parameters": 11185920,
+    "peak_gpu_bytes": 2333122048,
+    "memory_batch": 16
+  },
+  "tests": {
+    "wire": 9,
+    "existing_architectures": 8,
+    "value_heads": 4
+  },
+  "evaluation_integration": {
+    "attempts": 130,
+    "compile_failures": 86,
+    "rated_attempts": 4,
+    "rated_compile_failures": 1,
+    "purpose": "Pipeline and failure-accounting check on a tiny overfit model; not a quality evaluation"
+  }
+}

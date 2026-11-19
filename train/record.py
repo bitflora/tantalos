@@ -274,6 +274,8 @@ def measure(run):
             row["eval_solvable"] = pct(v["solvable"])
             row["eval_invalid"] = pct(v["verdicts"].get("invalid", 0) / v["n"])
             row["decoding"] = "constrained" if e.get("constrained") else "free"
+            if e.get('wire'):
+                row['decoding'] = 'wire-constrained' if e.get('constrained') else 'wire-typed'
             if e.get("rated"):  # train/rated.py: per 1,000 samples, and points
                 row["rated_yield"] = f"{e['rated']['yield_per_1000']:.0f}"
                 row["rated_strong"] = f"{e['rated']['strong_per_1000']:.0f}"

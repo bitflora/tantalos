@@ -1,4 +1,4 @@
-"""Every architecture in train/model.py ARCHS (docs/architecture-plan-2026-11-15.md, step 0):
+"""Flat-token architectures in train/model.py ARCHS (architecture plan, step 0):
 
 - incremental decoding with the key/value cache gives the logits of one full forward pass, in
   every way the sampling code feeds it (one prompt then a token at a time; padded rows;
@@ -10,7 +10,8 @@
   (constrained, as evaluation does), parse in `tantalos-score score`. Skipped without a
   tantalos-score that has the editor's rules.
 
-A new architecture registers in ARCHS and gets all of these for free.
+Wire's structured representation has its own equivalent tests in test_wire.py and
+the 32-level readiness smoke in train/wire_readiness.py.
 
     .venv/Scripts/python -m unittest tests/test_arch.py -v
 """
@@ -27,7 +28,11 @@ sys.path.insert(0, str(ROOT / "train"))
 sys.path.insert(0, str(ROOT / "tests"))
 import sample  # noqa: E402
 from data import EOS, Vocab  # noqa: E402
-from model import ARCHS, Config, build_model  # noqa: E402
+from model import ARCHS as ALL_ARCHS, Config, build_model  # noqa: E402
+
+# These fixtures use flat level tokens. The wire representation has equivalent cache,
+# checkpoint, refill, overfit and scorer checks in test_wire.py and wire_readiness.py.
+ARCHS = {k: v for k, v in ALL_ARCHS.items() if k != 'wire'}
 from test_sample_grammar import LEVELS, TANTALOS, editor_rules  # noqa: E402
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"

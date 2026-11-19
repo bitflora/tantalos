@@ -150,6 +150,12 @@ class Decoder(nn.Module):
     def _rows(self, b):
         return None
 
+    def _generation_state(self, caches):
+        return None
+
+    def _restore_generation_state(self, caches, row, state):
+        pass
+
     def _step(self, nxt, tracked, rows=None):
         """The input for one new token per row (nxt: rows x 1): the ids, with their features
         if `tracked` (only `rows` move on)."""
@@ -331,8 +337,9 @@ class Decoder(nn.Module):
                 first = [{"size": len(p)} for _ in self.blocks]
                 with amp:
                     lg, _ = self(torch.tensor([p], device=device), caches=first)
-                memo.update(ids=p, kv=[(c["k"], c["v"]) for c in first], logits=lg[0, -1].float())
-            return memo["kv"], memo["logits"]
+                memo.update(ids=p, kv=[(c["k"], c["v"]) for c in first], logits=lg[0, -1].float(),
+                            state=self._generation_state(first))
+            return memo["kv"], memo["logits"], memo["state"]
 
         slots = [None] * b  # the prompt each row is writing (None: no more to start)
         outs = [None] * n
@@ -349,7 +356,7 @@ class Decoder(nn.Module):
                 slots[r] = None
                 return
             i, started = started, started + 1
-            kv, lg = run(prompts[i])
+            kv, lg, state = run(prompts[i])
             if caches is None:
                 # Zeros, not new_empty: a masked-out NaN still poisons attention (0 * NaN). The
                 # dtypes differ under QK-norm.
@@ -358,6 +365,7 @@ class Decoder(nn.Module):
             p = len(prompts[i])
             for c, (k, v) in zip(caches, kv):
                 c["k"][r, :, :p], c["v"][r, :, :p] = k[0], v[0]
+            self._restore_generation_state(caches, r, state)
             logits[r] = lg
             slots[r], outs[i], plen[r] = i, [], p
             if tracked:
@@ -668,7 +676,105 @@ class Spatial(GPT):
         return logits, loss
 
 
-ARCHS = {"gpt": GPT, "modern": Modern, "spatial": Spatial}
+from wire import State, Rows, MAX_DEVICES
+from wire_pointer import DevicePointer
+from wire_model import WireConstraint
+
+
+class WireGPT(GPT):
+    def __init__(self, cfg):
+        if not cfg.itos or '<wires>' not in cfg.itos:
+            raise ValueError('wire architecture requires its extended vocabulary in Config.itos')
+        super().__init__(cfg)
+        self.pointer = DevicePointer(cfg.n_embd)
+        self.pointer.apply(self._init)
+        self.stoi = {w: i for i, w in enumerate(cfg.itos)}
+        self.register_buffer('ptr_ids', torch.tensor([self.stoi[f'<ptr:{i}>']
+                                                     for i in range(MAX_DEVICES)]), persistent=False)
+        self.last_generation_stats = {}
+
+    def featurize(self, ids):
+        out = []
+        for row in ids.tolist():
+            state = State()
+            out.append([state.feed(self.cfg.itos[i]) for i in row])
+        return torch.tensor(out, dtype=torch.long)
+
+    def _rows(self, b):
+        return Rows(self.cfg.itos, b)
+
+    def _generation_state(self, caches):
+        return caches[0]['wire_hidden']
+
+    def _restore_generation_state(self, caches, row, state):
+        c = caches[0]
+        if 'wire_hidden' not in c:
+            c['wire_hidden'] = state.new_zeros((c['k'].shape[0], self.cfg.block_size, self.cfg.n_embd))
+        c['wire_hidden'][row].zero_()
+        c['wire_hidden'][row, :state.shape[1]] = state[0]
+
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
+        if isinstance(idx, tuple):
+            idx, feats = idx
+        else:
+            if start or (caches and 'at' in caches[0]):
+                raise ValueError('incremental wire decoding needs parser features')
+            feats = self.featurize(idx.cpu()).to(idx.device)
+        b, t = idx.shape
+        if positions is None:
+            if start + t > self.cfg.block_size:
+                raise ValueError('sequence exceeds block size')
+            positions = torch.arange(start, start + t, device=idx.device)
+        x = self.drop(self.tok(idx) + self.pos(positions))
+        for i, block in enumerate(self.blocks):
+            x = block(x, caches[i] if caches is not None else None, mask)
+        hidden = self.ln_f(x)
+        logits = self.head(hidden)
+        # Logical positions allow the same pointer features with left padding, KV caches,
+        # and refilled rows. Padding never overwrites a real token at position zero.
+        pos = positions.expand(b, t)
+        if caches is None:
+            history = hidden.new_zeros((b, self.cfg.block_size, self.cfg.n_embd))
+        else:
+            history = caches[0].get('wire_hidden')
+            if history is None:
+                history = hidden.new_zeros((b, self.cfg.block_size, self.cfg.n_embd))
+                caches[0]['wire_hidden'] = history
+        real = idx != self.stoi['<pad>']
+        rows, cols = real.nonzero(as_tuple=True)
+        history[rows, pos[rows, cols]] = hidden[rows, cols]
+        rows, cols = feats.any(dim=-1).nonzero(as_tuple=True)
+        if rows.numel():
+            locations = feats[rows, cols]
+            count = int((locations != 0).nonzero()[:, 1].max()) + 1
+            locations = locations[:, :count]
+            allowed = locations > 0
+            keys = history[rows[:, None], (locations - 1).clamp(min=0)]
+            pointer, _ = self.pointer(hidden[rows, cols, None, :], keys, allowed[:, None, :])
+            # A pointer decision is normalized only over compatible device endpoints.
+            logits = logits.clone()
+            logits[rows, cols] = -torch.inf
+            logits[rows[:, None], cols[:, None], self.ptr_ids[None, :count]] = pointer[:, 0]
+        loss = None if targets is None else F.cross_entropy(
+            logits.float().reshape(-1, logits.shape[-1]), targets.reshape(-1), ignore_index=-100)
+        return logits, loss
+
+    @torch.no_grad()
+    def generate_many(self, prompts, max_new, stop, temperature=1.0, top_k=None,
+                      batch=32, constrain=None, logprob=False):
+        adapter = WireConstraint(self, prompts, constrain)
+        result = super().generate_many(prompts, max_new, stop, temperature, top_k,
+                                       batch, adapter, logprob)
+        self.last_generation_stats = adapter.stats
+        return result
+
+    def generate(self, prompts, max_new, stop, temperature=1.0, top_k=None):
+        return self.generate_many(prompts, max_new, stop, temperature, top_k, batch=len(prompts) or 1)
+
+    def generate_refill(self, prompt, n, max_new, stop, temperature=1.0, top_k=None, batch=64):
+        return self.generate_many([prompt] * n, max_new, stop, temperature, top_k, batch)
+
+ARCHS = {"gpt": GPT, "modern": Modern, "spatial": Spatial, "wire": WireGPT}
 
 
 def build_model(cfg):

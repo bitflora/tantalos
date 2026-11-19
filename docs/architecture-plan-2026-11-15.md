@@ -174,6 +174,16 @@ Code: 4 days.
 device attributes and wire endpoints intact, and generated records compile and reach the
 standard evaluator.
 
+**Built and readiness checked (2026-11-19):** `model.WireGPT` (`--arch wire`),
+`train/wire.py`, typed source/target pointers, training/cache/away integration, and
+compilation through the shared cached/refilling sampler. All 2,417,554 default input
+rows round-trip exactly; all ten hashes match the frozen manifest. The 32-level overfit,
+checkpoint reload, scorer, evaluator, and production-size memory smoke pass. Batch 16 at
+block 1024 peaks at 2.17 GiB allocated. The longer representation excludes 5,672 rows at
+that block versus 228 flat rows (an additional 0.23%); retain this deviation in comparisons.
+Stochastic truncations remain in evaluation denominators. Full details and reproducible
+commands: [wire-architecture.md](wire-architecture.md). The 12-hour run remains unstarted.
+
 ### Run 5: solution-first planner and layout decoder, `arch-plan-12h`
 Two models, 12 hours in all:
 - **Layout decoder (9h):** today's GPT architecture trained on
