@@ -106,6 +106,44 @@ class LegalLevels:
         return seq
 
 
+class Lines:
+    """Sampled ids to token lines: the model's own form compiled to level tokens if it has one
+    (model.Wire: wires as pointers; model.Plan: milestones first, kept in `milestones`),
+    counting what doesn't compile (`report`)."""
+
+    def __init__(self, model, vocab, prefix):
+        self.model, self.vocab, self.prefix = model, vocab, list(prefix)
+        self.compile = getattr(model, "compile_ids", None)
+        self.errors = Counter()
+        self.n = self.wires = 0
+        self.milestones = []
+
+    def __call__(self, ids):
+        self.n += 1
+        if self.compile is None:
+            return " ".join(self.prefix + self.vocab.decode(ids))
+        toks, err = self.compile(ids)
+        self.wires += toks.count(">")
+        if hasattr(self.model, "last_milestones"):
+            self.milestones.append(" ".join(self.model.last_milestones))
+        if err:
+            self.errors[err.split(":")[0] if ":" in err else " ".join(err.split()[:4])] += 1
+        return " ".join(self.prefix + toks)
+
+    def report(self):
+        if self.compile is not None and self.milestones:
+            bad = sum(self.errors.values())
+            words = sum(len(m.split()) for m in self.milestones)
+            print(f"plan: {bad} of {self.n} levels had no layout after their milestones, "
+                  f"{words / max(self.n, 1):.1f} milestone words per level", flush=True)
+        elif self.compile is not None:
+            bad = sum(self.errors.values())
+            print(f"wire: {bad} of {self.n} levels didn't compile, {self.wires / max(self.n - bad, 1):.1f} wires "
+                  "per level that did"
+                  + (f" ({', '.join(f'{k}: {v}' for k, v in self.errors.most_common(6))})" if bad else ""),
+                  flush=True)
+
+
 def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, batch=32, refill=False,
              constrained=False, tantalos=DEFAULT_TANTALOS, guide=None, k=4):
     """`n` token lines (prefix included). `refill` starts a new level in a batch row as soon as
@@ -122,22 +160,30 @@ def generate(model, vocab, n, conds=(), prefix=(), temperature=1.0, top_k=None, 
         return value.generate(model, vocab, heads, n, conds, temperature, top_k, batch, k,
                               constrained=constrained, tantalos=tantalos, log=lambda m: print(m, flush=True))
     p = prompt(vocab, list(conds), list(prefix))
+    line = Lines(model, vocab, prefix)
+    if line.compile is not None:
+        assert not prefix, f"a {model.cfg.arch} model samples from an empty level"
     if constrained:
         grammar = Grammar(tantalos)
         try:
-            outs = model.generate_many([p] * n, model.cfg.block_size, EOS, temperature, top_k, batch,
-                                       LegalLevels(grammar, vocab, prefix))
+            if hasattr(model, "legal"):
+                legal = model.legal(grammar, vocab)  # model.Wire, model.Plan
+            else:
+                legal = LegalLevels(grammar, vocab, prefix)
+            outs = model.generate_many([p] * n, model.cfg.block_size, EOS, temperature, top_k, batch, legal)
         finally:
             grammar.stop()
-        return [" ".join(list(prefix) + vocab.decode(o)) for o in outs]
-    if refill:
+        lines = [line(o) for o in outs]
+    elif refill:
         outs = model.generate_refill(p, n, model.cfg.block_size, EOS, temperature, top_k, batch)
-        return [" ".join(list(prefix) + vocab.decode(o)) for o in outs]
-    lines = []
-    for start in range(0, n, batch):
-        k = min(batch, n - start)
-        outs = model.generate([p] * k, model.cfg.block_size, EOS, temperature, top_k)
-        lines.extend(" ".join(list(prefix) + vocab.decode(o)) for o in outs)
+        lines = [line(o) for o in outs]
+    else:
+        lines = []
+        for start in range(0, n, batch):
+            k = min(batch, n - start)
+            outs = model.generate([p] * k, model.cfg.block_size, EOS, temperature, top_k)
+            lines.extend(line(o) for o in outs)
+    line.report()
     return lines
 
 

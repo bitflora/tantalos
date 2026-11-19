@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "train"))
 sys.path.insert(0, str(ROOT / "tests"))
 import sample  # noqa: E402
+import wire  # noqa: E402
 from data import EOS, Vocab  # noqa: E402
 from model import ARCHS, Config, build_model  # noqa: E402
 from test_sample_grammar import LEVELS, TANTALOS, editor_rules  # noqa: E402
@@ -39,8 +40,10 @@ def vocab():
 
 def tiny(arch, v, block=96, layers=2):
     torch.manual_seed(0)
-    itos = tuple(v.itos) if arch == "spatial" else ()
-    return build_model(Config(len(v), block, layers, 2, 32, 0.0, qk_norm=True, arch=arch, itos=itos)).to(DEVICE).eval()
+    itos = tuple(v.itos) if arch in ("spatial", "wire", "plan") else ()
+    pointers = wire.POINTERS if arch == "wire" else 0
+    return build_model(Config(len(v) + pointers, block, layers, 2, 32, 0.0, qk_norm=True, arch=arch, itos=itos,
+                              pointers=pointers)).to(DEVICE).eval()
 
 
 def part(m, ids, a, b):
@@ -51,10 +54,14 @@ def part(m, ids, a, b):
     return ids[:, a:b], m.featurize(ids.cpu()).to(ids.device)[:, a:b]
 
 
-def sequences(v):
-    """The levels as training sequences: the unconditioned prompt, the level, EOS."""
+def sequences(v, arch="gpt"):
+    """The levels as training sequences: the unconditioned prompt, the level, EOS (in wire form
+    for a wire model)."""
     p = sample.prompt(v, [], [])
-    return p, [p + v.encode(level.split()) + [EOS] for level in LEVELS]
+    seqs = [p + v.encode(level.split()) + [EOS] for level in LEVELS]
+    if arch == "wire":
+        seqs = [wire.recode(s, [True] * len(s), v.itos, len(v), 10_000)[0] for s in seqs]
+    return p, seqs
 
 
 def greedy_matches_full(test, m, prompts, n):
@@ -77,7 +84,7 @@ class Consistency(unittest.TestCase):
         for arch in ARCHS:
             with self.subTest(arch=arch):
                 m = tiny(arch, v)
-                _, seqs = sequences(v)
+                _, seqs = sequences(v, arch)
                 ids = torch.tensor([seqs[0]], device=DEVICE)
                 with torch.no_grad():
                     full, _ = m(ids)
@@ -91,10 +98,10 @@ class Consistency(unittest.TestCase):
     def test_padded_rows_match_alone(self):
         """generate's padded path (prompts of different lengths) writes what each would alone."""
         v = vocab()
-        _, seqs = sequences(v)
-        prompts = [seqs[0][:9], seqs[1][:14], seqs[2][:11]]
         for arch in ARCHS:
             with self.subTest(arch=arch):
+                _, seqs = sequences(v, arch)
+                prompts = [seqs[0][:9], seqs[1][:14], seqs[2][:11]]
                 m = tiny(arch, v)
                 together = m.generate(prompts, 20, EOS, top_k=1)
                 alone = [m.generate([p], 20, EOS, top_k=1)[0] for p in prompts]
@@ -117,20 +124,19 @@ class Consistency(unittest.TestCase):
         finished sequence: whatever a step fed the net (a spatial model's features from its
         row's parser) is what the whole sequence gives."""
         v = vocab()
-        _, seqs = sequences(v)
-        prompts = [seqs[0][:9], seqs[1][:14], seqs[2][:9]]
         for arch in ARCHS:
             with self.subTest(arch=arch):
+                _, seqs = sequences(v, arch)
+                prompts = [seqs[0][:9], seqs[1][:14], seqs[2][:9]]
                 greedy_matches_full(self, tiny(arch, v), prompts, 30)
 
 
 class Checkpoints(unittest.TestCase):
     def test_save_and_reload(self):
         v = vocab()
-        _, seqs = sequences(v)
-        ids = torch.tensor([seqs[1]], device=DEVICE)
         for arch in ARCHS:
             with self.subTest(arch=arch), tempfile.TemporaryDirectory() as d:
+                ids = torch.tensor([sequences(v, arch)[1][1]], device=DEVICE)
                 m = tiny(arch, v)
                 path = Path(d) / "best.pt"
                 torch.save({"model": m.state_dict(), "model_config": m.cfg.__dict__, "vocab": v.itos}, path)
@@ -154,16 +160,18 @@ class Checkpoints(unittest.TestCase):
 class Overfit(unittest.TestCase):
     def test_learns_levels_and_samples_parse(self):
         v = vocab()
-        p, seqs = sequences(v)
-        width = max(map(len, seqs))
-        x = torch.zeros((len(seqs), width - 1), dtype=torch.long)
-        y = torch.full((len(seqs), width - 1), -100, dtype=torch.long)
-        for r, s in enumerate(seqs):
-            x[r, : len(s) - 1] = torch.tensor(s[:-1])
-            y[r, len(p) - 1 : len(s) - 1] = torch.tensor(s[len(p) :])
-        x, y = x.to(DEVICE), y.to(DEVICE)
         for arch in ARCHS:
+            if arch == "plan":
+                continue  # needs the milestone vocabulary: tests/test_milestones.py Model
             with self.subTest(arch=arch):
+                p, seqs = sequences(v, arch)
+                width = max(map(len, seqs))
+                x = torch.zeros((len(seqs), width - 1), dtype=torch.long)
+                y = torch.full((len(seqs), width - 1), -100, dtype=torch.long)
+                for r, s in enumerate(seqs):
+                    x[r, : len(s) - 1] = torch.tensor(s[:-1])
+                    y[r, len(p) - 1 : len(s) - 1] = torch.tensor(s[len(p) :])
+                x, y = x.to(DEVICE), y.to(DEVICE)
                 m = tiny(arch, v)
                 m.train()
                 opt = m.optimizer(3e-3, 0.0)

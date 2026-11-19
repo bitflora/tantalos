@@ -74,6 +74,10 @@ def main():
     ap.add_argument("--heads", type=int, default=6)
     ap.add_argument("--embd", type=int, default=384)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--milestones", default=str(Path(__file__).resolve().parent.parent / "data" / "milestones"
+                                                / "labels.jsonl"),
+                    help="a plan model's milestone labels (train/milestones.py label): only the levels "
+                    "they cover are trained on")
     ap.add_argument("--arch", default=None, choices=sorted(ARCHS),
                     help="model architecture (train/model.py ARCHS; docs/architecture-plan-2026-11-15.md). "
                          "Default: the --init checkpoint's, else gpt; with --init it must match")
@@ -183,8 +187,19 @@ def main():
         dtype, amp = torch.float32, nullcontext()
     scaler = torch.amp.GradScaler("cuda", enabled=dtype == torch.float16)
 
+    init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
+    init_arch = init["model_config"].get("arch", "gpt") if init else None
+    if args.arch and init_arch and init_arch != args.arch:
+        sys.exit(f"{args.init} is a {init_arch!r} model, not {args.arch!r} (weights don't carry over "
+                 "between architectures)")
+    arch = args.arch or init_arch or "gpt"
+    plan = arch == "plan"  # bake-off arm 5: milestones first (train/milestones.py)
+    if plan and not Path(args.milestones).exists():
+        sys.exit(f"a plan model needs milestone labels: {args.milestones} doesn't exist "
+                 "(train/milestones.py label)")
+    milestones = args.milestones if plan else None
     vocab_file = args.vocab or Path(args.data[0]).parent / "vocab.txt"
-    vocab = Vocab.build(vocab_file, args.task)
+    vocab = Vocab.build(vocab_file, args.task, milestones=plan)
     t0 = time.time()
     goblin = args.task == GOBLIN
     if goblin:
@@ -197,16 +212,17 @@ def main():
         # The same validation levels at every eval, so their solved shares compare.
         goblin_picks = random.Random(args.seed).sample(range(len(val)), min(args.score_n, len(val)))
     else:
-        train, val, skipped = load(args.data, vocab, args.block, seed=args.seed)
+        train, val, skipped = load(args.data, vocab, args.block, seed=args.seed, milestones=milestones)
         print(
-            f"data: {len(train)} train, {len(val)} val, {skipped} skipped (too long for block {args.block} or unknown token); "
+            f"data: {len(train)} train, {len(val)} val, {skipped} skipped (too long for block {args.block} or unknown token"
+            f"{'; or no milestones in ' + milestones if milestones else ''}); "
             f"vocab {len(vocab)}; loaded in {time.time() - t0:.0f}s"
         )
     holdout = None
     if args.holdout and not goblin:
         if Path(args.holdout).resolve() in {Path(p).resolve() for p in args.data}:
             sys.exit(f"--holdout {args.holdout} is also in --data: it wouldn't be held out")
-        _, holdout, _ = load([args.holdout], vocab, args.block, val_share=1.0)
+        _, holdout, _ = load([args.holdout], vocab, args.block, val_share=1.0, milestones=milestones)
         holdout_picks = random.Random(args.seed).sample(range(len(holdout)), min(args.holdout_n, len(holdout)))
         print(f"holdout: {len(holdout_picks)} of the {len(holdout)} levels in {args.holdout}")
     source_picks = {}
@@ -217,7 +233,12 @@ def main():
             source_picks[src] = pick_rng.sample(idx, min(args.source_n, len(idx)))
         print("val by source: " + ", ".join(f"{s} {len(p)} of {val.sources.count(s)}" for s, p in source_picks.items()))
 
-    away = Away(args.away, vocab, args.block) if args.away else None
+    away_ms = None
+    if plan and args.away:
+        import milestones as ms_mod
+
+        away_ms = lambda levels: ms_mod.label_levels(levels, tantalos=args.tantalos)  # noqa: E731
+    away = Away(args.away, vocab, args.block, milestones=away_ms) if args.away else None
     if away is not None:
         print(f"away: {len(away)} game-rejected levels with placements to push away from")
         if not len(away):
@@ -227,14 +248,14 @@ def main():
     number_of = torch.full((len(vocab),), -1, dtype=torch.long)
     number_of[numbers] = torch.arange(len(numbers))
 
-    init = torch.load(args.init, map_location=device, weights_only=False) if args.init else None
-    init_arch = init["model_config"].get("arch", "gpt") if init else None
-    if args.arch and init_arch and init_arch != args.arch:
-        sys.exit(f"{args.init} is a {init_arch!r} model, not {args.arch!r} (weights don't carry over "
-                 "between architectures)")
-    arch = args.arch or init_arch or "gpt"
-    cfg = Config(len(vocab), args.block, args.layers, args.heads, args.embd, args.dropout, qk_norm=True,
-                 arch=arch, itos=tuple(vocab.itos) if arch == "spatial" else ())
+    reads = arch in ("spatial", "wire", "plan")  # architectures that read the tokens themselves
+    pointers = 0
+    if arch == "wire":
+        import wire
+
+        pointers = wire.POINTERS
+    cfg = Config(len(vocab) + pointers, args.block, args.layers, args.heads, args.embd, args.dropout,
+                 qk_norm=True, arch=arch, itos=tuple(vocab.itos) if reads else (), pointers=pointers)
     if init:
         # The model's shape comes from the checkpoint; --layers/--heads/--embd are ignored. Its
         # vocabulary and block may grow: tokens it knows keep their embeddings (by name, so new
@@ -247,8 +268,9 @@ def main():
             sys.exit(f"{args.init} knows tokens this data doesn't have: {lost[:8]}")
         if init["model_config"]["block_size"] > args.block:
             sys.exit(f"{args.init} has block {init['model_config']['block_size']}: pass --block at least that")
-        cfg = Config(**{**init["model_config"], "vocab_size": len(vocab), "block_size": args.block})
-        if cfg.arch == "spatial":
+        cfg = Config(**{**init["model_config"], "block_size": args.block})
+        cfg.vocab_size = len(vocab) + cfg.pointers
+        if cfg.arch in ("spatial", "wire", "plan"):
             cfg.itos = tuple(vocab.itos)
     model = build_model(cfg).to(device)
     opt = model.optimizer(args.lr, args.weight_decay)

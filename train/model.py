@@ -33,8 +33,12 @@ class Config:
     # Which architecture (ARCHS below): "gpt" is the original; "modern" is RMSNorm, SwiGLU,
     # RoPE, no biases, no dropout (arm 1 of the 2026-11-15 bake-off).
     arch: str = "gpt"
-    # The vocabulary (id -> token), for architectures that read the tokens themselves ("spatial").
+    # The vocabulary (id -> token), for architectures that read the tokens themselves ("spatial",
+    # "wire", "plan").
     itos: tuple = ()
+    # Device slots of a "wire" model: its outputs are the words (vocab_size - pointers of them),
+    # then one pointer per slot.
+    pointers: int = 0
 
 
 def attend(q, k, v, cache, mask, dropout_p):
@@ -668,7 +672,232 @@ class Spatial(GPT):
         return logits, loss
 
 
-ARCHS = {"gpt": GPT, "modern": Modern, "spatial": Spatial}
+class Wire(Decoder):
+    """Arm 4 of the 2026-11-15 bake-off, the device-and-wire Transformer (train/wire.py): levels
+    in wire form, every wire after the items as two pointers (`> @s @d`). Today's GPT backbone
+    with:
+    - a device-slot embedding added to every token of a device's record, and to a pointer token
+      (with a learned "pointer" vector in place of a word embedding), so a pointer and its device
+      share an identity;
+    - pointer outputs: attention from the current position (a query) to each device's key, taken
+      from the last token of its record. Only devices of the class the next pointer needs count
+      (senders first, then receivers), and only where a pointer must come: words are ruled out
+      there except EOS (at -1e4, so a row with no device to point at can still end).
+    Outputs: cfg.vocab_size = words + cfg.pointers; `@d` is id (words + d).
+
+    Input: ids (whole sequences from their start; parsed here), (ids, features) with features
+    from wire.features / a sampler's wire.Rows, or (ids, features, rows) for a sampler's step.
+    The pointer keys of a sampled row live in caches[0]["ptr"]; a row started since the last
+    step takes its prompt's from one full pass over the prompt (memoized)."""
+
+    def __init__(self, cfg):
+        super().__init__()
+        if not cfg.itos or not cfg.pointers:
+            raise ValueError("a wire model needs the vocabulary and pointer slots in its config")
+        self.cfg = cfg
+        self.words = cfg.vocab_size - cfg.pointers
+        assert self.words == len(cfg.itos)
+        c = cfg.n_embd
+        self.tok = nn.Embedding(self.words, c)
+        self.pos = nn.Embedding(cfg.block_size, c)
+        self.slot = nn.Embedding(cfg.pointers + 1, c)  # 0: no device
+        self.ptr = nn.Parameter(torch.zeros(c))
+        self.drop = nn.Dropout(cfg.dropout)
+        self.blocks = nn.ModuleList(Block(cfg) for _ in range(cfg.n_layer))
+        self.ln_f = nn.LayerNorm(c)
+        self.head = nn.Linear(c, self.words, bias=False)
+        self.head.weight = self.tok.weight
+        from data import EOS
+
+        self.eos = EOS
+        self.dk = 128
+        self.q = nn.Linear(c, self.dk, bias=False)
+        self.k = nn.Linear(c, self.dk, bias=False)
+        self._init_weights()
+        nn.init.normal_(self.ptr, std=0.02)
+
+    def featurize(self, ids):
+        import wire
+
+        return wire.features(ids.tolist(), self.cfg.itos, self.words)
+
+    def recode(self, ids, flags):
+        """A flat training sequence and its per-token flags in wire form (data.Levels.batch)."""
+        import wire
+
+        return wire.recode(ids, flags, self.cfg.itos, self.words, self.cfg.block_size)
+
+    def legal(self, grammar, vocab):
+        """Constrained decoding (sample.generate): items by the grammar, wires by wire.Legal."""
+        import wire
+
+        return wire.Legal(grammar, vocab, self.cfg.vocab_size)
+
+    def compile_ids(self, ids):
+        """Sampled ids to flat level tokens, and the error if they don't compile (wire.compile);
+        then the tokens are the items and a word no level has, so they count as unparsed."""
+        import wire
+
+        toks = [self.cfg.itos[i] if i < self.words else f"@{i - self.words}" for i in ids]
+        try:
+            return wire.compile(toks), None
+        except wire.WireError as e:
+            cut = toks.index(">") if ">" in toks else len(toks)
+            return [x for x in toks[:cut] if not x.startswith("@")] + ["<wire-error>"], str(e)
+
+    def _rows(self, b):
+        import wire
+
+        return wire.Rows(self.cfg.itos, self.words, b)
+
+    def _step(self, nxt, tracked, rows=None):
+        feats = tracked.feed(nxt[:, 0].tolist(), rows)
+        return nxt, torch.tensor(feats, dtype=torch.long, device=nxt.device)[:, None, :], tracked
+
+    def _keys(self, h, feats):
+        """From a whole pass: per row, each slot's key (rows x P x dk), when its record ended
+        (position; block_size if not), its class."""
+        b, t, _ = h.shape
+        P = self.cfg.pointers
+        ended = feats[..., 2]
+        rows, at = (ended >= 0).nonzero(as_tuple=True)
+        slots = ended[rows, at]
+        ok = (at >= 1) & (slots < P)
+        rows, at, slots = rows[ok], at[ok], slots[ok]
+        keys = self.k(h[rows, at - 1])
+        keys = keys.new_zeros((b, P, self.dk)).index_put((rows, slots), keys)
+        when = torch.full((b, P), self.cfg.block_size, dtype=torch.long, device=h.device)
+        when[rows, slots] = at
+        cls = torch.zeros((b, P), dtype=torch.long, device=h.device)
+        cls[rows, slots] = feats[..., 3][rows, at]
+        return keys, when, cls
+
+    def _logits(self, h, nxt, keys, valid):
+        """Words then pointers (valid: rows x tokens x P, or rows x 1 x P)."""
+        words = self.head(h)
+        ptr = (self.q(h) @ keys.to(h.dtype).transpose(1, 2)) / math.sqrt(self.dk)
+        point = (nxt > 0)[..., None]
+        ptr = ptr.masked_fill(~(valid & point), -float("inf"))
+        eos = torch.zeros(self.words, dtype=torch.bool, device=h.device)
+        eos[self.eos] = True
+        words = words.masked_fill(point & ~eos, -float("inf")).masked_fill(point & eos, -1e4)
+        return torch.cat([words, ptr.to(words.dtype)], dim=-1)
+
+    def _prompt_state(self, key, memo):
+        """The pointer state after a prompt: keys, has, cls (per slot), last hidden."""
+        if key not in memo:
+            ids = torch.tensor([key], device=self.ptr.device)
+            feats = self.featurize(ids.cpu()).to(ids.device)
+            h = self._hidden(ids, feats, torch.arange(len(key), device=ids.device), None, None)
+            keys, when, cls = self._keys(h, feats)
+            memo.clear()
+            memo[key] = (keys[0], when[0] < len(key), cls[0], h[0, -1])
+        return memo[key]
+
+    def _hidden(self, idx, feats, positions, caches, mask):
+        isptr = idx >= self.words
+        slot = torch.where(isptr, idx - self.words + 1, feats[..., 0]).clamp(max=self.cfg.pointers)
+        word = self.tok(idx.clamp(max=self.words - 1))
+        x = torch.where(isptr[..., None], self.ptr.to(word.dtype), word) + self.slot(slot) + self.pos(positions)
+        x = self.drop(x)
+        for i, block in enumerate(self.blocks):
+            x = block(x, caches[i] if caches is not None else None, mask)
+        return self.ln_f(x)
+
+    def forward(self, idx, targets=None, caches=None, start=0, positions=None, mask=None):
+        rows = None
+        if isinstance(idx, tuple):
+            idx, feats, *rest = idx
+            rows = rest[0] if rest else None
+        elif start == 0 and positions is None:
+            feats = self.featurize(idx.cpu()).to(idx.device)
+        else:
+            raise ValueError("a wire model's step after a cached prefix needs its features")
+        b, t = idx.shape
+        if positions is None:
+            assert start + t <= self.cfg.block_size, f"sequence {start + t} longer than block {self.cfg.block_size}"
+            positions = torch.arange(start, start + t, device=idx.device)
+        st = caches[0].get("ptr") if caches is not None else None
+        if st is None and rows is None:
+            # A whole pass (training, or a sampler's prompt): keys from these tokens alone.
+            h = self._hidden(idx, feats, positions, caches, mask)
+            keys, when, cls = self._keys(h, feats)
+            at = torch.arange(t, device=idx.device)[None, :, None]
+            valid = (when[:, None, :] <= at) & (cls[:, None, :] == feats[..., 1:2])
+            logits = self._logits(h, feats[..., 1], keys, valid)
+            if caches is not None:
+                caches[0]["ptr"] = {"keys": keys, "has": when < t, "cls": cls, "last": h[:, -1]}
+        else:
+            if st is None:
+                st = caches[0]["ptr"] = {
+                    "keys": torch.zeros((b, self.cfg.pointers, self.dk), device=idx.device),
+                    "has": torch.zeros((b, self.cfg.pointers), dtype=torch.bool, device=idx.device),
+                    "cls": torch.zeros((b, self.cfg.pointers), dtype=torch.long, device=idx.device),
+                    "last": torch.zeros((b, self.cfg.n_embd), device=idx.device)}
+            fed = feats[:, 0, 4] > 0 if feats.shape[-1] > 4 else torch.ones(b, dtype=torch.bool, device=idx.device)
+            if rows is not None:
+                # Rows started since the last step: their prompt's keys first.
+                memo = rows.__dict__.setdefault("states", {})
+                for r in sorted(rows.fresh):
+                    keys, has, cls, last = self._prompt_state(rows.prompts[r], memo)
+                    st["keys"][r], st["has"][r], st["cls"][r], st["last"][r] = keys, has, cls, last
+                if rows.void:
+                    fed[sorted(rows.void)] = False
+                rows.stepped()
+            # The device each fed row's token closes: its key is the previous token's.
+            ended = feats[:, 0, 2]
+            close = fed & (ended >= 0) & (ended < self.cfg.pointers)
+            if close.any():
+                r = close.nonzero(as_tuple=True)[0]
+                s = ended[r]
+                st["keys"][r, s] = self.k(st["last"][r].to(self.k.weight.dtype)).to(st["keys"].dtype)
+                st["has"][r, s] = True
+                st["cls"][r, s] = feats[r, 0, 3]
+            h = self._hidden(idx, feats, positions, caches, mask)
+            valid = (st["has"] & (st["cls"] == feats[:, 0, 1:2]))[:, None, :]
+            logits = self._logits(h, feats[..., 1], st["keys"], valid)
+            st["last"] = torch.where(fed[:, None], h[:, -1].to(st["last"].dtype), st["last"])
+        if targets is None:
+            return logits, None
+        loss = F.cross_entropy(
+            logits.float().view(-1, logits.size(-1)), targets.view(-1), ignore_index=-100
+        )
+        return logits, loss
+
+
+class Plan(GPT):
+    """Arm 5 of the 2026-11-15 bake-off, solution first: today's GPT, writing a level's
+    milestones (train/milestones.py: the mechanic steps of its solution, no coordinates) and
+    then the level, `<bos> conds <sep> milestones <sep> level <eos>`, both learned. The planner
+    and the layout decoder are one net: prompted with conditions it plans and lays out; prompted
+    with milestones and <sep> as well, it lays them out (`milestones.py eval`)."""
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        if not cfg.itos:
+            raise ValueError("a plan model needs the vocabulary in its config")
+        self.last_milestones = []  # of the last `compile_ids`
+
+    def legal(self, grammar, vocab):
+        """Constrained decoding (sample.generate): milestone words, then the level grammar."""
+        import milestones
+
+        return milestones.Legal(grammar, vocab)
+
+    def compile_ids(self, ids):
+        """Sampled ids (after the prompt's <sep>) to the level's tokens, the milestones kept in
+        `last_milestones`; with no <sep> after them, a word no level has (unparsed) and the error."""
+        from data import SEP
+
+        if SEP not in ids:
+            self.last_milestones = [self.cfg.itos[i] for i in ids]
+            return ["<no-layout>"], "no layout after the milestones"
+        k = ids.index(SEP)
+        self.last_milestones = [self.cfg.itos[i] for i in ids[:k]]
+        return [self.cfg.itos[i] for i in ids[k + 1 :]], None
+
+
+ARCHS = {"gpt": GPT, "modern": Modern, "spatial": Spatial, "wire": Wire, "plan": Plan}
 
 
 def build_model(cfg):

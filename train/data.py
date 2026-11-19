@@ -17,6 +17,13 @@ model. Loss is only taken on the level tokens and <eos>.
 Checkpoints trained before a group existed don't have its tokens; `groups_in(vocab)` lists the
 groups a checkpoint knows, and prompts for it only fill those slots.
 
+A plan model (arch `plan`, arm 5 of the 2026-11-15 bake-off, train/milestones.py) writes the
+level's milestones before the level, both learned:
+
+    <bos> <cond>... <sep> <milestones>... <sep> <level tokens>... <eos>
+
+and trains only on levels with milestones (`load(..., milestones=FILE)`).
+
 Goblin (task `goblin`, `load_goblin`; the solver net, task `solve`, before 2026-10-27) reads a
 level and writes its plan (src/plan.rs):
 
@@ -46,6 +53,14 @@ PAD, BOS, SEP, EOS = range(4)
 PLAN_WORDS = ["walk", "fire", "enter", "pickup", "putdown", "toss", "throw", "press", "dash", "knock",
               "bounce", "leap", "plate", "climb", "funnel", "ride", "dive", "blue", "orange", "exit",
               "fetch", "reach", "loop", "grab", "double", "sweep"]
+
+# Milestone words (train/milestones.py WORDS: its steps, cube kinds, targets, `>` and wire
+# targets); a plan model's vocabulary adds the ones the level format doesn't have, last.
+MILESTONE_WORDS = [">", "bounce", "bridge", "button", "climb", "companion", "dash", "dive", "double", "dropper",
+                   "enter", "exit", "fetch", "field", "flip", "franken", "funnel", "gel", "glasspanel", "grab",
+                   "knock", "laser", "leap", "loop", "panel", "pickup", "piston", "plate", "polarity", "press",
+                   "putdown", "rail", "reach", "reflection", "ride", "sphere", "stairs", "standard", "sweep",
+                   "throw", "toss"]
 
 LEN_BUCKETS = [(0, 0), (1, 2), (3, 4), (5, 7), (8, 11), (12, 10**9)]
 FEATURES = ["fizzler", "laserfield", "glass", "grating", "pedestal", "goo", "turret", "gel", "wall", "balcony"]
@@ -326,6 +341,21 @@ def item_spans(level, game_items):
     return sorted(set(out))
 
 
+def recoded(seqs, featurize):
+    """(ids, per-token flags) sequences in the model's own form, if it has one: a model whose
+    `featurize` comes with a `recode` (model.Wire) rewrites each; one it can't write is left out."""
+    recode = getattr(getattr(featurize, "__self__", None), "recode", None)
+    if recode is None:
+        return seqs
+    out = []
+    for ids, flags in seqs:
+        try:
+            out.append(recode(ids, flags))
+        except ValueError:
+            pass
+    return out or seqs[:0]
+
+
 def inputs(x, device, featurize=None):
     """A batch's input ids on `device`, with `featurize`'s features of them if given."""
     if featurize is None:
@@ -340,9 +370,13 @@ class Away:
     there (unlikelihood), so the model puts the item somewhere else rather than nowhere.
 
     A first version pushed against all tokens under one fixed `<verdict:solvable>` prompt;
-    the model learned to stop writing coordinates under that prompt (0% of its levels parsed)."""
+    the model learned to stop writing coordinates under that prompt (0% of its levels parsed).
 
-    def __init__(self, paths, vocab, block_size):
+    For a plan model, `milestones` (level token strings -> milestone words or None, e.g.
+    milestones.label_levels) gives each level's milestones to write before it: those of the
+    solver's plan, or none (just <sep>) for a level it has none for."""
+
+    def __init__(self, paths, vocab, block_size, milestones=None):
         self.seqs = []
         self.groups = groups_in(vocab)
         self.any_ids = vocab.encode([ANY[g] for g in self.groups])
@@ -360,7 +394,15 @@ class Away:
                         continue
                     conds = [c for c in conditions(r) if not c.startswith("<verdict:")]
                     conds = slots(["<verdict:solvable>"] + conds, self.groups)
-                    self.seqs.append((vocab.encode(conds), vocab.encode(level), spans))
+                    self.seqs.append((vocab.encode(conds), [], vocab.encode(level), spans))
+        if milestones is not None and self.seqs:
+            found = milestones([" ".join(vocab.decode(level)) for _, _, level, _ in self.seqs])
+            seqs = []
+            for (conds, _, level, spans), words in zip(self.seqs, found):
+                ms = vocab.encode(words or []) + [SEP]
+                if 2 + len(self.groups) + len(ms) + len(level) <= block_size:
+                    seqs.append((conds, ms, level, spans))
+            self.seqs = seqs
 
     def __len__(self):
         return len(self.seqs)
@@ -370,13 +412,19 @@ class Away:
         always stays; other conditions are hidden with a probability drawn from [0, `drop`]."""
         picks = [self.seqs[random.randrange(len(self.seqs))] for _ in range(size)]
         seqs = []
-        for conds, level, spans in picks:
+        for conds, ms, level, spans in picks:
             p = random.uniform(0, drop)
             shown = [c if i == 0 or random.random() >= p else a
                      for i, (c, a) in enumerate(zip(conds, self.any_ids))]
-            prompt = [BOS] + shown + [SEP]
+            prompt = [BOS] + shown + [SEP] + ms
             # Predicting level[s] happens at input position len(prompt) + s - 1.
-            seqs.append((prompt + level, [len(prompt) + s - 1 for s in spans]))
+            ids = prompt + level
+            flags = [False] * len(ids)
+            for s in spans:
+                flags[len(prompt) + s] = True
+            seqs.append((ids, flags))
+        seqs = [(ids, [k - 1 for k, f in enumerate(flags) if f]) for ids, flags in recoded(seqs, featurize)]
+        size = len(seqs)
         width = max(len(ids) for ids, _ in seqs) - 1
         x = torch.full((size, width), PAD, dtype=torch.long)
         y = torch.full((size, width), -100, dtype=torch.long)
@@ -415,14 +463,16 @@ class Vocab:
         assert len(self.stoi) == len(self.itos), "duplicate tokens"
 
     @classmethod
-    def build(cls, level_vocab_file, task="levels"):
-        """`levels`: special tokens, conditions, level words. `goblin` (or its old name `solve`):
+    def build(cls, level_vocab_file, task="levels", milestones=False):
+        """`levels`: special tokens, conditions, level words, then (`milestones`, a plan model)
+        the milestone words the level format doesn't have. `goblin` (or its old name `solve`):
         special tokens, level words, then the plan words the level format doesn't have; no
         conditions."""
         level = Path(level_vocab_file).read_text().split()
         if task in ("goblin", "solve"):
             return cls(SPECIAL + level + [w for w in PLAN_WORDS if w not in level])
-        return cls(SPECIAL + COND_TOKENS + level)
+        extra = [w for w in MILESTONE_WORDS if w not in level] if milestones else []
+        return cls(SPECIAL + COND_TOKENS + level + extra)
 
     def __len__(self):
         return len(self.itos)
@@ -437,12 +487,14 @@ class Vocab:
 class Levels:
     """All records of one split, as flat tensors."""
 
-    def __init__(self, level_ids, offsets, conds, any_ids, sources=None):
+    def __init__(self, level_ids, offsets, conds, any_ids, sources=None, ms_ids=None, ms_offsets=None):
         self.level_ids = level_ids  # int16, all levels end to end
         self.offsets = offsets  # int64, len N + 1
         self.conds = np.asarray(conds) if conds is not None else None  # one id per group
         self.any_ids = any_ids  # each group's `?`
         self.sources = sources  # `source(record)` of each, or None
+        # A plan model's: each level's milestones and the <sep> after them, end to end, or None.
+        self.ms_ids, self.ms_offsets = ms_ids, ms_offsets
 
     def __len__(self):
         return len(self.conds)
@@ -458,8 +510,9 @@ class Levels:
         p = random.uniform(0, drop)
         conds = [c if random.random() >= p else a for c, a in zip(self.conds[i].tolist(), self.any_ids)]
         level = self.level_ids[self.offsets[i] : self.offsets[i + 1]].tolist()
-        ids = [BOS] + conds + [SEP] + level + [EOS]
-        learn = [False] * (len(conds) + 2) + [True] * (len(level) + 1)
+        ms = self.ms_ids[self.ms_offsets[i] : self.ms_offsets[i + 1]].tolist() if self.ms_ids is not None else []
+        ids = [BOS] + conds + [SEP] + ms + level + [EOS]
+        learn = [False] * (len(conds) + 2) + [True] * (len(ms) + len(level) + 1)
         return ids, learn
 
     def batch(self, idx, drop, device, featurize=None):
@@ -467,7 +520,7 @@ class Levels:
         the number of targets (counted here, so the caller needn't wait on the GPU for it).
         With `featurize` (a model's, model.Spatial), the inputs are (ids, its features of them),
         worked out here on the CPU."""
-        seqs = [self.sequence(i, drop) for i in idx]
+        seqs = recoded([self.sequence(i, drop) for i in idx], featurize)
         width = max(len(ids) for ids, _ in seqs) - 1
         x = torch.full((len(seqs), width), PAD, dtype=torch.long)
         y = torch.full((len(seqs), width), -100, dtype=torch.long)
@@ -503,12 +556,18 @@ LEVEL_CACHE = Path(__file__).resolve().parent.parent / "data" / ".level-cache"
 
 
 def _level_buffers():
-    return [(array("h"), array("q", [0]), array("h"), array("B")) for _ in range(2)]
+    """Per split: level ids, their offsets, conditions, sources, milestone ids, their offsets."""
+    return [(array("h"), array("q", [0]), array("h"), array("B"), array("h"), array("q", [0]))
+            for _ in range(2)]
 
 
-def _read_level_file(path, vocab, block_size, cut, seed):
+def _read_level_file(path, vocab, block_size, cut, seed, labels=None):
+    """`labels` (a plan model's: milestones.key -> milestone words): only levels with
+    milestones are kept, each with them."""
     max_prefix = 2 + len(GROUPS)
     skipped = 0
+    if labels is not None:
+        import milestones as ms_mod
     splits = _level_buffers()
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -516,7 +575,14 @@ def _read_level_file(path, vocab, block_size, cut, seed):
                 continue
             r = json.loads(line)
             tokens = r["tokens"].split()
-            if max_prefix + len(tokens) + 1 > block_size:
+            ms = []
+            if labels is not None:
+                words = labels().get(ms_mod.key(r))
+                if words is None:
+                    skipped += 1
+                    continue
+                ms = vocab.encode(words) + [SEP]
+            if max_prefix + len(ms) + len(tokens) + 1 > block_size:
                 skipped += 1
                 continue
             try:
@@ -525,13 +591,15 @@ def _read_level_file(path, vocab, block_size, cut, seed):
                 skipped += 1
                 continue
             split = zlib.crc32(f"{seed} {identity(r)}".encode()) < cut
-            ids, offsets, conds, sources = splits[split]
+            ids, offsets, conds, sources, ms_ids, ms_offsets = splits[split]
             ids.extend(level)
             offsets.append(len(ids))
             conds.extend(vocab.encode(slots(_conditions(r, tokens))))
             sources.append(SOURCE_IDS[source(r)])
+            ms_ids.extend(ms)
+            ms_offsets.append(len(ms_ids))
     return [tuple(_as_tensor(a, dtype) for a, dtype in zip(split, (
-        torch.int16, torch.int64, torch.int16, torch.uint8))) for split in splits], skipped
+        torch.int16, torch.int64, torch.int16, torch.uint8, torch.int16, torch.int64))) for split in splits], skipped
 
 
 def _as_tensor(buffer, dtype):
@@ -543,23 +611,26 @@ def _file_stamp(path):
     return [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, stat.st_dev]
 
 
-def _cached_level_file(path, vocab, block_size, cut, seed, config):
+def _cached_level_file(path, vocab, block_size, cut, seed, config, labels=None, labels_path=None):
     path = Path(path).resolve()
     stamp = _file_stamp(path)
-    key = hashlib.sha256(os.fsencode(path)).hexdigest()
+    if labels_path is not None:  # a plan model's: its own cache, kept apart from the plain one
+        stamp = stamp + _file_stamp(Path(labels_path))
+    key = hashlib.sha256(os.fsencode(path) + (b"|" + os.fsencode(Path(labels_path).resolve())
+                                              if labels_path is not None else b"")).hexdigest()
     cache = LEVEL_CACHE / f"{key}.pt"
     try:
         if cache.is_file():
             saved_config, saved_stamp, splits, skipped = torch.load(
                 cache, map_location="cpu", weights_only=True, mmap=True)
-            if saved_config == config and saved_stamp == stamp and _file_stamp(path) == stamp:
+            if saved_config == config and saved_stamp == stamp and _file_stamp(path) == stamp[:5]:
                 return splits, skipped
             del splits  # release the mapped file before replacing it on Windows
     except (OSError, RuntimeError, ValueError, TypeError, EOFError, pickle.UnpicklingError):
         pass
 
-    splits, skipped = _read_level_file(path, vocab, block_size, cut, seed)
-    if _file_stamp(path) != stamp:
+    splits, skipped = _read_level_file(path, vocab, block_size, cut, seed, labels)
+    if _file_stamp(path) != stamp[:5]:
         return splits, skipped
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -576,33 +647,49 @@ def _cached_level_file(path, vocab, block_size, cut, seed, config):
     return splits, skipped
 
 
-def load(paths, vocab, block_size, val_share=0.05, seed=0):
+def load(paths, vocab, block_size, val_share=0.05, seed=0, milestones=None):
     """Train and validation `Levels` in input order, with a reusable encoded cache per JSONL.
 
     Records that don't fit are skipped. The seeded hash of each puzzle's identity determines
-    its split, keeping copies together even when they appear in different files.
+    its split, keeping copies together even when they appear in different files. `milestones`
+    (a plan model's: a labels file, milestones.py) keeps only the levels it labels, each with
+    its milestones; the others count as skipped.
     """
+    labels = None
+    if milestones is not None:
+        loaded = {}
+
+        def labels():  # read only if some file's cache is stale
+            if not loaded:
+                import milestones as ms_mod
+
+                loaded["labels"] = ms_mod.load(milestones)
+            return loaded["labels"]
     cut = int(val_share * 2**32)
     # Invalidate cached preprocessing when the encoder, vocabulary or split settings change.
     config = [hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), vocab.itos, block_size, cut, seed]
     skipped = 0
     combined = _level_buffers()
     for path in paths:
-        splits, dropped = _cached_level_file(path, vocab, block_size, cut, seed, config)
+        splits, dropped = _cached_level_file(path, vocab, block_size, cut, seed, config, labels, milestones)
         skipped += dropped
-        for (ids, offsets, conds, sources), (lv, off, cond, src) in zip(combined, splits):
+        for (ids, offsets, conds, sources, ms_ids, ms_offsets), (lv, off, cond, src, mlv, moff) in zip(
+                combined, splits):
             offsets.frombytes(memoryview(off[1:].numpy() + len(ids)).cast("B"))
             ids.frombytes(memoryview(lv.numpy()).cast("B"))
             conds.frombytes(memoryview(cond.numpy()).cast("B"))
             sources.frombytes(memoryview(src.numpy()))
+            ms_offsets.frombytes(memoryview(moff[1:].numpy() + len(ms_ids)).cast("B"))
+            ms_ids.frombytes(memoryview(mlv.numpy()).cast("B"))
         # Release the mapped file before a later input or process replaces its cache.
-        del splits, lv, off, cond, src
+        del splits, lv, off, cond, src, mlv, moff
     any_ids = vocab.encode(ANY.values())
     train, val = [
         Levels(_as_tensor(ids, torch.int16), _as_tensor(offsets, torch.int64),
                np.frombuffer(conds, dtype=np.int16).reshape(-1, len(GROUPS)),
-               any_ids, [LEVEL_SOURCES[i] for i in sources])
-        for ids, offsets, conds, sources in combined
+               any_ids, [LEVEL_SOURCES[i] for i in sources],
+               *((_as_tensor(ms_ids, torch.int16), _as_tensor(ms_offsets, torch.int64)) if milestones else ()))
+        for ids, offsets, conds, sources, ms_ids, ms_offsets in combined
     ]
     return train, val, skipped
 

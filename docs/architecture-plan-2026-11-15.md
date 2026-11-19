@@ -174,6 +174,52 @@ Code: 4 days.
 device attributes and wire endpoints intact, and generated records compile and reach the
 standard evaluator.
 
+**Built (2026-11-17):** `train/wire.py` (the form, `Tracker`, `Legal`, `check`), `model.Wire`
+(`--arch wire`), tests in `tests/test_wire.py` and `tests/test_arch.py`.
+- **Form:** the flat level with its wires taken out of the sender records and written after all
+  the items as `> @s @d`, where `@d` is the d-th item record (every item counts). A wire to a funnel
+  adds `funnel` or `polarity`. Wires are grouped by sender in device order, each sender's in
+  `encode`'s order. Item records keep the flat tokens unchanged, so the parser of run 2 (spatial)
+  finds their boundaries. The training data is rewritten as it is batched (`data.recoded`), not on
+  disk; on average the wire form is 0.4% longer.
+- **Model:** the GPT backbone (6×6×384), plus a device-slot embedding added to every token of a
+  device's record and to a pointer token, and 160 pointer outputs after the words. A pointer's
+  score is attention from the current position (a query) to each device's key, taken from the last
+  token of its record. Only devices already written that can be that end of the wire count:
+  senders (button, pedestal, catcher, relay), then receivers (exit, fizzler or laser field, poured
+  gel, laser, bridge, funnel, panel, glass panel, flip, stairs, piston, rail, dropper). Where a
+  pointer must come, words are ruled out (EOS at -1e4, so a row with nothing to point at can still
+  end). Adds about 0.16M parameters.
+- **Decoding:** constrained (`wire.Legal`): items as `tantalos-score grammar` allows them, minus
+  their wires; `>` or the end where the grammar lets the level end; then wires from a sender at or
+  after the last one, each to a receiver it doesn't already drive. This differs from the flat
+  grammar only in where wires go. Sampling compiles every level back to flat tokens
+  (`model.Wire.compile_ids`), so evaluation, `rated.py`, `abtest.py` and the workbench are
+  unchanged. A level that doesn't compile is written with `<wire-error>` and counts as unparsed.
+  `sample.generate` prints `wire: N of M levels didn't compile, W wires per level that did`.
+  Whether solutions use the wired mechanisms shows in rated.md's "solved: state changes" row.
+- **Not supported:** level prefixes (`--prefix`), value-head guidance and Goblin.
+- **Val loss** is over wire-form tokens, so it can't be compared with the flat arms' (Workshop
+  test loss neither).
+
+Readiness:
+- `train/wire.py check`: all 2,417,554 levels of `data/v5b/levels-*.jsonl` (12.75M wires) go
+  flat → wire → flat exactly: 0 errors, 0 mismatches. At most 154 devices in a level (160 slots).
+- `tests/test_wire.py` checks:
+  - the round trip of every target kind's counting;
+  - that `compile` refuses bad wires;
+  - that flags follow tokens;
+  - that the tracker gives the same features incrementally as over the whole sequence;
+  - that the cache gives one full pass's logits, with or without devices in the prompt;
+  - that pointers are masked to written devices of the right class;
+  - that a tiny model learns wired levels: greedy samples compile and match a full pass, and
+    constrained samples all compile and parse.
+- `tests/test_arch.py` runs the shared checks on the wire model too.
+- Smoke test (400 steps, block 1024, batch 16): 11.0M parameters, ~41k tok/s (as fast as the
+  GPT), 3.1 GB of GPU memory. After 400 steps, 12 of 16 unconstrained samples compiled.
+
+Start: `run.py start arch-wire-12h --hours 12 --note "..." -- --arch wire`.
+
 ### Run 5: solution-first planner and layout decoder, `arch-plan-12h`
 Two models, 12 hours in all:
 - **Layout decoder (9h):** today's GPT architecture trained on
@@ -197,6 +243,53 @@ For rated style, also prompt with plan length (`<planlen:6+>`) to ask for deep l
 Code: 4–5 days, mostly data.
 **Ready when:** the decoder produces working chambers for several held-out plans in a smoke
 run. The planner's 3h starts only after that.
+
+**Built (2026-11-18).** The code is in `train/milestones.py`, `model.Plan`, and `data.load(...,
+milestones=)`; the tests are `tests/test_milestones.py`.
+- **Milestones.** A milestone list abstracts a checked solver plan (src/plan.rs steps) and holds
+  no coordinates, so mirrored and turned copies share one.
+  - `walk`, `fire` and `exit` are dropped. `enter` and the mechanic words (knock, plate, bounce,
+    loop, ...) are kept.
+  - A cube taken names its kind: `pickup|grab|fetch KIND`.
+  - Letting go names where the cube goes: `putdown|toss|throw [button > targets | laser]`.
+  - A press names what it drives: `press|dash|reach|double > W...`.
+  - Repeated identical groups are written once.
+  - 41 words in all, at most 64 per level (5 levels were cut). They are appended to the vocabulary.
+- **Labels.** `milestones.py label` → `data/milestones/labels.jsonl` (data/milestones/BUILD.md).
+  - Levels: the default data plus `data/ws5/test.jsonl`, solvable rows only.
+  - Generated levels: `score --plan-only` at 50k with editor rules on, then `tantalos-score check`
+    replays every plan.
+  - Workshop puzzles: labelled once, on the r0 copy, at 500k with editor rules off; every
+    augmented copy shares that label.
+  - Result: 529,385 labelled levels (506k generated, 23k Workshop) from 309,056 distinct puzzles,
+    in 84 minutes.
+  - Not labelled: 36k generated levels whose solvable label the editor rules now reject, 21k
+    uncertain, 4k unsolvable, and 74 that failed the check.
+  - Lengths: 232k have 0–7 words, 207k 8–15 words, 70k 16–23 words, 20k 24 or more.
+- **One model, not two.** A single GPT (`--arch plan`) trains on `<bos> conds <sep> milestones
+  <sep> level <eos>`. Loss covers everything after the first `<sep>`, so the same model plans and
+  lays out. This is a deviation from the plan (a 9h decoder and a separate 3h planner): all 12
+  hours go to one model.
+  - Both evaluations are kept. `milestones.py eval CKPT` runs the decoder alone (prompted with
+    held-out validation milestones) and the whole chain (it writes its own). It reports
+    verdicts, then whether the solver's plans for the level match the declared milestones
+    exactly, or at least use their words. The solver's plans are up to 8 (`--plans 8`).
+  - Constrained decoding (`milestones.Legal`) allows milestone words until `<sep>`, with only
+    wire targets after `>`. After `<sep>` it applies the level grammar.
+- **What changes for this arm, and so isn't comparable:**
+  - **Solvable levels only.** It trains on labelled levels only, which drops unsolvable,
+    uncertain, `published` and unlabelled rows. That shrinks the Workshop share: about 22.7k
+    puzzles × 16 rows ≈ 364k of the file's 1.58M rows.
+  - **Losses.** Val, holdout and Workshop test loss include the milestone tokens and are over a
+    different set of rows, so they can't be compared with the other arms.
+  - **Prompts.** The model never sees `<verdict:published>`, so `rated.py` prompts a plan model
+    with `<verdict:solvable>`. `evaluate.py`'s rows for verdicts it never trained on (unsolvable,
+    uncertain) mean nothing for this arm.
+- **Training away.** Rejected levels get milestones live from the solver, or an empty list
+  (`<sep> <sep>`) when it has no plan.
+- **Grammar dead end, found while testing.** After a pedestal's `> exit > dropper 0`, the level
+  grammar offers `>` but then allows no target, so a sample that takes it ends unparsed. All
+  arms can hit this; src/grammar.rs has not been fixed.
 
 ### Run 6: state-conditioned encoder–decoder, `arch-state-12h`
 A small voxel encoder (3D conv over a grid at most 32³ of cell type + item type + facing,
@@ -338,8 +431,8 @@ in Notes.
 | arch-modern-12h | modern backbone | 10.8M | | 412 | 20 | 6.5 | 39.8 | | 408 | pending | trained in parts; its first 4 counted h held ~1.7 h of data loading (fixed in train.py 2026-11-15), so ~10.3 h of real training |
 | arch-spatial-12h | spatial embeddings | 10.9M | | 439 | 20 | 10.5 | 31.6 | | 502 | pending | paused once at 8.57 h; final model away/best.pt |
 | arch-value | value heads (on v7) | +0.67M heads | | 494 (plain 320) | 25 (plain 12) | 20.9 (plain 14.1) | | | — | pending | k=4, λ=0.25, seed 1, constrained, 512 each; sampling 3,914 s vs 894 s plain (4.4×). Guided levels are smaller (17 items vs 36, floor 70 vs 99), turrets 4% vs 28%, gel 0%; solvable 27% vs 14% but share of solved that are strong unchanged (16% vs 17%) |
-| arch-wire-12h | device-and-wire | | | | | | | | | | |
-| arch-plan-12h | planner + layout | | | | | | | | | | |
+| arch-wire-12h | device-and-wire | 11.0M | 3.1 GB (smoke) | 383 | 8 | 6.5 | 34.8 | | 410 | pending | paused once at 10.93 h; final model best.pt (away EVAL 28% vs 35%); Workshop test loss 0.8083 (away 0.7988), lowest of the arms, but val/ws loss are over wire-form tokens; game-valid 91.2% |
+| arch-plan-12h | planner + layout (one joint model) | | | 619 | 35 | 24.8 | 46.1 | | 627 | pending | solvable-labelled data only; rated prompt <verdict:solvable>; paused at 2.0, 2.5, 9.76 h; final model away/best.pt (away strong 41, gap 23.0); game-valid 91.6% (away 90.3%); losses not comparable |
 | arch-state-12h | state encoder | | | | | | | | | | |
 | arch-edit-12h | graph editor | | | | | | | | | | vs uniform edits: |
 | arch-diffusion-12h | masked diffusion | | | | | | | | | | |

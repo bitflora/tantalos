@@ -60,8 +60,12 @@ NEAR = 0.9
 
 
 def prompt(vocab):
+    """The Workshop prompt. A plan model (bake-off arm 5, train/milestones.py) trains only on
+    levels with checked plans, all `<verdict:solvable>`, so it is asked for that instead of
+    `published`, which it never saw."""
     tier = "<tier:best>" if "<tier:best>" in vocab.stoi else "<tier:top>"
-    return ["<verdict:published>", "<src:ws>", tier]
+    verdict = "<verdict:solvable>" if "pickup" in vocab.stoi else "<verdict:published>"
+    return [verdict, "<src:ws>", tier]
 
 
 def describe(tokens):
